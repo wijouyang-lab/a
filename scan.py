@@ -26,6 +26,7 @@ def get_a_share_data():
     ts.set_token(os.environ.get("TUSHARE_TOKEN"))
     pro = ts.pro_api()
     trade_date = (get_bj_time() - datetime.timedelta(days=1)).strftime('%Y%m%d')
+    
     df_daily = pro.daily(trade_date=trade_date)
     if df_daily is None or df_daily.empty:
         trade_date = (get_bj_time() - datetime.timedelta(days=2)).strftime('%Y%m%d')
@@ -37,16 +38,21 @@ def get_a_share_data():
     industry_map = dict(zip(basic['ts_code'], basic.get('industry', ['核心资产'] * len(basic))))
     
     final_pool = {}
+    # 按成交额排序，提取全市场最活跃的 Top 100 资金主战场
     df_sorted = df_daily.sort_values(by='amount', ascending=False).head(100)
     codes = [row['ts_code'] for _, row in df_sorted.iterrows()]
     
     for _, row in df_sorted.iterrows():
-        final_pool[row['ts_code']] = {
-            "Ticker": row['ts_code'], "Name": name_map.get(row['ts_code'], row['ts_code']),
-            "Industry": industry_map.get(row['ts_code'], "未知"), "Close": row['close'], 
-            "Amount": row['amount'], "Daily_Pct": row['pct_chg']
+        ts_code = row['ts_code']
+        final_pool[ts_code] = {
+            "Ticker": ts_code, 
+            "Name": name_map.get(ts_code, ts_code),
+            "Industry": industry_map.get(ts_code, "未知"), 
+            "Close": row['close'], 
+            "Amount": row['amount'], 
+            "Daily_Pct": row['pct_chg']
         }
-        
+            
     try:
         start_hist = (get_bj_time() - datetime.timedelta(days=100)).strftime('%Y%m%d')
         df_hist = pro.daily(ts_code=",".join(codes), start_date=start_hist, end_date=trade_date).sort_values(['ts_code', 'trade_date'])
@@ -66,43 +72,135 @@ def get_a_share_data():
                 final_pool[code]["RSI"] = round(rsi.iloc[-1], 2)
             else:
                 final_pool[code]["乖离率(%)"] = "数据不足"
-    except Exception as e: print(f"⚠️ 指标拉取受限: {e}")
+    except Exception as e: 
+        print(f"⚠️ 指标拉取受限: {e}")
+        
     return list(final_pool.values())
 
 def generate_ai_report(pool_data):
     client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
     today_str = get_bj_time().strftime('%Y年%m月%d日')
-    prompt = f'''你是一个私募策略总监。今天是{today_str}。基于以下A股数据：{json.dumps(pool_data[:100], ensure_ascii=False)}。
-    要求：结合宏观定调，选出MACD绿柱缩短且乖离率<15%的标的。严格用以下HTML骨架：
-    <div class="header-card"><h2>🌍 全局 Alpha 情报中心</h2><p><b>执行时间：</b>{today_str} 盘前</p><p><b>宏观驱动：</b>...</p></div>
-    <div class="market-section"><div class="market-title">🇨🇳 A股主战场</div>
-    <div class="card core-card"><h3>[核心双龙] 1. [名称] ([代码])</h3><p><span class="tag bg-red">🔥 逻辑:</span>...</p><p><span class="tag bg-blue">📈 技术:</span>...</p><p><span class="tag bg-purple">📊 筹码:</span>...</p><p><span class="tag bg-orange">⚠️ 风控:</span>...</p></div>
-    <div class="card core-card"><h3>[核心双龙] 2. [名称] ([代码])</h3>...同上...</div>
-    <div class="card sub-card"><h3>[梯队先锋] 3. [名称] ([代码])</h3><p><span class="tag bg-gray">📉 均线:</span>...</p><p><span class="tag bg-green">⚔️ 资金:</span>...</p><p><span class="tag bg-orange">⚠️ 风控:</span>...</p></div>
-    <div class="card sub-card"><h3>[梯队先锋] 4. [名称] ([代码])</h3>...同上...</div>
-    <div class="card obs-card"><h3>⚠️ 筛落组诊断 (Rank 5-10)</h3><ul><li><b>5. [名称]:</b>...</li><li>6到10名同理...</li></ul></div></div>
-    <div class="card trap-card"><h3>🚨 诱多对照组（严禁接盘）</h3><ul><li><b>11. [名称] | <span class="bear-text">诊断：看跌</span></b><br>❌ 诱多技术面...<br>⚠️ 致命硬伤...</li><li>12名同理...</li></ul></div>'''
-    response = client.models.generate_content(model=TARGET_MODEL, contents=prompt, config=types.GenerateContentConfig(temperature=0.2))
+    
+    prompt = f'''
+    你是一个顶级私募策略总监。今天是{today_str}。基于以下A股数据池：
+    {json.dumps(pool_data, ensure_ascii=False)}
+    
+    【核心任务】：选出全市场最顶尖的标的！不要顾虑之前是否推荐过，只要数据目前是最优的，就选它。
+    1. 必须选出MACD绿柱缩短（或金叉）且乖离率<15%的标的。
+    2. 【排他性红线】：一封报告内，同一只股票绝对不能在双龙、先锋、诱多组中重复出现！
+    
+    严格复制以下HTML骨架并填空（必须保留emoji和span标签）：
+    
+    <div class="header-card">
+        <h2>🌍 全局 Alpha 情报中心</h2>
+        <p><b>执行时间：</b>{today_str} 盘前</p>
+        <p><b>宏观驱动：</b>(结合地缘和产业叙事，不少于100字)</p>
+    </div>
+    
+    <div class="market-section">
+        <div class="market-title">🇨🇳 A股主战场</div>
+        
+        <div class="card core-card">
+            <h3>[核心双龙] 1. [名称] ([代码])</h3>
+            <p><span class="tag bg-red">🔥 宏观情报与起爆逻辑:</span> (阐述主力炒作意图)</p>
+            <p><span class="tag bg-blue">📈 技术面多周期共振:</span> (引用乖离率、MACD、RSI真实数据)</p>
+            <p><span class="tag bg-purple">📊 EV估值与筹码测算:</span> (分析筹码集中度或估值优势)</p>
+            <p><span class="tag bg-orange">⚠️ 潜伏与风控底线:</span> (必须明确【预计持股周期(天数)】和【具体止损位(价格)】)</p>
+        </div>
+        <div class="card core-card">
+            <h3>[核心双龙] 2. [名称] ([代码])</h3>
+            <p><span class="tag bg-red">🔥 宏观情报与起爆逻辑:</span> (阐述主力炒作意图)</p>
+            <p><span class="tag bg-blue">📈 技术面多周期共振:</span> (引用真实数据)</p>
+            <p><span class="tag bg-purple">📊 EV估值与筹码测算:</span> (分析筹码或估值)</p>
+            <p><span class="tag bg-orange">⚠️ 潜伏与风控底线:</span> (必须明确【预计持股周期(天数)】和【具体止损位(价格)】)</p>
+        </div>
+        
+        <div class="card sub-card">
+            <h3>[梯队先锋] 3. [名称] ([代码])</h3>
+            <p><span class="tag bg-gray">📉 均线与周期:</span> (结合中期趋势)</p>
+            <p><span class="tag bg-green">⚔️ 事件驱动与资金:</span> (分析催化剂)</p>
+            <p><span class="tag bg-orange">⚠️ 潜伏与风控底线:</span> (必须明确【持股周期】及【止损位】)</p>
+        </div>
+        <div class="card sub-card">
+            <h3>[梯队先锋] 4. [名称] ([代码])</h3>
+            <p><span class="tag bg-gray">📉 均线与周期:</span> (结合中期趋势)</p>
+            <p><span class="tag bg-green">⚔️ 事件驱动与资金:</span> (分析催化剂)</p>
+            <p><span class="tag bg-orange">⚠️ 潜伏与风控底线:</span> (必须明确【持股周期】及【止损位】)</p>
+        </div>
+        
+        <div class="card obs-card">
+            <h3>⚠️ 筛落组诊断 (Rank 5-10)</h3>
+            <ul>
+                <li><b>5. [名称]:</b> (说明其硬伤)</li>
+                <li><b>6. [名称]:</b> (说明其硬伤)</li>
+                <li><b>7. [名称]:</b> (说明其硬伤)</li>
+                <li><b>8. [名称]:</b> (说明其硬伤)</li>
+                <li><b>9. [名称]:</b> (说明其硬伤)</li>
+                <li><b>10. [名称]:</b> (说明其硬伤)</li>
+            </ul>
+        </div>
+    </div>
+    
+    <div class="card trap-card">
+        <h3>🚨 诱多对照组（严禁接盘）</h3>
+        <ul>
+            <li><b>11. [名称] | <span class="bear-text">诊断：看跌</span></b><br>❌ 诱多技术面：...<br>⚠️ 致命硬伤：...</li>
+            <li><b>12. [名称] | <span class="bear-text">诊断：看跌</span></b><br>❌ 诱多技术面：...<br>⚠️ 致命硬伤：...</li>
+        </ul>
+    </div>
+    '''
+    
+    response = client.models.generate_content(
+        model=TARGET_MODEL, 
+        contents=prompt, 
+        config=types.GenerateContentConfig(temperature=0.1) # 降低温度，只求最精准的最优解
+    )
     return response.text.replace("```html", "").replace("```", "").strip()
 
 def build_email(ai_html):
-    style = "<style>body{font-family:sans-serif;background:#f4f6f9;color:#333;padding:20px;line-height:1.6}.container{max-width:1000px;margin:0 auto}.header-card{background:#eaf4ff;border-radius:8px;padding:25px;margin-bottom:25px;border-left:6px solid #1976d2}.card{background:#fff;border-radius:10px;padding:25px;margin-bottom:25px;box-shadow:0 4px 15px rgba(0,0,0,.06)}.core-card{border-left:6px solid #d32f2f}.sub-card{border-left:6px solid #546e7a}.obs-card{background:#fffcf9;border-left:6px solid #ff9800}.trap-card{background:#fbfcfe;border-left:6px solid #607d8b}.tag{display:inline-block;padding:4px 10px;border-radius:4px;font-weight:bold;font-size:13px;color:#fff;margin-right:8px}.bg-red{background:#d32f2f}.bg-blue{background:#455a64}.bg-purple{background:#d84315}.bg-orange{background:#e64a19}.bg-gray{background:#607d8b}.bg-green{background:#37474f}</style>"
+    style = """
+    <style>
+        body{font-family:sans-serif;background:#f4f6f9;color:#333;padding:20px;line-height:1.6}
+        .container{max-width:1000px;margin:0 auto}
+        .header-card{background:#eaf4ff;border-radius:8px;padding:25px;margin-bottom:25px;border-left:6px solid #1976d2}
+        .card{background:#fff;border-radius:10px;padding:25px;margin-bottom:25px;box-shadow:0 4px 15px rgba(0,0,0,.06)}
+        .core-card{border-left:6px solid #d32f2f}
+        .sub-card{border-left:6px solid #546e7a}
+        .obs-card{background:#fffcf9;border-left:6px solid #ff9800}
+        .trap-card{background:#fbfcfe;border-left:6px solid #607d8b}
+        .tag{display:inline-block;padding:4px 10px;border-radius:4px;font-weight:bold;font-size:13px;color:#fff;margin-right:8px}
+        .bg-red{background:#d32f2f}
+        .bg-blue{background:#455a64}
+        .bg-purple{background:#d84315}
+        .bg-orange{background:#e64a19}
+        .bg-gray{background:#607d8b}
+        .bg-green{background:#37474f}
+    </style>
+    """
     return f"<!DOCTYPE html><html><head><meta charset='utf-8'>{style}</head><body><div class='container'>{ai_html}</div></body></html>"
 
 def send_emails(html_content):
-    acc, pwd = os.environ.get("EMAIL_ACCOUNT"), os.environ.get("EMAIL_PASSWORD")
-    if not acc or not pwd: return
+    acc = os.environ.get("EMAIL_ACCOUNT")
+    pwd = os.environ.get("EMAIL_PASSWORD")
+    email_list_str = os.environ.get("TARGET_EMAILS")
+    
+    if not acc or not pwd or not email_list_str: 
+        print("⚠️ 邮箱配置或收件人名单缺失，跳过发送。")
+        return
+        
     msg = MIMEMultipart()
     msg['Subject'], msg['From'] = "【波段内参】全球跨市场 Alpha雷达扫描", f"Alpha Radar <{acc}>"
     msg.attach(MIMEText(html_content, 'html'))
-    targets = ["907359319@qq.com", "minyongoy@live.cn", "rudi25581148@163.com", "501158937@qq.com"]
+    targets = email_list_str.split(",")
+    
     try:
         server = smtplib.SMTP_SSL('smtp.gmail.com', 465)
         server.login(acc, pwd)
         server.sendmail(acc, targets, msg.as_string()) # Bcc 密送
         server.quit()
-        print("✅ 邮件密送成功！")
-    except Exception as e: print(f"🚨 邮件发送失败: {e}")
+        print(f"✅ 邮件密送成功至 {len(targets)} 个节点！")
+    except Exception as e: 
+        print(f"🚨 邮件发送失败: {e}")
 
 if __name__ == "__main__":
     raw_pool = get_a_share_data()
@@ -119,9 +217,13 @@ if __name__ == "__main__":
                 item['Tag'] = tag
                 chosen.append(item)
         
-        with open("trade_history.csv", "a", encoding="utf-8") as f:
-            if not os.path.exists("trade_history.csv") or os.path.getsize("trade_history.csv") == 0:
+        # 写入历史账本（不做任何拦截，只做客观记录）
+        log_file = "trade_history.csv"
+        with open(log_file, "a", encoding="utf-8") as f:
+            if not os.path.exists(log_file) or os.path.getsize(log_file) == 0:
                 f.write("Date,Ticker,Name,Tag,Industry,Close_Price,Amount,Daily_Pct\n")
             ts = get_bj_time().strftime('%Y-%m-%d')
-            for i in chosen: f.write(f"{ts},{i['Ticker']},{i['Name']},{i['Tag']},{i.get('Industry','未知')},{i['Close']},{i['Amount']},{i['Daily_Pct']}\n")
+            for i in chosen: 
+                f.write(f"{ts},{i['Ticker']},{i['Name']},{i['Tag']},{i.get('Industry','未知')},{i['Close']},{i['Amount']},{i['Daily_Pct']}\n")
+        
         send_emails(full_html)
