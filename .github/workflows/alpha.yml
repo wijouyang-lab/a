@@ -1,0 +1,40 @@
+name: Alpha Radar Engine
+
+on:
+  workflow_dispatch:
+  schedule:
+    # 每天北京时间早上 8:00 (UTC 0:00) 自动运行
+    - cron: '0 0 * * 1-5'
+
+jobs:
+  run-quant:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      
+    steps:
+    - name: Checkout Code
+      uses: actions/checkout@v3
+      
+    - name: Setup Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.10'
+        
+    - name: Install Libs
+      run: pip install pandas tushare google-genai
+      
+    - name: Run Scan & Send Email
+      env:
+        TUSHARE_TOKEN: ${{ secrets.TUSHARE_TOKEN }}
+        GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        EMAIL_ACCOUNT: ${{ secrets.EMAIL_ACCOUNT }}
+        EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
+      run: python scan.py
+      
+    - name: Save Log
+      run: |
+        git config --local user.email "action@github.com"
+        git config --local user.name "Alpha Bot"
+        git add trade_history.csv report.html || true
+        git diff --quiet && git diff --staged --quiet || (git commit -m "Auto update scan log" && git push)
