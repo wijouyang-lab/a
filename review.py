@@ -2,6 +2,7 @@
 import pandas as pd
 import datetime
 import os
+import sys
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
@@ -51,16 +52,23 @@ def ai_reflect(data):
     return res.text.replace("```html", "").replace("```", "").strip()
 
 def send_review(html):
-    acc, pwd = os.environ.get("EMAIL_ACCOUNT"), os.environ.get("EMAIL_PASSWORD")
-    if not acc or not pwd: return
+    acc = os.environ.get("EMAIL_ACCOUNT")
+    pwd = os.environ.get("EMAIL_PASSWORD")
+    email_list_str = os.environ.get("TARGET_EMAILS")
+    
+    if not acc or not pwd or not email_list_str: return
     msg = MIMEMultipart()
     msg['Subject'], msg['From'] = "【盘后反思】Alpha Radar 进化报告", f"Alpha Radar <{acc}>"
     msg.attach(MIMEText(html, 'html'))
+    
+    targets = email_list_str.split(",")
+    
     try:
         server = smtplib.SMTP_SSL('smtp.gmail.com', 465)
         server.login(acc, pwd)
-        server.sendmail(acc, ["907359319@qq.com", "minyongoy@live.cn", "rudi25581148@163.com", "501158937@qq.com"], msg.as_string())
+        server.sendmail(acc, targets, msg.as_string())
         server.quit()
+        print("✅ 盘后报告发送成功！")
     except Exception as e: pass
 
 if __name__ == "__main__":
