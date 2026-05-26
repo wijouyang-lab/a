@@ -3,8 +3,10 @@ name: Alpha Radar Engine
 on:
   workflow_dispatch:
   schedule:
-    # 每天北京时间早上 8:00 (UTC 0:00) 自动运行
+    # 任务1：早盘扫描 (北京时间早上 8:00，UTC 0:00)
     - cron: '0 0 * * 1-5'
+    # 任务2：盘后复盘 (北京时间下午 17:00，UTC 9:00)
+    - cron: '0 9 * * 1-5'
 
 jobs:
   run-quant:
@@ -24,15 +26,27 @@ jobs:
     - name: Install Libs
       run: pip install pandas tushare google-genai
       
-    - name: Run Scan & Send Email
+    # ==========================
+    # 核心分流逻辑：根据时间跑不同的脚本
+    # ==========================
+    - name: Run Script Based on Time
       env:
         TUSHARE_TOKEN: ${{ secrets.TUSHARE_TOKEN }}
         GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         EMAIL_ACCOUNT: ${{ secrets.EMAIL_ACCOUNT }}
         EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
-        # 👇 安全注入收件人名单
         TARGET_EMAILS: ${{ secrets.TARGET_EMAILS }}
-      run: python scan.py
+      run: |
+        CURRENT_HOUR=$(date +'%H')
+        # 如果是 UTC 时间 0点到5点之间 (北京早盘)，跑 scan.py
+        if [ "$CURRENT_HOUR" -lt 5 ]; then
+          echo "🌅 启动早盘选股引擎 (scan.py)..."
+          python scan.py
+        else
+          # 否则 (北京盘后)，跑 review.py
+          echo "🌆 启动盘后归因与进化引擎 (review.py)..."
+          python review.py
+        fi
       
     - name: Save Log
       run: |
