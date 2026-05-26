@@ -30,6 +30,8 @@ jobs:
         GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         EMAIL_ACCOUNT: ${{ secrets.EMAIL_ACCOUNT }}
         EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
+        # 👇 安全注入收件人名单
+        TARGET_EMAILS: ${{ secrets.TARGET_EMAILS }}
       run: python scan.py
       
     - name: Save Log
