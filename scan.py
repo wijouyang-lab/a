@@ -217,7 +217,7 @@ if __name__ == "__main__":
                 item['Tag'] = tag
                 chosen.append(item)
         
-        # 写入历史账本（不做任何拦截，只做客观记录）
+        # 写入历史账本 csv
         log_file = "trade_history.csv"
         with open(log_file, "a", encoding="utf-8") as f:
             if not os.path.exists(log_file) or os.path.getsize(log_file) == 0:
@@ -226,4 +226,8 @@ if __name__ == "__main__":
             for i in chosen: 
                 f.write(f"{ts},{i['Ticker']},{i['Name']},{i['Tag']},{i.get('Industry','未知')},{i['Close']},{i['Amount']},{i['Daily_Pct']}\n")
         
+        # 【新增】：顺手把发给邮件的 HTML 也在本地存一份
+        with open("report.html", "w", encoding="utf-8") as f:
+            f.write(full_html)
+            
         send_emails(full_html)
