@@ -105,27 +105,27 @@ def generate_ai_report(pool_data):
             <p><span class="tag bg-red">🔥 宏观情报与起爆逻辑:</span> (阐述主力炒作意图)</p>
             <p><span class="tag bg-blue">📈 技术面多周期共振:</span> (引用乖离率、MACD、RSI真实数据)</p>
             <p><span class="tag bg-purple">📊 EV估值与筹码测算:</span> (分析筹码集中度或估值优势)</p>
-            <p><span class="tag bg-orange">⚠️ 潜伏与风控底线:</span> (必须明确【预计持股周期(天数)】和【具体止损位(价格)】)</p>
+            <p><span class="tag bg-orange">⚠️ 潜伏与风控底线:</span> 周期:[X-Y天] | 止损:[具体价格或百分比]</p>
         </div>
         <div class="card core-card">
             <h3>[核心双龙] 2. [名称] ([代码])</h3>
             <p><span class="tag bg-red">🔥 宏观情报与起爆逻辑:</span> (阐述主力炒作意图)</p>
             <p><span class="tag bg-blue">📈 技术面多周期共振:</span> (引用真实数据)</p>
             <p><span class="tag bg-purple">📊 EV估值与筹码测算:</span> (分析筹码或估值)</p>
-            <p><span class="tag bg-orange">⚠️ 潜伏与风控底线:</span> (必须明确【预计持股周期(天数)】和【具体止损位(价格)】)</p>
+            <p><span class="tag bg-orange">⚠️ 潜伏与风控底线:</span> 周期:[X-Y天] | 止损:[具体价格或百分比]</p>
         </div>
         
         <div class="card sub-card">
             <h3>[梯队先锋] 3. [名称] ([代码])</h3>
             <p><span class="tag bg-gray">📉 均线与周期:</span> (结合中期趋势)</p>
             <p><span class="tag bg-green">⚔️ 事件驱动与资金:</span> (分析催化剂)</p>
-            <p><span class="tag bg-orange">⚠️ 潜伏与风控底线:</span> (必须明确【持股周期】及【止损位】)</p>
+            <p><span class="tag bg-orange">⚠️ 潜伏与风控底线:</span> 周期:[X-Y天] | 止损:[具体价格或百分比]</p>
         </div>
         <div class="card sub-card">
             <h3>[梯队先锋] 4. [名称] ([代码])</h3>
             <p><span class="tag bg-gray">📉 均线与周期:</span> (结合中期趋势)</p>
             <p><span class="tag bg-green">⚔️ 事件驱动与资金:</span> (分析催化剂)</p>
-            <p><span class="tag bg-orange">⚠️ 潜伏与风控底线:</span> (必须明确【持股周期】及【止损位】)</p>
+            <p><span class="tag bg-orange">⚠️ 潜伏与风控底线:</span> 周期:[X-Y天] | 止损:[具体价格或百分比]</p>
         </div>
         
         <div class="card obs-card">
@@ -153,7 +153,7 @@ def generate_ai_report(pool_data):
     response = client.models.generate_content(
         model=TARGET_MODEL, 
         contents=prompt, 
-        config=types.GenerateContentConfig(temperature=0.1) # 降低温度，只求最精准的最优解
+        config=types.GenerateContentConfig(temperature=0.1) 
     )
     return response.text.replace("```html", "").replace("```", "").strip()
 
@@ -189,14 +189,14 @@ def send_emails(html_content):
         return
         
     msg = MIMEMultipart()
-    msg['Subject'], msg['From'] = "【波段内参】全球跨市场 Alpha雷达扫描", f"Alpha Radar <{acc}>"
+    msg['Subject'], msg['From'] = "【波段内参】A股雷达核心打分榜单", f"Alpha Radar <{acc}>"
     msg.attach(MIMEText(html_content, 'html'))
-    targets = email_list_str.split(",")
+    targets = [e.strip() for e in email_list_str.split(",")]
     
     try:
         server = smtplib.SMTP_SSL('smtp.gmail.com', 465)
         server.login(acc, pwd)
-        server.sendmail(acc, targets, msg.as_string()) # Bcc 密送
+        server.sendmail(acc, targets, msg.as_string())
         server.quit()
         print(f"✅ 邮件密送成功至 {len(targets)} 个节点！")
     except Exception as e: 
@@ -207,26 +207,39 @@ if __name__ == "__main__":
     if raw_pool:
         ai_html = generate_ai_report(raw_pool)
         full_html = build_email(ai_html)
-        chosen = []
-        for item in raw_pool:
-            if item['Name'] in ai_html:
-                tag = "Avoid_Thunder"
-                if re.search(r'\[核心双龙\][^<]*?' + re.escape(item['Name']), ai_html): tag = "Core_Double_Dragon"
-                elif re.search(r'\[梯队先锋\][^<]*?' + re.escape(item['Name']), ai_html): tag = "Sub_Pioneer"
-                elif re.search(r'(11\.|12\.)[^<]*?' + re.escape(item['Name']), ai_html): tag = "Trap_Warning"
-                item['Tag'] = tag
-                chosen.append(item)
         
-        # 写入历史账本 csv
+        # 🎯 核心升级：精确提取周期和止损
+        chosen = []
+        blocks = re.split(r'<div class="card', ai_html) # 将 AI 输出按卡片切块，防止数据串位
+        
+        for item in raw_pool:
+            for block in blocks:
+                if item['Name'] in block:
+                    tag = "Trap_Warning"
+                    if "[核心双龙]" in block: tag = "Core_Double_Dragon"
+                    elif "[梯队先锋]" in block: tag = "Sub_Pioneer"
+                    
+                    # 🔍 正则匹配出周期和止损
+                    period_match = re.search(r'周期:\s*([^|]+)', block)
+                    sl_match = re.search(r'止损:\s*([^<]+)', block)
+                    
+                    item['Tag'] = tag
+                    item['Hold_Period'] = period_match.group(1).strip() if period_match else "N/A"
+                    item['Stop_Loss'] = sl_match.group(1).strip() if sl_match else "N/A"
+                    
+                    chosen.append(item)
+                    break
+        
+        # 🗂️ 写入历史账本 csv (新增两列)
         log_file = "trade_history.csv"
         with open(log_file, "a", encoding="utf-8") as f:
             if not os.path.exists(log_file) or os.path.getsize(log_file) == 0:
-                f.write("Date,Ticker,Name,Tag,Industry,Close_Price,Amount,Daily_Pct\n")
+                # 写入表头，增加 Hold_Period 和 Stop_Loss
+                f.write("Date,Ticker,Name,Tag,Industry,Close_Price,Amount,Daily_Pct,Hold_Period,Stop_Loss\n")
             ts = get_bj_time().strftime('%Y-%m-%d')
             for i in chosen: 
-                f.write(f"{ts},{i['Ticker']},{i['Name']},{i['Tag']},{i.get('Industry','未知')},{i['Close']},{i['Amount']},{i['Daily_Pct']}\n")
+                f.write(f"{ts},{i['Ticker']},{i['Name']},{i['Tag']},{i.get('Industry','未知')},{i['Close']},{i['Amount']},{i['Daily_Pct']},{i['Hold_Period']},{i['Stop_Loss']}\n")
         
-        # 【新增】：顺手把发给邮件的 HTML 也在本地存一份
         with open("report.html", "w", encoding="utf-8") as f:
             f.write(full_html)
             
