@@ -219,28 +219,29 @@ if __name__ == "__main__":
                     if "[核心双龙]" in block: tag = "Core_Double_Dragon"
                     elif "[梯队先锋]" in block: tag = "Sub_Pioneer"
                     
-                   # 🔍 终极严谨正则：强制匹配 "底线" 后面的周期，避开"均线与周期"的干扰
-                    # 同时兼容 AI 用 "|" 或者 "," 分隔的情况
+                    # 🔍 终极严谨正则：强制匹配 "底线" 后面的周期
                     period_match = re.search(r'风控底线:</span>\s*周期:\[?([^\s|<,\]]+)', block)
-                    
-                    # 抓取止损位，兼容 AI 不写"止损:"直接用逗号隔开的情况
                     sl_match = re.search(r'止损:\[?([^<\]]+)', block)
                     if not sl_match:
-                        # 如果没找到"止损:"关键字，尝试抓取周期后面跟着的文字
                         sl_match = re.search(r'风控底线:</span>\s*周期:[^|,<]+[|,<]\s*([^<]+)', block)
                     
                     item['Tag'] = tag
                     item['Hold_Period'] = period_match.group(1).strip() if period_match else "N/A"
                     
-                    # 清理止损价里的冗余 HTML 标签
                     raw_sl = sl_match.group(1).strip() if sl_match else "N/A"
                     item['Stop_Loss'] = re.sub(r'</?p>', '', raw_sl).strip()
+                    
+                    # 🚨 致命错误修复：就是漏了这一行！必须把处理好的股票装进列表！
+                    chosen.append(item)
+                    break
         
         # 🗂️ 写入历史账本 csv (新增两列)
         log_file = "trade_history.csv"
+        # 修复逻辑：必须在 open 前检查大小，否则 open("a") 会瞬间创建文件导致大小为0
+        need_header = not os.path.exists(log_file) or os.path.getsize(log_file) == 0
+        
         with open(log_file, "a", encoding="utf-8") as f:
-            if not os.path.exists(log_file) or os.path.getsize(log_file) == 0:
-                # 写入表头，增加 Hold_Period 和 Stop_Loss
+            if need_header:
                 f.write("Date,Ticker,Name,Tag,Industry,Close_Price,Amount,Daily_Pct,Hold_Period,Stop_Loss\n")
             ts = get_bj_time().strftime('%Y-%m-%d')
             for i in chosen: 
