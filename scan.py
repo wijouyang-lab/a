@@ -219,16 +219,22 @@ if __name__ == "__main__":
                     if "[核心双龙]" in block: tag = "Core_Double_Dragon"
                     elif "[梯队先锋]" in block: tag = "Sub_Pioneer"
                     
-                    # 🔍 正则匹配出周期和止损
-                    period_match = re.search(r'周期:\s*([^|]+)', block)
-                    sl_match = re.search(r'止损:\s*([^<]+)', block)
+                   # 🔍 终极严谨正则：强制匹配 "底线" 后面的周期，避开"均线与周期"的干扰
+                    # 同时兼容 AI 用 "|" 或者 "," 分隔的情况
+                    period_match = re.search(r'风控底线:</span>\s*周期:\[?([^\s|<,\]]+)', block)
+                    
+                    # 抓取止损位，兼容 AI 不写"止损:"直接用逗号隔开的情况
+                    sl_match = re.search(r'止损:\[?([^<\]]+)', block)
+                    if not sl_match:
+                        # 如果没找到"止损:"关键字，尝试抓取周期后面跟着的文字
+                        sl_match = re.search(r'风控底线:</span>\s*周期:[^|,<]+[|,<]\s*([^<]+)', block)
                     
                     item['Tag'] = tag
                     item['Hold_Period'] = period_match.group(1).strip() if period_match else "N/A"
-                    item['Stop_Loss'] = sl_match.group(1).strip() if sl_match else "N/A"
                     
-                    chosen.append(item)
-                    break
+                    # 清理止损价里的冗余 HTML 标签
+                    raw_sl = sl_match.group(1).strip() if sl_match else "N/A"
+                    item['Stop_Loss'] = re.sub(r'</?p>', '', raw_sl).strip()
         
         # 🗂️ 写入历史账本 csv (新增两列)
         log_file = "trade_history.csv"
