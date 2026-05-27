@@ -52,6 +52,6 @@ jobs:
       run: |
         git config --local user.email "action@github.com"
         git config --local user.name "Alpha Bot"
-        # 即使找不到文件也不报错，且提交时如果没更新就不推，保持仓库清爽
-        git add trade_history.csv report.html review_report.html || true
-        git diff --quiet && git diff --staged --quiet || (git commit -m "Auto update scan log" && git push)
+        git add -A
+        git diff --quiet && git diff --staged --quiet || git commit -m "Auto update scan log"
+        git push
