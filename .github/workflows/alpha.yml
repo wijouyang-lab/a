@@ -1,11 +1,10 @@
 name: A-Share Alpha Radar
-
 on:
   workflow_dispatch:
   schedule:
-    # 任务1: A股盘前选股 (北京时间 09:00，UTC 01:00)
-    - cron: '0 1 * * 1-5'
-    # 任务2: A股盘后复盘 (北京时间 16:00，UTC 08:00)
+    # 任务1: 新加坡时间 07:00 盘前选股 (UTC 23:00 前一天)
+    - cron: '0 23 * * 0-4'
+    # 任务2: 新加坡时间 16:00 盘后复盘 (UTC 08:00)
     - cron: '0 8 * * 1-5'
 
 jobs:
@@ -24,24 +23,25 @@ jobs:
         python-version: '3.12'
 
     - name: Install Libs
-      run: pip install pandas tushare requests google-genai
+      run: pip install pandas tushare requests anthropic
 
     - name: ⏱️ Run Script Based on Time (智能分流)
       env:
         TUSHARE_TOKEN: ${{ secrets.TUSHARE_TOKEN }}
-        GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        CLAWSOCKET_API_KEY: ${{ secrets.CLAWSOCKET_API_KEY }}
+        CLAWSOCKET_BASE_URL: ${{ secrets.CLAWSOCKET_BASE_URL }}
         EMAIL_ACCOUNT: ${{ secrets.EMAIL_ACCOUNT }}
         EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
         TARGET_EMAILS: ${{ secrets.TARGET_EMAILS }}
       run: |
         CURRENT_HOUR=$(date +'%H')
-        # 如果是 UTC 时间 0点~4点 之间 (北京时间早上)，跑选股！
-        if [ "$CURRENT_HOUR" -ge 0 ] && [ "$CURRENT_HOUR" -le 4 ]; then
-          echo "🌅 触发【盘前选股】引擎 (北京时间 09:00)..."
+        # UTC 23:00 跑盘前选股 (新加坡时间 07:00)
+        if [ "$CURRENT_HOUR" -eq 23 ]; then
+          echo "🌅 触发【盘前选股】引擎 (新加坡时间 07:00)..."
           python scan.py
-        # 其他时间跑复盘！
+        # UTC 08:00 跑盘后复盘 (新加坡时间 16:00)
         else
-          echo "🌙 触发【盘后复盘】引擎 (北京时间 16:00)..."
+          echo "🌙 触发【盘后复盘】引擎 (新加坡时间 16:00)..."
           python review.py || true
         fi
 
