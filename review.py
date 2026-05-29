@@ -5,8 +5,7 @@ import os
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
-from google import genai
-from google.genai import types
+import anthropic
 
 BEIJING_TZ = datetime.timezone(datetime.timedelta(hours=8))
 def get_bj_time():
@@ -16,7 +15,7 @@ if get_bj_time().weekday() >= 5:
     print("🚨 周末休市，退出复盘。")
     import sys; sys.exit(0)
 
-TARGET_MODEL = 'gemini-3.1-pro-preview'
+TARGET_MODEL = 'claude-opus-4-7-20260416'
 print("🔍 启动 A 股盘后复盘引擎 (Review Engine)...")
 
 # ==========================================
@@ -30,7 +29,6 @@ if not os.path.exists(log_file):
 try:
     df = pd.read_csv(log_file)
     df['Date'] = pd.to_datetime(df['Date'])
-    # 只看最近 7 天的票，符合波段操作逻辑
     cutoff_date = get_bj_time() - datetime.timedelta(days=7)
     recent_picks = df[df['Date'] >= cutoff_date.replace(tzinfo=None)].copy()
     if recent_picks.empty:
@@ -50,7 +48,6 @@ pro = ts.pro_api()
 trade_date = get_bj_time().strftime('%Y%m%d')
 df_daily = pro.daily(trade_date=trade_date)
 if df_daily is None or df_daily.empty:
-    # 遇到节假日或尚未出数据，取前一交易日
     trade_date = (get_bj_time() - datetime.timedelta(days=1)).strftime('%Y%m%d')
     df_daily = pro.daily(trade_date=trade_date)
 
@@ -64,7 +61,6 @@ for index, row in recent_picks.iterrows():
     
     if cur_price:
         pnl_pct = ((cur_price - rec_price) / rec_price) * 100
-        # 计算持仓天数
         days_held = (get_bj_time().replace(tzinfo=None) - row['Date']).days
         
         review_data.append({
@@ -85,9 +81,13 @@ if not review_data:
     import sys; sys.exit(0)
 
 # ==========================================
-# 3. Gemini 纪律审判
+# 3. Claude 纪律审判
 # ==========================================
-client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
+client = anthropic.Anthropic(
+    api_key=os.environ.get("CLAWSOCKET_API_KEY"),
+    base_url=os.environ.get("CLAWSOCKET_BASE_URL")
+)
+
 prompt = f"""
 你是顶级量化风控总监。以下是系统近几日推荐的 A 股标的及当前真实数据（包含预计持股周期和止损价）：
 {review_data}
@@ -104,12 +104,18 @@ prompt = f"""
     <h3 style="margin: 0 0 10px 0;">[推演日期] | [股票名称] ([代码])</h3>
     <p><b>预计周期:</b> [持股周期] (已持仓 [已持仓天数] 天) | <b>止损位:</b> [止损价]</p>
     <p><b>推荐价:</b> ¥[价格] ➔ <b>现价:</b> ¥[价格] | <b>实际盈亏:</b> <span style="font-weight: bold; color: [盈利填#d32f2f, 亏损填#388e3c];">[PnL]%</span></p>
-    <p><span style="background: #607d8b; color: #fff; padding: 2px 6px; border-radius: 4px; font-size: 12px;">风控动作指令</span> (基于现价是否跌破止损位，或者已持仓天数是否超过预期，给出最冷血的纪律应对：如“触发止损无条件出局”、“持股周期内正常洗盘”、“达到预期建议止盈”)</p>
+    <p><span style="background: #607d8b; color: #fff; padding: 2px 6px; border-radius: 4px; font-size: 12px;">风控动作指令</span> (基于现价是否跌破止损位，或者已持仓天数是否超过预期，给出最冷血的纪律应对：如"触发止损无条件出局"、"持股周期内正常洗盘"、"达到预期建议止盈")</p>
 </div>
 """
+
 try:
-    res = client.models.generate_content(model=TARGET_MODEL, contents=prompt, config=types.GenerateContentConfig(temperature=0.1))
-    ai_html = res.text.replace("```html", "").replace("```", "").strip()
+    message = client.messages.create(
+        model=TARGET_MODEL,
+        max_tokens=4096,
+        temperature=0.1,
+        messages=[{"role": "user", "content": prompt}]
+    )
+    ai_html = message.content[0].text.replace("```html", "").replace("```", "").strip()
 except Exception as e:
     ai_html = f"<p>复盘生成失败: {e}</p>"
 
