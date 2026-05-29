@@ -7,8 +7,7 @@ import re
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
-from google import genai
-from google.genai import types
+import anthropic
 
 BEIJING_TZ = datetime.timezone(datetime.timedelta(hours=8))
 def get_bj_time():
@@ -19,7 +18,7 @@ if today >= 5:
     print("🚨 周末不开盘，退出早盘扫描。")
     import sys; sys.exit(0)
 
-TARGET_MODEL = 'gemini-3.1-pro-preview'
+TARGET_MODEL = 'claude-opus-4-7-20260416'
 
 def get_a_share_data():
     import tushare as ts
@@ -38,7 +37,6 @@ def get_a_share_data():
     industry_map = dict(zip(basic['ts_code'], basic.get('industry', ['核心资产'] * len(basic))))
     
     final_pool = {}
-    # 按成交额排序，提取全市场最活跃的 Top 100 资金主战场
     df_sorted = df_daily.sort_values(by='amount', ascending=False).head(100)
     codes = [row['ts_code'] for _, row in df_sorted.iterrows()]
     
@@ -78,7 +76,10 @@ def get_a_share_data():
     return list(final_pool.values())
 
 def generate_ai_report(pool_data):
-    client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
+    client = anthropic.Anthropic(
+        api_key=os.environ.get("CLAWSOCKET_API_KEY"),
+        base_url=os.environ.get("CLAWSOCKET_BASE_URL")
+    )
     today_str = get_bj_time().strftime('%Y年%m月%d日')
     
     prompt = f'''
@@ -150,12 +151,13 @@ def generate_ai_report(pool_data):
     </div>
     '''
     
-    response = client.models.generate_content(
-        model=TARGET_MODEL, 
-        contents=prompt, 
-        config=types.GenerateContentConfig(temperature=0.1) 
+    message = client.messages.create(
+        model=TARGET_MODEL,
+        max_tokens=4096,
+        temperature=0.1,
+        messages=[{"role": "user", "content": prompt}]
     )
-    return response.text.replace("```html", "").replace("```", "").strip()
+    return message.content[0].text.replace("```html", "").replace("```", "").strip()
 
 def build_email(ai_html):
     style = """
@@ -208,9 +210,8 @@ if __name__ == "__main__":
         ai_html = generate_ai_report(raw_pool)
         full_html = build_email(ai_html)
         
-        # 🎯 核心升级：精确提取周期和止损
         chosen = []
-        blocks = re.split(r'<div class="card', ai_html) # 将 AI 输出按卡片切块，防止数据串位
+        blocks = re.split(r'<div class="card', ai_html)
         
         for item in raw_pool:
             for block in blocks:
@@ -219,7 +220,6 @@ if __name__ == "__main__":
                     if "[核心双龙]" in block: tag = "Core_Double_Dragon"
                     elif "[梯队先锋]" in block: tag = "Sub_Pioneer"
                     
-                    # 🔍 终极严谨正则：强制匹配 "底线" 后面的周期
                     period_match = re.search(r'风控底线:</span>\s*周期:\[?([^\s|<,\]]+)', block)
                     sl_match = re.search(r'止损:\[?([^<\]]+)', block)
                     if not sl_match:
@@ -231,13 +231,10 @@ if __name__ == "__main__":
                     raw_sl = sl_match.group(1).strip() if sl_match else "N/A"
                     item['Stop_Loss'] = re.sub(r'</?p>', '', raw_sl).strip()
                     
-                    # 🚨 致命错误修复：就是漏了这一行！必须把处理好的股票装进列表！
                     chosen.append(item)
                     break
         
-        # 🗂️ 写入历史账本 csv (新增两列)
         log_file = "trade_history.csv"
-        # 修复逻辑：必须在 open 前检查大小，否则 open("a") 会瞬间创建文件导致大小为0
         need_header = not os.path.exists(log_file) or os.path.getsize(log_file) == 0
         
         with open(log_file, "a", encoding="utf-8") as f:
