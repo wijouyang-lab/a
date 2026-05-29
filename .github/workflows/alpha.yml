@@ -35,14 +35,9 @@ jobs:
         TARGET_EMAILS: ${{ secrets.TARGET_EMAILS }}
       run: |
         CURRENT_HOUR=$(date +'%H')
-        # UTC 23:00 跑盘前选股 (新加坡时间 07:00)
-        if [ "$CURRENT_HOUR" -eq 23 ]; then
-          echo "🌅 触发【盘前选股】引擎 (新加坡时间 07:00)..."
+        if [ "$CURRENT_HOUR" -ge 0 ] && [ "$CURRENT_HOUR" -le 23 ]; then
+          echo "🌅 强制触发【盘前选股】引擎..."
           python scan.py
-        # UTC 08:00 跑盘后复盘 (新加坡时间 16:00)
-        else
-          echo "🌙 触发【盘后复盘】引擎 (新加坡时间 16:00)..."
-          python review.py || true
         fi
 
     - name: 💾 Save Logs & Sync to GitHub
