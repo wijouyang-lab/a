@@ -245,8 +245,8 @@ if __name__ == "__main__":
                 continue
 
             # 其他标签正常抓取周期和止损
-            period_match = re.search(r'周期\s*[:：]\s*\[?([^\s|<,\]]+)', chunk)
-            sl_match = re.search(r'止损\s*[:：]\s*\[?([^\s<\]|]+)', chunk)
+            period_match = re.search(r'周期\s*[:：]\s*\[?(\d+[-~]\d+天|\d+天|观望)', chunk)
+            sl_match = re.search(r'止损\s*[:：]\s*\[?(\d+\.?\d*元?%?|-\d+\.?\d*%?)', chunk)
 
             item['Tag'] = tag
             item['Hold_Period'] = period_match.group(1).strip() if period_match else "N/A"
