@@ -18,7 +18,7 @@ if today >= 5:
     print("🚨 周末不开盘，退出早盘扫描。")
     import sys; sys.exit(0)
 
-TARGET_MODEL = 'claude-opus-4-7-20260416'
+TARGET_MODEL = 'claude-opus-4-7'
 
 def get_a_share_data():
     import tushare as ts
