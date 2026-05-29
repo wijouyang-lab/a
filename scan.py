@@ -88,7 +88,7 @@ def generate_ai_report(pool_data):
     
     【核心任务】：选出全市场最顶尖的标的！不要顾虑之前是否推荐过，只要数据目前是最优的，就选它。
     1. 必须选出MACD绿柱缩短（或金叉）且乖离率<15%的标的。
-    2. 【排他性红线】：一封报告内，同一只股票绝对不能在双龙、先锋、诱多组中重复出现！
+    2. 【排他性红线】：一封报告内，同一只股票绝对不能在双龙、先锋、筛落组、诱多组中重复出现！
     
     严格复制以下HTML骨架并填空（必须保留emoji和span标签）：
     
@@ -130,14 +130,14 @@ def generate_ai_report(pool_data):
         </div>
         
         <div class="card obs-card">
-            <h3>⚠️ 筛落组诊断 (Rank 5-10)</h3>
+            <h3>[筛落组] ⚠️ 观察池诊断 (Rank 5-10)</h3>
             <ul>
-                <li><b>5. [名称]:</b> (说明其硬伤)</li>
-                <li><b>6. [名称]:</b> (说明其硬伤)</li>
-                <li><b>7. [名称]:</b> (说明其硬伤)</li>
-                <li><b>8. [名称]:</b> (说明其硬伤)</li>
-                <li><b>9. [名称]:</b> (说明其硬伤)</li>
-                <li><b>10. [名称]:</b> (说明其硬伤)</li>
+                <li><b>5. [名称] ([代码]):</b> (说明其硬伤) <br><span class="tag bg-orange">⚠️ 风控:</span> 周期:[X-Y天或观望] | 止损:[具体价格]</li>
+                <li><b>6. [名称] ([代码]):</b> (说明其硬伤) <br><span class="tag bg-orange">⚠️ 风控:</span> 周期:[X-Y天或观望] | 止损:[具体价格]</li>
+                <li><b>7. [名称] ([代码]):</b> (说明其硬伤) <br><span class="tag bg-orange">⚠️ 风控:</span> 周期:[X-Y天或观望] | 止损:[具体价格]</li>
+                <li><b>8. [名称] ([代码]):</b> (说明其硬伤) <br><span class="tag bg-orange">⚠️ 风控:</span> 周期:[X-Y天或观望] | 止损:[具体价格]</li>
+                <li><b>9. [名称] ([代码]):</b> (说明其硬伤) <br><span class="tag bg-orange">⚠️ 风控:</span> 周期:[X-Y天或观望] | 止损:[具体价格]</li>
+                <li><b>10. [名称] ([代码]):</b> (说明其硬伤) <br><span class="tag bg-orange">⚠️ 风控:</span> 周期:[X-Y天或观望] | 止损:[具体价格]</li>
             </ul>
         </div>
     </div>
@@ -145,8 +145,8 @@ def generate_ai_report(pool_data):
     <div class="card trap-card">
         <h3>🚨 诱多对照组（严禁接盘）</h3>
         <ul>
-            <li><b>11. [名称] | <span class="bear-text">诊断：看跌</span></b><br>❌ 诱多技术面：...<br>⚠️ 致命硬伤：...</li>
-            <li><b>12. [名称] | <span class="bear-text">诊断：看跌</span></b><br>❌ 诱多技术面：...<br>⚠️ 致命硬伤：...</li>
+            <li><b>11. [名称] ([代码]) | <span class="bear-text">诊断：看跌</span></b><br>❌ 诱多技术面：...<br>⚠️ 致命硬伤：...</li>
+            <li><b>12. [名称] ([代码]) | <span class="bear-text">诊断：看跌</span></b><br>❌ 诱多技术面：...<br>⚠️ 致命硬伤：...</li>
         </ul>
     </div>
     '''
@@ -211,29 +211,48 @@ if __name__ == "__main__":
         full_html = build_email(ai_html)
         
         chosen = []
-        blocks = re.split(r'<div class="card', ai_html)
-        
+        # 净化整个 HTML 为纯文本，方便全局扫描
+        clean_html = re.sub(r'<[^>]+>', ' ', ai_html)
+        clean_html = re.sub(r'\s+', ' ', clean_html)
+
         for item in raw_pool:
-            for block in blocks:
-                if item['Name'] in block:
-                    tag = "Trap_Warning"
-                    if "[核心双龙]" in block: tag = "Core_Double_Dragon"
-                    elif "[梯队先锋]" in block: tag = "Sub_Pioneer"
-                    
-                    period_match = re.search(r'风控底线:</span>\s*周期:\[?([^\s|<,\]]+)', block)
-                    sl_match = re.search(r'止损:\[?([^<\]]+)', block)
-                    if not sl_match:
-                        sl_match = re.search(r'风控底线:</span>\s*周期:[^|,<]+[|,<]\s*([^<]+)', block)
-                    
-                    item['Tag'] = tag
-                    item['Hold_Period'] = period_match.group(1).strip() if period_match else "N/A"
-                    
-                    raw_sl = sl_match.group(1).strip() if sl_match else "N/A"
-                    item['Stop_Loss'] = re.sub(r'</?p>', '', raw_sl).strip()
-                    
-                    chosen.append(item)
-                    break
-        
+            ticker_str = str(item['Name'])
+            idx = clean_html.find(ticker_str)
+            if idx == -1:
+                continue
+
+            chunk = clean_html[idx:idx+800]
+
+            # 判断标签
+            tag = "Trap_Warning"
+            # 往前找200字符判断所属区块
+            pre_chunk = clean_html[max(0, idx-200):idx]
+            if "[核心双龙]" in pre_chunk or "[核心双龙]" in chunk:
+                tag = "Core_Double_Dragon"
+            elif "[梯队先锋]" in pre_chunk or "[梯队先锋]" in chunk:
+                tag = "Sub_Pioneer"
+            elif "[筛落组]" in pre_chunk or "筛落组" in pre_chunk:
+                tag = "Observation"
+            elif "诱多对照组" in pre_chunk or "严禁接盘" in pre_chunk:
+                tag = "Trap_Warning"
+
+            # Trap 直接填写固定值，不需要抓取
+            if tag == "Trap_Warning":
+                item['Tag'] = tag
+                item['Hold_Period'] = "坚决空仓"
+                item['Stop_Loss'] = "绝对规避"
+                chosen.append(item)
+                continue
+
+            # 其他标签正常抓取周期和止损
+            period_match = re.search(r'周期\s*[:：]\s*\[?([^\s|<,\]]+)', chunk)
+            sl_match = re.search(r'止损\s*[:：]\s*\[?([^\s<\]|]+)', chunk)
+
+            item['Tag'] = tag
+            item['Hold_Period'] = period_match.group(1).strip() if period_match else "N/A"
+            item['Stop_Loss'] = sl_match.group(1).strip() if sl_match else "N/A"
+            chosen.append(item)
+
         log_file = "trade_history.csv"
         need_header = not os.path.exists(log_file) or os.path.getsize(log_file) == 0
         
