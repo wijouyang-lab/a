@@ -2,10 +2,9 @@ name: A-Share Alpha Radar
 on:
   workflow_dispatch:
   schedule:
-    # 任务1: 新加坡时间 07:00 盘前选股 (UTC 23:00 前一天)
-    - cron: '0 23 * * 0-4'
-    # 任务2: 新加坡时间 16:00 盘后复盘 (UTC 08:00)
-    - cron: '0 8 * * 1-5'
+    - cron: '0 23 * * 0-4'   # 新加坡时间周一至周五 07:00 选股
+    - cron: '0 8 * * 1-5'    # 新加坡时间周一至周五 16:00 复盘
+    - cron: '0 10 * * 5'     # 新加坡时间每周五 18:00 进化
 
 jobs:
   run-quant:
@@ -33,20 +32,24 @@ jobs:
         EMAIL_ACCOUNT: ${{ secrets.EMAIL_ACCOUNT }}
         EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
         TARGET_EMAILS: ${{ secrets.TARGET_EMAILS }}
-     run: |
+      run: |
         CURRENT_HOUR=$(date +'%H')
+        CURRENT_DAY=$(date +'%u')
         if [ "$CURRENT_HOUR" -eq 23 ]; then
-          echo "🌅 触发【盘前选股】引擎 (新加坡时间 07:00)..."
+          echo "🌅 触发【盘前选股】引擎..."
           python scan.py
+        elif [ "$CURRENT_DAY" -eq 5 ] && [ "$CURRENT_HOUR" -eq 10 ]; then
+          echo "🧬 触发【自动进化】引擎..."
+          python evolve.py
         else
-          echo "🌙 触发【盘后复盘】引擎 (新加坡时间 16:00)..."
+          echo "🌙 触发【盘后复盘】引擎..."
           python review.py || true
         fi
 
     - name: 💾 Save Logs & Sync to GitHub
       run: |
-        git config --local user.email "action@github.com"
-        git config --local user.name "Alpha Bot"
+        git config --global user.email "action@github.com"
+        git config --global user.name "Alpha Bot"
         git add -A
-        git diff --quiet && git diff --staged --quiet || git commit -m "Auto update A-share logs"
+        git diff --quiet && git diff --staged --quiet || git commit -m "🧬 Auto evolve scan.py"
         git push
