@@ -12,14 +12,14 @@ def get_bj_time():
     return datetime.datetime.now(BEIJING_TZ)
 
 if get_bj_time().weekday() >= 5:
-    print("🚨 周末休市，退出复盘。")
+    print("周末休市，退出复盘。")
     import sys; sys.exit(0)
 
 TARGET_MODEL = 'claude-opus-4-7'
-print("🔍 启动 A 股盘后复盘引擎 (Review Engine)...")
+print("启动 A 股盘后复盘引擎...")
 
 # ==========================================
-# 1. 读取账本 (包含最新的持股周期和止损价)
+# 1. 读取账本
 # ==========================================
 log_file = "trade_history.csv"
 if not os.path.exists(log_file):
@@ -120,10 +120,26 @@ except Exception as e:
     ai_html = f"<p>复盘生成失败: {e}</p>"
 
 # ==========================================
-# 4. 发送绝密邮件
+# 4. 复盘结果写入 review_history.csv
+# ==========================================
+review_log = "review_history.csv"
+need_header = not os.path.exists(review_log) or os.path.getsize(review_log) == 0
+try:
+    with open(review_log, "a", encoding="utf-8") as f:
+        if need_header:
+            f.write("Review_Date,Ticker,Name,Tag,Rec_Date,Rec_Price,Cur_Price,Days_Held,PnL_Pct,Hold_Period,Stop_Loss\n")
+        review_date = get_bj_time().strftime('%Y-%m-%d')
+        for item in review_data:
+            f.write(f"{review_date},{item['代码']},{item['名称']},{item['标签']},{item['推荐日期']},{item['推荐价']},{item['现价']},{item['已持仓天数']},{item['盈亏']},{item['持股周期']},{item['止损价']}\n")
+    print("✅ 复盘结果已写入 review_history.csv")
+except Exception as e:
+    print(f"⚠️ 复盘写入失败: {e}")
+
+# ==========================================
+# 5. 发送邮件
 # ==========================================
 style = "body{font-family:sans-serif; background:#f4f6f9; padding:20px; color:#333; line-height:1.6} .container{max-width:900px; margin:0 auto; background:#fff; padding:30px; border-radius:10px; box-shadow:0 4px 15px rgba(0,0,0,0.05)}"
-full_html = f"<!DOCTYPE html><html><head><meta charset='utf-8'><style>{style}</style></head><body><div class='container'><h1 style='color:#37474f; text-align:center;'>🛡️ Alpha 雷达 A股盘后复盘</h1>{ai_html}</div></body></html>"
+full_html = f"<!DOCTYPE html><html><head><meta charset='utf-8'><style>{style}</style></head><body><div class='container'><h1 style='color:#37474f; text-align:center;'>Alpha 雷达 A股盘后复盘</h1>{ai_html}</div></body></html>"
 
 def send_mail():
     acc, pwd = os.environ.get("EMAIL_ACCOUNT"), os.environ.get("EMAIL_PASSWORD")
@@ -131,13 +147,16 @@ def send_mail():
     if not acc or not email_list_str: return
     targets = [e.strip() for e in email_list_str.split(",")]
     
-    msg = MIMEMultipart(); msg['From'] = acc; msg['Subject'] = f"🛡️【盘后清算】A股风控纪律与复盘 ({get_bj_time().strftime('%Y-%m-%d')})"
+    msg = MIMEMultipart()
+    msg['From'] = acc
+    msg['Subject'] = f"【盘后清算】A股风控纪律与复盘 ({get_bj_time().strftime('%Y-%m-%d')})"
     msg.attach(MIMEText(full_html, 'html'))
     try:
         with smtplib.SMTP_SSL("smtp.gmail.com", 465) as s:
             s.login(acc, pwd)
             s.sendmail(acc, targets, msg.as_string())
             print("✅ 复盘报告密送成功！")
-    except Exception as e: print(f"❌ 发送失败: {e}")
+    except Exception as e:
+        print(f"❌ 发送失败: {e}")
 
 send_mail()
