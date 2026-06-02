@@ -55,9 +55,9 @@ for tag in recent['Tag'].unique():
 print(f"📊 近30天整体胜率: {overall_win_rate}% | 各标签: {stats}")
 
 # ==========================================
-# 2. 判断是否需要进化（胜率低于55%才触发）
+# 2. 判断是否需要进化（胜率低于70%才触发）
 # ==========================================
-EVOLVE_THRESHOLD = 55
+EVOLVE_THRESHOLD = 70
 
 if overall_win_rate >= EVOLVE_THRESHOLD:
     print(f"✅ 胜率 {overall_win_rate}% 达标，本周无需进化。")
