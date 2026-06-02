@@ -87,7 +87,7 @@ prompt = f"""
 你是一个量化策略优化专家。以下是当前量化选股系统的表现数据和代码。
 
 【近30天表现】：
-整体胜率：{overall_win_rate}%（目标>55%）
+整体胜率：{overall_win_rate}%（目标>70%）
 各标签细分：{stats}
 近期20条样本：
 {recent.tail(20).to_string()}
