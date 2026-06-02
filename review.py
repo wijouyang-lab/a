@@ -15,7 +15,7 @@ if get_bj_time().weekday() >= 5:
     print("周末休市，退出复盘。")
     import sys; sys.exit(0)
 
-TARGET_MODEL = 'claude-opus-4-8'
+TARGET_MODEL = 'claude-sonnet-4-6'
 print("启动 A 股盘后复盘引擎...")
 
 # ==========================================
