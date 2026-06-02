@@ -29,8 +29,11 @@ if not os.path.exists(log_file):
 try:
     df = pd.read_csv(log_file)
     df['Date'] = pd.to_datetime(df['Date'])
-    cutoff_date = get_bj_time() - datetime.timedelta(days=7)
-    recent_picks = df[df['Date'] >= cutoff_date.replace(tzinfo=None)].copy()
+    cutoff_date = get_bj_time() - datetime.timedelta(days=14)
+recent_picks = df[df['Date'] >= cutoff_date.replace(tzinfo=None)].copy()
+# 每只票只保留最新一条，去掉重复
+recent_picks = recent_picks.sort_values('Date', ascending=False)
+recent_picks = recent_picks.drop_duplicates(subset='Ticker', keep='first')
     if recent_picks.empty:
         print("⚠️ 近期无操作记录，跳过。")
         import sys; sys.exit(0)
