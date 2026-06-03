@@ -1,11 +1,11 @@
-name: A-Share Review
+name: A-Share Evolve
 on:
   workflow_dispatch:
   schedule:
-    - cron: '0 8 * * 1-5'
+    - cron: '0 10 * * 5'
 
 jobs:
-  run-review:
+  run-evolve:
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -18,7 +18,7 @@ jobs:
         python-version: '3.12'
     - name: Install Libs
       run: pip install pandas tushare requests anthropic
-    - name: Run Review
+    - name: Run Evolve
       env:
         TUSHARE_TOKEN: ${{ secrets.TUSHARE_TOKEN }}
         CLAWSOCKET_API_KEY: ${{ secrets.CLAWSOCKET_API_KEY }}
@@ -26,11 +26,11 @@ jobs:
         EMAIL_ACCOUNT: ${{ secrets.EMAIL_ACCOUNT }}
         EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
         TARGET_EMAILS: ${{ secrets.TARGET_EMAILS }}
-      run: python review.py || true
+      run: python evolve.py || true
     - name: Save Logs
       run: |
         git config --global user.email "action@github.com"
         git config --global user.name "Alpha Bot"
         git add -A
-        git diff --quiet && git diff --staged --quiet || git commit -m "Auto update logs"
+        git diff --quiet && git diff --staged --quiet || git commit -m "Auto evolve"
         git push
