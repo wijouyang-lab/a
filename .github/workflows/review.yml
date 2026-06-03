@@ -5,7 +5,7 @@ on:
     - cron: '0 8 * * 1-5'
 
 jobs:
-  run-quant:
+  run-review:
     runs-on: ubuntu-latest
     permissions:
       contents: write
