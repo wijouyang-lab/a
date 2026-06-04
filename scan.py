@@ -13,9 +13,16 @@ BEIJING_TZ = datetime.timezone(datetime.timedelta(hours=8))
 def get_bj_time():
     return datetime.datetime.now(BEIJING_TZ)
 
+# 周末不执行
 today = get_bj_time().weekday()
 if today >= 5:
-    print("🚨 周末不开盘，退出早盘扫描。")
+    print("周末不开盘，退出早盘扫描。")
+    import sys; sys.exit(0)
+
+# 时间检查：只在北京时间 06:00 - 15:00 之间执行
+bj_hour = get_bj_time().hour
+if bj_hour < 6 or bj_hour >= 15:
+    print(f"现在是北京时间 {bj_hour} 点，不在交易时段（6-15点），跳过扫描。")
     import sys; sys.exit(0)
 
 TARGET_MODEL = 'claude-opus-4-8'
@@ -211,7 +218,6 @@ if __name__ == "__main__":
         full_html = build_email(ai_html)
         
         chosen = []
-        # 净化整个 HTML 为纯文本，方便全局扫描
         clean_html = re.sub(r'<[^>]+>', ' ', ai_html)
         clean_html = re.sub(r'\s+', ' ', clean_html)
 
@@ -223,9 +229,7 @@ if __name__ == "__main__":
 
             chunk = clean_html[idx:idx+800]
 
-            # 判断标签
             tag = "Trap_Warning"
-            # 往前找200字符判断所属区块
             pre_chunk = clean_html[max(0, idx-200):idx]
             if "[核心双龙]" in pre_chunk or "[核心双龙]" in chunk:
                 tag = "Core_Double_Dragon"
@@ -236,7 +240,6 @@ if __name__ == "__main__":
             elif "诱多对照组" in pre_chunk or "严禁接盘" in pre_chunk:
                 tag = "Trap_Warning"
 
-            # Trap 直接填写固定值，不需要抓取
             if tag == "Trap_Warning":
                 item['Tag'] = tag
                 item['Hold_Period'] = "坚决空仓"
@@ -244,7 +247,6 @@ if __name__ == "__main__":
                 chosen.append(item)
                 continue
 
-            # 其他标签正常抓取周期和止损
             period_match = re.search(r'周期\s*[:：]\s*\[?(\d+[-~]\d+天|\d+天|观望)', chunk)
             sl_match = re.search(r'止损\s*[:：]\s*\[?(\d+\.?\d*元?%?|-\d+\.?\d*%?)', chunk)
 
