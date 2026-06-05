@@ -13,9 +13,6 @@ BEIJING_TZ = datetime.timezone(datetime.timedelta(hours=8))
 def get_bj_time():
     return datetime.datetime.now(BEIJING_TZ)
 
-# ==========================================
-# 1. 读取 review_history.csv 计算真实胜率
-# ==========================================
 review_log = "review_history.csv"
 if not os.path.exists(review_log):
     print("⚠️ 复盘账本不存在，跳过进化。需要先积累复盘数据。")
@@ -33,7 +30,6 @@ except Exception as e:
     print(f"⚠️ 复盘账本读取失败: {e}")
     exit(1)
 
-# 用真实盈亏计算胜率
 overall_win_rate = 0
 if 'PnL_Pct' in recent.columns:
     recent['PnL_Pct'] = pd.to_numeric(recent['PnL_Pct'], errors='coerce')
@@ -41,7 +37,6 @@ if 'PnL_Pct' in recent.columns:
     if len(valid) > 0:
         overall_win_rate = round((valid['PnL_Pct'] > 0).sum() / len(valid) * 100, 1)
 
-# 各标签细分统计
 stats = {}
 for tag in recent['Tag'].unique():
     group = recent[recent['Tag'] == tag].copy()
@@ -58,20 +53,13 @@ for tag in recent['Tag'].unique():
 
 print(f"📊 近30天真实胜率: {overall_win_rate}% | 各标签: {stats}")
 
-# ==========================================
-# 2. 判断是否需要进化（胜率低于60%才触发）
-# ==========================================
 EVOLVE_THRESHOLD = 60
-
 if overall_win_rate >= EVOLVE_THRESHOLD:
     print(f"✅ 胜率 {overall_win_rate}% 达标，本周无需进化。")
     exit(0)
 
 print(f"⚠️ 胜率 {overall_win_rate}% 低于 {EVOLVE_THRESHOLD}%，触发进化引擎...")
 
-# ==========================================
-# 3. 读取当前 scan.py
-# ==========================================
 try:
     with open("scan.py", "r", encoding="utf-8") as f:
         current_scan_code = f.read()
@@ -79,9 +67,6 @@ except Exception as e:
     print(f"⚠️ 读取 scan.py 失败: {e}")
     exit(1)
 
-# ==========================================
-# 4. Claude 生成改进方案
-# ==========================================
 client = anthropic.Anthropic(
     api_key=os.environ.get("CLAWSOCKET_API_KEY"),
     base_url=os.environ.get("CLAWSOCKET_BASE_URL")
@@ -125,62 +110,48 @@ prompt = f"""
 ===CODE_END===
 """
 
-try:
-    message = client.messages.create(
-        model="claude-sonnet-4-6",
-        max_tokens=8000,
-        temperature=0.2,
-        messages=[{"role": "user", "content": prompt}]
-    )
-    raw_output = message.content[0].text
-    print("✅ Claude 进化方案生成完毕。")
-except Exception as e:
-    print(f"❌ Claude 调用失败: {e}")
-    exit(1)
+# 流式输出，避免524超时
+raw_output = ""
+with client.messages.stream(
+    model="claude-opus-4-8",
+    max_tokens=8000,
+    temperature=0.2,
+    messages=[{"role": "user", "content": prompt}]
+) as stream:
+    for text in stream.text_stream:
+        raw_output += text
 
-# ==========================================
-# 5. 解析报告和代码
-# ==========================================
+print("✅ Claude 进化方案生成完毕。")
+
 report_html = ""
 new_code = ""
 
 try:
     if "===REPORT_START===" in raw_output and "===REPORT_END===" in raw_output:
         report_html = raw_output.split("===REPORT_START===")[1].split("===REPORT_END===")[0].strip()
-
     if "===CODE_START===" in raw_output and "===CODE_END===" in raw_output:
         new_code = raw_output.split("===CODE_START===")[1].split("===CODE_END===")[0].strip()
         new_code = new_code.replace("```python", "").replace("```", "").strip()
-
     if not new_code:
         print("⚠️ 未能提取到新代码，终止进化。")
         exit(1)
-
 except Exception as e:
     print(f"⚠️ 解析失败: {e}")
     exit(1)
 
-# ==========================================
-# 6. 备份旧版本，自动覆盖
-# ==========================================
 try:
     backup_name = f"scan_backup_{get_bj_time().strftime('%Y%m%d')}.py"
     with open(backup_name, "w", encoding="utf-8") as f:
         f.write(current_scan_code)
     print(f"✅ 旧版本已备份至 {backup_name}")
-
     with open("scan.py", "w", encoding="utf-8") as f:
         f.write(f"# 自动进化版本 | 时间: {get_bj_time().strftime('%Y-%m-%d %H:%M')} | 触发胜率: {overall_win_rate}%\n\n")
         f.write(new_code)
     print("✅ scan.py 已自动更新！")
-
 except Exception as e:
     print(f"❌ 文件写入失败: {e}")
     exit(1)
 
-# ==========================================
-# 7. 只发给自己（EMAIL_ACCOUNT）
-# ==========================================
 def send_evolve_mail(report_html, win_rate, backup_name):
     user = os.environ.get("EMAIL_ACCOUNT")
     pwd = os.environ.get("EMAIL_PASSWORD")
@@ -194,9 +165,7 @@ def send_evolve_mail(report_html, win_rate, backup_name):
         <p>如果发现新版本有问题，把备份文件内容复制回 scan.py 即可回滚。</p>
     </div>
     """
-
     style = "<style>body{font-family:sans-serif;background:#f4f6f9;color:#333;padding:20px;line-height:1.6}.container{max-width:900px;margin:0 auto;background:#fff;padding:30px;border-radius:10px;}</style>"
-
     full_html = f"""<!DOCTYPE html><html><head><meta charset='utf-8'>{style}</head>
     <body><div class='container'>
     <h1 style='color:#d32f2f;text-align:center;'>A股 scan.py 已自动进化</h1>
