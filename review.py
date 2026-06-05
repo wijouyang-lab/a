@@ -15,18 +15,14 @@ if get_bj_time().weekday() >= 5:
     print("周末休市，退出复盘。")
     import sys; sys.exit(0)
 
-# 时间检查：只在北京时间 15:00 之后执行复盘
 bj_hour = get_bj_time().hour
 if bj_hour < 15:
     print(f"现在是北京时间 {bj_hour} 点，A股尚未收盘，跳过复盘。")
     import sys; sys.exit(0)
 
-TARGET_MODEL = 'claude-sonnet-4-6'
+TARGET_MODEL = 'claude-opus-4-8'
 print("启动 A 股盘后复盘引擎...")
 
-# ==========================================
-# 1. 读取账本
-# ==========================================
 log_file = "trade_history.csv"
 if not os.path.exists(log_file):
     print("⚠️ 尚未生成交易账本，跳过复盘。")
@@ -44,9 +40,6 @@ except Exception as e:
     print(f"⚠️ 账本读取失败: {e}")
     import sys; sys.exit(1)
 
-# ==========================================
-# 2. 拉取历史价格和今日现价
-# ==========================================
 import tushare as ts
 ts.set_token(os.environ.get("TUSHARE_TOKEN"))
 pro = ts.pro_api()
@@ -94,9 +87,6 @@ def get_price_on_date(ticker, target_date_str):
         return None
     return float(valid.iloc[-1]['close'])
 
-# ==========================================
-# 3. 按票聚合，固定用第一次推荐的周期和止损
-# ==========================================
 summary_list = []
 for ticker, group in recent_picks.groupby('Ticker'):
     group = group.sort_values('Date')
@@ -104,7 +94,6 @@ for ticker, group in recent_picks.groupby('Ticker'):
     latest_row = group.iloc[-1]
     days_held = (get_bj_time().replace(tzinfo=None) - first_row['Date']).days
 
-    # 固定用第一次推荐的周期和止损，找到就 break，不被后续推荐覆盖
     hold_period_str = 'N/A'
     stop_loss = 'N/A'
     for _, r in group.iterrows():
@@ -132,7 +121,6 @@ for ticker, group in recent_picks.groupby('Ticker'):
     if hold_days:
         maturity_date_dt = first_row['Date'] + datetime.timedelta(days=hold_days)
         maturity_date = maturity_date_dt.strftime('%Y-%m-%d')
-
         if maturity_date_dt.replace(tzinfo=None) <= get_bj_time().replace(tzinfo=None):
             maturity_price = get_price_on_date(ticker, maturity_date)
             if maturity_price:
@@ -166,9 +154,6 @@ if not summary_list:
 
 print(f"✅ 共复盘 {len(summary_list)} 只标的")
 
-# ==========================================
-# 4. Claude 纪律审判
-# ==========================================
 client = anthropic.Anthropic(
     api_key=os.environ.get("CLAWSOCKET_API_KEY"),
     base_url=os.environ.get("CLAWSOCKET_BASE_URL")
@@ -208,20 +193,19 @@ prompt = f"""
 </div>
 """
 
-try:
-    message = client.messages.create(
-        model=TARGET_MODEL,
-        max_tokens=4000,
-        temperature=0.1,
-        messages=[{"role": "user", "content": prompt}]
-    )
-    ai_html = message.content[0].text.replace("```html", "").replace("```", "").strip()
-except Exception as e:
-    ai_html = f"<p>复盘生成失败: {e}</p>"
+# 流式输出，避免524超时
+ai_html = ""
+with client.messages.stream(
+    model=TARGET_MODEL,
+    max_tokens=4000,
+    temperature=0.1,
+    messages=[{"role": "user", "content": prompt}]
+) as stream:
+    for text in stream.text_stream:
+        ai_html += text
 
-# ==========================================
-# 5. 复盘结果写入 review_history.csv
-# ==========================================
+ai_html = ai_html.replace("```html", "").replace("```", "").strip()
+
 review_log = "review_history.csv"
 need_header = not os.path.exists(review_log) or os.path.getsize(review_log) == 0
 try:
@@ -236,9 +220,6 @@ try:
 except Exception as e:
     print(f"⚠️ 复盘写入失败: {e}")
 
-# ==========================================
-# 6. 发送邮件
-# ==========================================
 style = "body{font-family:sans-serif; background:#f4f6f9; padding:20px; color:#333; line-height:1.6} .container{max-width:900px; margin:0 auto; background:#fff; padding:30px; border-radius:10px; box-shadow:0 4px 15px rgba(0,0,0,0.05)}"
 full_html = f"<!DOCTYPE html><html><head><meta charset='utf-8'><style>{style}</style></head><body><div class='container'><h1 style='color:#37474f; text-align:center;'>Alpha 雷达 A股盘后复盘</h1>{ai_html}</div></body></html>"
 
@@ -247,7 +228,6 @@ def send_mail():
     email_list_str = os.environ.get("TARGET_EMAILS")
     if not acc or not email_list_str: return
     targets = [e.strip() for e in email_list_str.split(",")]
-
     msg = MIMEMultipart()
     msg['From'] = acc
     msg['Subject'] = f"【盘后清算】A股风控纪律与复盘 ({get_bj_time().strftime('%Y-%m-%d')})"
