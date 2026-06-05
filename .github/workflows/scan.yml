@@ -1,8 +1,6 @@
 name: A-Share Scan
 on:
   workflow_dispatch:
-  schedule:
-    - cron: '17 21 * * 0-4'
 
 jobs:
   run-scan:
