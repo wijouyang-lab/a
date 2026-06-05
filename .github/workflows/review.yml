@@ -1,9 +1,7 @@
 name: A-Share Review
 on:
   workflow_dispatch:
-  schedule:
-    - cron: '30 7 * * 1-5'
-
+ 
 jobs:
   run-review:
     runs-on: ubuntu-latest
