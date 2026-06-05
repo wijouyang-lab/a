@@ -13,13 +13,11 @@ BEIJING_TZ = datetime.timezone(datetime.timedelta(hours=8))
 def get_bj_time():
     return datetime.datetime.now(BEIJING_TZ)
 
-# 周末不执行
 today = get_bj_time().weekday()
 if today >= 5:
     print("周末不开盘，退出早盘扫描。")
     import sys; sys.exit(0)
 
-# 时间检查：只在北京时间 06:00 - 15:00 之间执行
 bj_hour = get_bj_time().hour
 if bj_hour < 6 or bj_hour >= 15:
     print(f"现在是北京时间 {bj_hour} 点，不在交易时段（6-15点），跳过扫描。")
@@ -157,14 +155,19 @@ def generate_ai_report(pool_data):
         </ul>
     </div>
     '''
-    
-    message = client.messages.create(
+
+    # 流式输出，避免524超时
+    ai_html = ""
+    with client.messages.stream(
         model=TARGET_MODEL,
         max_tokens=4096,
         temperature=0.1,
         messages=[{"role": "user", "content": prompt}]
-    )
-    return message.content[0].text.replace("```html", "").replace("```", "").strip()
+    ) as stream:
+        for text in stream.text_stream:
+            ai_html += text
+
+    return ai_html.replace("```html", "").replace("```", "").strip()
 
 def build_email(ai_html):
     style = """
