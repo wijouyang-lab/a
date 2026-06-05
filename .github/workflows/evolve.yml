@@ -1,8 +1,6 @@
 name: A-Share Evolve
 on:
   workflow_dispatch:
-  schedule:
-    - cron: '0 10 * * 5'
 
 jobs:
   run-quant:
