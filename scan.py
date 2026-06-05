@@ -25,7 +25,7 @@ if bj_hour < 6 or bj_hour >= 15:
     print(f"现在是北京时间 {bj_hour} 点，不在交易时段（6-15点），跳过扫描。")
     import sys; sys.exit(0)
 
-TARGET_MODEL = 'claude-opus-4-8'
+TARGET_MODEL = 'claude-sonnet-4-6'
 
 def get_a_share_data():
     import tushare as ts
