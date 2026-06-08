@@ -13,6 +13,12 @@ BEIJING_TZ = datetime.timezone(datetime.timedelta(hours=8))
 def get_bj_time():
     return datetime.datetime.now(BEIJING_TZ)
 
+# 诊断信息
+print(f"当前UTC时间: {datetime.datetime.utcnow()}")
+print(f"当前北京时间: {get_bj_time()}")
+print(f"星期: {get_bj_time().weekday()} (0=周一 6=周日)")
+print(f"小时: {get_bj_time().hour}")
+
 today = get_bj_time().weekday()
 if today >= 5:
     print("周末不开盘，退出早盘扫描。")
@@ -23,6 +29,13 @@ if bj_hour < 6 or bj_hour >= 15:
     print(f"现在是北京时间 {bj_hour} 点，不在交易时段（6-15点），跳过扫描。")
     import sys; sys.exit(0)
 
+print("时间检查通过，开始扫描...")
+print(f"TUSHARE_TOKEN 是否存在: {bool(os.environ.get('TUSHARE_TOKEN'))}")
+print(f"CLAWSOCKET_API_KEY 是否存在: {bool(os.environ.get('CLAWSOCKET_API_KEY'))}")
+print(f"CLAWSOCKET_BASE_URL 是否存在: {bool(os.environ.get('CLAWSOCKET_BASE_URL'))}")
+print(f"EMAIL_ACCOUNT 是否存在: {bool(os.environ.get('EMAIL_ACCOUNT'))}")
+print(f"TARGET_EMAILS 是否存在: {bool(os.environ.get('TARGET_EMAILS'))}")
+
 TARGET_MODEL = 'claude-opus-4-8'
 
 def get_a_share_data():
@@ -30,13 +43,18 @@ def get_a_share_data():
     ts.set_token(os.environ.get("TUSHARE_TOKEN"))
     pro = ts.pro_api()
     trade_date = (get_bj_time() - datetime.timedelta(days=1)).strftime('%Y%m%d')
+    print(f"正在拉取 {trade_date} 的A股数据...")
     
     df_daily = pro.daily(trade_date=trade_date)
     if df_daily is None or df_daily.empty:
         trade_date = (get_bj_time() - datetime.timedelta(days=2)).strftime('%Y%m%d')
+        print(f"昨日数据为空，尝试 {trade_date}...")
         df_daily = pro.daily(trade_date=trade_date)
-        if df_daily is None or df_daily.empty: return []
+        if df_daily is None or df_daily.empty:
+            print("数据拉取失败，返回空。")
+            return []
 
+    print(f"成功拉取 {len(df_daily)} 条数据")
     basic = pro.stock_basic(exchange='', list_status='L', fields='ts_code,name,industry')
     name_map = dict(zip(basic['ts_code'], basic['name']))
     industry_map = dict(zip(basic['ts_code'], basic.get('industry', ['核心资产'] * len(basic))))
@@ -59,6 +77,7 @@ def get_a_share_data():
     try:
         start_hist = (get_bj_time() - datetime.timedelta(days=100)).strftime('%Y%m%d')
         df_hist = pro.daily(ts_code=",".join(codes), start_date=start_hist, end_date=trade_date).sort_values(['ts_code', 'trade_date'])
+        print(f"历史K线拉取成功，共 {len(df_hist)} 条")
         for code in final_pool:
             stock_data = df_hist[df_hist['ts_code'] == code].copy()
             if len(stock_data) >= 30:
@@ -78,9 +97,11 @@ def get_a_share_data():
     except Exception as e: 
         print(f"⚠️ 指标拉取受限: {e}")
         
+    print(f"数据池准备完毕，共 {len(final_pool)} 只标的")
     return list(final_pool.values())
 
 def generate_ai_report(pool_data):
+    print("开始调用 AI 生成报告...")
     client = anthropic.Anthropic(
         api_key=os.environ.get("CLAWSOCKET_API_KEY"),
         base_url=os.environ.get("CLAWSOCKET_BASE_URL")
@@ -156,7 +177,6 @@ def generate_ai_report(pool_data):
     </div>
     '''
 
-    # 流式输出，避免524超时
     ai_html = ""
     with client.messages.stream(
         model=TARGET_MODEL,
@@ -167,6 +187,7 @@ def generate_ai_report(pool_data):
         for text in stream.text_stream:
             ai_html += text
 
+    print("AI 报告生成完毕")
     return ai_html.replace("```html", "").replace("```", "").strip()
 
 def build_email(ai_html):
@@ -268,7 +289,10 @@ if __name__ == "__main__":
             for i in chosen: 
                 f.write(f"{ts},{i['Ticker']},{i['Name']},{i['Tag']},{i.get('Industry','未知')},{i['Close']},{i['Amount']},{i['Daily_Pct']},{i['Hold_Period']},{i['Stop_Loss']}\n")
         
+        print(f"✅ 共入库 {len(chosen)} 条记录")
         with open("report.html", "w", encoding="utf-8") as f:
             f.write(full_html)
             
         send_emails(full_html)
+    else:
+        print("⚠️ 数据池为空，跳过AI生成和发送。")
