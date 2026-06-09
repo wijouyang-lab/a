@@ -7,6 +7,7 @@ import os
 import json
 import re
 import smtplib
+import tushare as ts
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 import anthropic
@@ -32,11 +33,6 @@ if bj_hour < 6 or bj_hour >= 15:
     import sys; sys.exit(0)
 
 print("时间检查通过，开始扫描...")
-print(f"TUSHARE_TOKEN 是否存在: {bool(os.environ.get('TUSHARE_TOKEN'))}")
-print(f"CLAWSOCKET_API_KEY 是否存在: {bool(os.environ.get('CLAWSOCKET_API_KEY'))}")
-print(f"CLAWSOCKET_BASE_URL 是否存get('CLAWSOCKET_BASE_URL'))}")
-print(f"EMAIL_ACCOUNT 是否存在: {bool(os.environ.get('EMAIL_ACCOUNT'))}")
-print(f"TARGET_EMAILS 是否存在: {bool(os.environ.get('TARGET_EMAILS'))}")
 
 TARGET_MODEL = 'claude-opus-4-8'
 
@@ -48,11 +44,29 @@ MIN_AMOUNT = 50000.0       # 最小成交额（万元），排除流动性差的
 CANDIDATE_POOL_SIZE = 30   # 传入AI的候选池大小
 DEFAULT_STOP_LOSS_PCT = -5.0  # 默认止损百分比
 
+# 初始化 Tushare
+ts.set_token(os.environ.get("TUSHARE_TOKEN"))
+pro = ts.pro_api()
+
+def get_latest_macro_news():
+    """盘前雷达：获取最新全球宏观与财经快讯"""
+    print("📡 正在抓取盘前最新全球宏观与财经快讯...")
+    try:
+        # 获取新浪财经最新15条滚动新闻
+        df_news = pro.news(src='sina', limit=15)
+        if df_news is not None and not df_news.empty:
+            news_lines = []
+            for _, row in df_news.iterrows():
+                # 提取时间与标题
+                news_lines.append(f"- {row['datetime'][11:16]}: {row['title']}")
+            print("✅ 盘前快讯抓取成功！")
+            return "\n".join(news_lines)
+    except Exception as e:
+        print(f"⚠️ 盘前新闻拉取受限: {e}")
+    return "暂无实时盘前新闻，请基于昨收盘及底层产业逻辑进行推演。"
+
 
 def get_a_share_data():
-    import tushare as ts
-    ts.set_token(os.environ.get("TUSHARE_TOKEN"))
-    pro = ts.pro_api()
     trade_date = (get_bj_time() - datetime.timedelta(days=1)).strftime('%Y%m%d')
     print(f"正在拉取 {trade_date} 的A股数据...")
     
@@ -75,7 +89,7 @@ def get_a_share_data():
     codes = [row['ts_code'] for _, row in df_sorted.iterrows()]
     
     full_pool = {}
-    forows():
+    for _, row in df_sorted.iterrows():
         ts_code = row['ts_code']
         full_pool[ts_code] = {
             "Ticker": ts_code, 
@@ -105,7 +119,8 @@ def get_a_share_data():
                 
                 full_pool[code]["MA5"] = round(ma5, 2)
                 full_pool[code]["MA10"] = round(ma10, 2)
-                full_pool[code]["MA20"] = round(ma20,]["乖离率(%)"] = round(((current_close - ma20) / ma20) * 100, 2)
+                full_pool[code]["MA20"] = round(ma20, 2)
+                full_pool[code]["乖离率(%)"] = round(((current_close - ma20) / ma20) * 100, 2)
                 
                 # 均线多头排列判断
                 full_pool[code]["均线多头"] = (current_close > ma5 > ma10 > ma20)
@@ -117,7 +132,8 @@ def get_a_share_data():
                 exp1 = close_px.ewm(span=12, adjust=False).mean()
                 exp2 = close_px.ewm(span=26, adjust=False).mean()
                 macd_line = exp1 - exp2
-                signal_line = macd_line.ewm(span=9, adj macd_hist = (macd_line - signal_line) * 2 
+                signal_line = macd_line.ewm(span=9, adjust=False).mean()
+                macd_hist = (macd_line - signal_line) * 2 
                 full_pool[code]["MACD今日柱"] = round(macd_hist.iloc[-1], 3)
                 full_pool[code]["MACD昨日柱"] = round(macd_hist.iloc[-2], 3)
                 
@@ -230,7 +246,7 @@ def get_a_share_data():
     return combined
 
 
-def generate_ai_report(pool_data):
+def generate_ai_report(pool_data, macro_news_text):
     print("开始调用 AI 生成报告...")
     client = anthropic.Anthropic(
         api_key=os.environ.get("CLAWSOCKET_API_KEY"),
@@ -245,7 +261,11 @@ def generate_ai_report(pool_data):
     prompt = f'''
     你是一个顶级私募策略总监。今天是{today_str}。
     
-    【已通过量化预筛的候选池】（共{len(candidates)}只，均满足：乖离率≤12%、RSI≤70、MACD改善、近5日涨幅≤20%、价格在MA20之上）：
+    【🔴 盘前宏观与全球重大快讯（必须阅读）】：
+    {macro_news_text}
+    *防错指令：必须结合上述最新消息（如美股昨夜大盘情绪、地缘局势最新动态）来定调开盘情绪。如果出现表面停火协议，请同时客观评估底层博弈（如霍尔木兹海峡实际依然处于封锁状态对资源航运的支撑）。严禁在隔夜外围大涨或重大利好下无脑推荐做空，也严禁盲目追高。*
+
+    【已通过量化预筛的候选池】（均满足：乖离率≤12%、RSI≤70、MACD改善、价格在MA20之上）：
     {json.dumps(candidates, ensure_ascii=False, default=str)}
     
     【被量化淘汰的诱多参考池】（技术面恶化，仅供诱多组使用）：
@@ -266,7 +286,7 @@ def generate_ai_report(pool_data):
     <div class="header-card">
         <h2>🌍 全局 Alpha 情报中心</h2>
         <p><b>执行时间：</b>{today_str} 盘前</p>
-        <p><b>宏观驱动：</b>(结合地缘和产业叙事，不少于100字)</p>
+        <p><b>宏观驱动：</b>(必须结合上述盘前快讯，深度穿透外围走势和地缘实况的影响，不少于150字)</p>
     </div>
     
     <div class="market-section">
@@ -274,7 +294,7 @@ def generate_ai_report(pool_data):
         
         <div class="card core-card">
             <h3>[核心双龙] 1. [名称] ([代码])</h3>
-            <p><span class="tag bg-red">🔥 宏观情报与起爆逻辑:</span> (阐述主力炒作意图)</p>
+            <p><span class="tag bg-red">🔥 宏观情报与起爆逻辑:</span> (结合盘前新闻阐述资金炒作意图)</p>
             <p><span class="tag bg-blue">📈 技术面多周期共振:</span> (必须引用乖离率、MACD柱值、RSI、MA5/MA10/MA20真实数据)</p>
             <p><span class="tag bg-purple">📊 EV估值与筹码测算:</span> (分析筹码集中度或估值优势)</p>
             <p><span class="tag bg-orange">⚠️ 潜伏与风控底线:</span> 周期:[5-12天] | 止损:[具体价格，基于MA20或支撑位]</p>
@@ -295,7 +315,9 @@ def generate_ai_report(pool_data):
         </div>
         <div class="card sub-card">
             <h3>[梯队先锋] 4. [名称] ([代码])</h3>
-            <p><span class="tag bg-gray">📉 均线与周期:</span> (结合中期趋势)<tag bg-green">⚔️ 事件驱动与资金:</span> (分析催化剂)<tag bg-orange">⚠️ 潜伏与风控底线:</span> 周期:[3-7天] | 止损:[具体价格]</p>
+            <p><span class="tag bg-gray">📉 均线与周期:</span> (结合中期趋势)</p>
+            <p><span class="tag bg-green">⚔️ 事件驱动与资金:</span> (分析催化剂)</p>
+            <p><span class="tag bg-orange">⚠️ 潜伏与风控底线:</span> 周期:[3-7天] | 止损:[具体价格]</p>
         </div>
         
         <div class="card obs-card">
@@ -331,7 +353,7 @@ def generate_ai_report(pool_data):
             ai_html += text
 
     print("AI 报告生成完毕")
-    return ai_html.replace("html", "").replace("", "").strip()
+    return ai_html.replace("```html", "").replace("```", "").strip()
 
 
 def build_email(ai_html):
@@ -383,9 +405,15 @@ def send_emails(html_content):
 
 
 if __name__ == "__main__":
+    # 1. 抓取盘前宏观新闻
+    macro_news = get_latest_macro_news()
+    
+    # 2. 拉取量化基础数据
     raw_pool = get_a_share_data()
+    
     if raw_pool:
-        ai_html = generate_ai_report(raw_pool)
+        # 3. 传入新闻与数据，生成 AI 战报
+        ai_html = generate_ai_report(raw_pool, macro_news)
         full_html = build_email(ai_html)
         
         # ========== 改进后的标签解析与入库逻辑 ==========
@@ -394,7 +422,6 @@ if __name__ == "__main__":
         clean_html = re.sub(r'\s+', ' ', clean_html)
 
         for item in raw_pool:
-            # 只处理候选池中的标的
             if item.get("_pool_type") != "candidate":
                 continue
                 
@@ -405,7 +432,6 @@ if __name__ == "__main__":
 
             chunk = clean_html[idx:idx+800]
 
-            # 改进的标签识别：扩大搜索范围并增加准确性
             tag = None
             pre_chunk = clean_html[max(0, idx-300):idx]
             post_chunk = chunk[:200]
@@ -420,23 +446,20 @@ if __name__ == "__main__":
             elif "诱多" in context or "严禁接盘" in context:
                 tag = "Trap_Warning"
             
-            # 只入库核心双龙和梯队先锋（胜率优化的关键）
+            # 只入库核心双龙和梯队先锋
             if tag not in ("Core_Double_Dragon", "Sub_Pioneer"):
                 continue
 
-            # 解析持仓周期
             period_match = re.search(r'周期\s*[:：]\s*\[?(\d+[-~]\d+天|\d+天)', chunk)
             if period_match:
                 hold_period = period_match.group(1).strip()
             else:
                 hold_period = "5-12天" if tag == "Core_Double_Dragon" else "3-7天"
 
-            # 解析止损位
             sl_match = re.search(r'止损\s*[:：]\s*\[?(\d+\.?\d*元?%?|-\d+\.?\d*%?)', chunk)
             if sl_match:
                 stop_loss = sl_match.group(1).strip()
             else:
-                # 默认止损：基于当前价格的-5%
                 default_sl = round(item['Close'] * (1 + DEFAULT_STOP_LOSS_PCT / 100), 2)
                 stop_loss = f"{default_sl}元"
 
@@ -451,9 +474,9 @@ if __name__ == "__main__":
         with open(log_file, "a", encoding="utf-8") as f:
             if need_header:
                 f.write("Date,Ticker,Name,Tag,Industry,Close_Price,Amount,Daily_Pct,Hold_Period,Stop_Loss\n")
-            ts = get_bj_time().strftime('%Y-%m-%d')
+            ts_date = get_bj_time().strftime('%Y-%m-%d')
             for i in chosen: 
-                f.write(f"{ts},{i['Ticker']},{i['Name']},{i['Tag']},{i.get('Industry','未知')},{i['Close']},{i['Amount']},{i['Daily_Pct']},{i['Hold_Period']},{i['Stop_Loss']}\n")
+                f.write(f"{ts_date},{i['Ticker']},{i['Name']},{i['Tag']},{i.get('Industry','未知')},{i['Close']},{i['Amount']},{i['Daily_Pct']},{i['Hold_Period']},{i['Stop_Loss']}\n")
         
         print(f"✅ 共入库 {len(chosen)} 条记录（仅Core_Double_Dragon和Sub_Pioneer）")
         with open("report.html", "w", encoding="utf-8") as f:
