@@ -283,7 +283,6 @@ if __name__ == "__main__":
         ai_html = generate_ai_report(raw_pool, macro_news)
         full_html = build_email(ai_html)
         
-        # ========== 账本清算入库逻辑 ==========
         chosen = []
         clean_html = re.sub(r'<[^>]+>', ' ', ai_html)
         clean_html = re.sub(r'\s+', ' ', clean_html)
@@ -302,18 +301,25 @@ if __name__ == "__main__":
             elif "筛落组" in context or "观察池" in context: tag = "Observation"
             elif "诱多" in context or "坚决回避" in context: tag = "Trap_Warning"
             
-            if tag not in ("Core_Double_Dragon", "Sub_Pioneer"): continue
+            if tag is None: continue
+            
+            # Trap_Warning 直接写固定值，不入账（跳过）
+            if tag == "Trap_Warning": continue
 
-            period_match = re.search(r'周期\s*[:：]\s*\[?(\d+[-~]\d+天|\d+天)', chunk)
-            hold_period = period_match.group(1).strip() if period_match else ("5-12天" if tag == "Core_Double_Dragon" else "3-7天")
-
-            sl_match = re.search(r'止损\s*[:：]\s*\[?(\d+\.?\d*元?%?|-\d+\.?\d*%?)', chunk)
-            stop_loss = sl_match.group(1).strip() if sl_match else f"{round(item['Close'] * (1 + DEFAULT_STOP_LOSS_PCT / 100), 2)}元"
+            period_match = re.search(r'周期\s*[:：]\s*\[?(\d+[-~]\d+天|\d+天|观望)', chunk)
+            
+            if tag == "Observation":
+                hold_period = "观望"
+                stop_loss = "观望"
+            else:
+                hold_period = period_match.group(1).strip() if period_match else ("5-12天" if tag == "Core_Double_Dragon" else "3-7天")
+                sl_match = re.search(r'止损\s*[:：]\s*\[?(\d+\.?\d*元?%?|-\d+\.?\d*%?)', chunk)
+                stop_loss = sl_match.group(1).strip() if sl_match else f"{round(item['Close'] * (1 + DEFAULT_STOP_LOSS_PCT / 100), 2)}元"
 
             item['Tag'] = tag
             item['Hold_Period'] = hold_period
             item['Stop_Loss'] = stop_loss
-            item['Daily_Pct'] = 0 # 简化处理，因为直接从活跃榜拉取
+            item['Daily_Pct'] = item.get('pct_chg', 0) if 'pct_chg' in item else 0
             chosen.append(item)
 
         log_file = "trade_history.csv"
@@ -324,7 +330,7 @@ if __name__ == "__main__":
                 f.write("Date,Ticker,Name,Tag,Industry,Close_Price,Amount,Daily_Pct,Hold_Period,Stop_Loss\n")
             ts_date = get_bj_time().strftime('%Y-%m-%d')
             for i in chosen: 
-                f.write(f"{ts_date},{i['Ticker']},{i['Name']},{i['Tag']},{i.get('Industry','未知')},{i['Close']},{i['Amount']},0,{i['Hold_Period']},{i['Stop_Loss']}\n")
+                f.write(f"{ts_date},{i['Ticker']},{i['Name']},{i['Tag']},{i.get('Industry','未知')},{i['Close']},{i['Amount']},{i['Daily_Pct']},{i['Hold_Period']},{i['Stop_Loss']}\n")
         
         print(f"✅ 共安全记账 {len(chosen)} 条核心数据。")
         with open("report.html", "w", encoding="utf-8") as f: f.write(full_html)
