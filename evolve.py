@@ -19,7 +19,8 @@ if not os.path.exists(review_log):
     exit(0)
 
 try:
-    df = pd.read_csv(review_log)
+    # 增加自动容错机制：遇到多出逗号的坏数据行，直接跳过，不让程序崩溃
+    df = pd.read_csv(review_log, on_bad_lines='skip')
     df['Review_Date'] = pd.to_datetime(df['Review_Date'])
     cutoff = get_bj_time() - datetime.timedelta(days=30)
     recent = df[df['Review_Date'] >= cutoff.replace(tzinfo=None)].copy()
