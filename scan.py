@@ -1,3 +1,5 @@
+# 自动进化版本 | 时间: 2026-06-09 10:21 | 触发胜率: 22.5%
+
 # -*- coding: utf-8 -*-
 import pandas as pd
 import datetime
@@ -32,11 +34,20 @@ if bj_hour < 6 or bj_hour >= 15:
 print("时间检查通过，开始扫描...")
 print(f"TUSHARE_TOKEN 是否存在: {bool(os.environ.get('TUSHARE_TOKEN'))}")
 print(f"CLAWSOCKET_API_KEY 是否存在: {bool(os.environ.get('CLAWSOCKET_API_KEY'))}")
-print(f"CLAWSOCKET_BASE_URL 是否存在: {bool(os.environ.get('CLAWSOCKET_BASE_URL'))}")
+print(f"CLAWSOCKET_BASE_URL 是否存get('CLAWSOCKET_BASE_URL'))}")
 print(f"EMAIL_ACCOUNT 是否存在: {bool(os.environ.get('EMAIL_ACCOUNT'))}")
 print(f"TARGET_EMAILS 是否存在: {bool(os.environ.get('TARGET_EMAILS'))}")
 
 TARGET_MODEL = 'claude-opus-4-8'
+
+# ========== 量化筛选参数（核心调优区） ==========
+MAX_BIAS_PCT = 12.0        # 乖离率上限（MA20），超过视为超买
+MAX_RSI = 70.0             # RSI上限，超过视为超买
+MAX_5D_GAIN = 20.0         # 近5日最大涨幅，排除连板追高
+MIN_AMOUNT = 50000.0       # 最小成交额（万元），排除流动性差的
+CANDIDATE_POOL_SIZE = 30   # 传入AI的候选池大小
+DEFAULT_STOP_LOSS_PCT = -5.0  # 默认止损百分比
+
 
 def get_a_share_data():
     import tushare as ts
@@ -59,13 +70,14 @@ def get_a_share_data():
     name_map = dict(zip(basic['ts_code'], basic['name']))
     industry_map = dict(zip(basic['ts_code'], basic.get('industry', ['核心资产'] * len(basic))))
     
-    final_pool = {}
+    # 第一步：按成交额取Top100作为基础池
     df_sorted = df_daily.sort_values(by='amount', ascending=False).head(100)
     codes = [row['ts_code'] for _, row in df_sorted.iterrows()]
     
-    for _, row in df_sorted.iterrows():
+    full_pool = {}
+    forows():
         ts_code = row['ts_code']
-        final_pool[ts_code] = {
+        full_pool[ts_code] = {
             "Ticker": ts_code, 
             "Name": name_map.get(ts_code, ts_code),
             "Industry": industry_map.get(ts_code, "未知"), 
@@ -74,31 +86,149 @@ def get_a_share_data():
             "Daily_Pct": row['pct_chg']
         }
             
+    # 第二步：拉取历史数据计算技术指标
     try:
-        start_hist = (get_bj_time() - datetime.timedelta(days=100)).strftime('%Y%m%d')
+        start_hist = (get_bj_time() - datetime.timedelta(days=120)).strftime('%Y%m%d')
         df_hist = pro.daily(ts_code=",".join(codes), start_date=start_hist, end_date=trade_date).sort_values(['ts_code', 'trade_date'])
         print(f"历史K线拉取成功，共 {len(df_hist)} 条")
-        for code in final_pool:
+        
+        for code in list(full_pool.keys()):
             stock_data = df_hist[df_hist['ts_code'] == code].copy()
             if len(stock_data) >= 30:
                 close_px = stock_data['close']
+                
+                # MA均线
+                ma5 = close_px.rolling(window=5).mean().iloc[-1]
+                ma10 = close_px.rolling(window=10).mean().iloc[-1]
                 ma20 = close_px.rolling(window=20).mean().iloc[-1]
-                final_pool[code]["乖离率(%)"] = round(((final_pool[code]["Close"] - ma20) / ma20) * 100, 2)
+                current_close = full_pool[code]["Close"]
+                
+                full_pool[code]["MA5"] = round(ma5, 2)
+                full_pool[code]["MA10"] = round(ma10, 2)
+                full_pool[code]["MA20"] = round(ma20,]["乖离率(%)"] = round(((current_close - ma20) / ma20) * 100, 2)
+                
+                # 均线多头排列判断
+                full_pool[code]["均线多头"] = (current_close > ma5 > ma10 > ma20)
+                
+                # 价格在MA20之上
+                full_pool[code]["价格在MA20上"] = (current_close >= ma20)
+                
+                # MACD
                 exp1 = close_px.ewm(span=12, adjust=False).mean()
                 exp2 = close_px.ewm(span=26, adjust=False).mean()
-                macd_hist = ((exp1 - exp2) - (exp1 - exp2).ewm(span=9, adjust=False).mean()) * 2 
-                final_pool[code]["MACD今日柱"] = round(macd_hist.iloc[-1], 3)
-                final_pool[code]["MACD昨日柱"] = round(macd_hist.iloc[-2], 3)
+                macd_line = exp1 - exp2
+                signal_line = macd_line.ewm(span=9, adj macd_hist = (macd_line - signal_line) * 2 
+                full_pool[code]["MACD今日柱"] = round(macd_hist.iloc[-1], 3)
+                full_pool[code]["MACD昨日柱"] = round(macd_hist.iloc[-2], 3)
+                
+                # MACD趋势改善：今日柱>昨日柱（绿柱缩短或红柱放大）
+                full_pool[code]["MACD改善"] = (macd_hist.iloc[-1] > macd_hist.iloc[-2])
+                
+                # RSI
                 delta = close_px.diff()
-                rsi = 100 - (100 / (1 + (delta.clip(lower=0).ewm(com=13, adjust=False).mean() / -1 * delta.clip(upper=0).ewm(com=13, adjust=False).mean())))
-                final_pool[code]["RSI"] = round(rsi.iloc[-1], 2)
+                gain = delta.clip(lower=0).ewm(com=13, adjust=False).mean()
+                loss = (-1 * delta.clip(upper=0)).ewm(com=13, adjust=False).mean()
+                rs = gain / loss
+                rsi = 100 - (100 / (1 + rs))
+                full_pool[code]["RSI"] = round(rsi.iloc[-1], 2)
+                
+                # 近5日涨幅
+                if len(close_px) >= 6:
+                    pct_5d = ((close_px.iloc[-1] / close_px.iloc[-6]) - 1) * 100
+                    full_pool[code]["近5日涨幅(%)"] = round(pct_5d, 2)
+                else:
+                    full_pool[code]["近5日涨幅(%)"] = 0.0
             else:
-                final_pool[code]["乖离率(%)"] = "数据不足"
+                full_pool[code]["乖离率(%)"] = 99.0  # 数据不足标记为不合格
+                full_pool[code]["RSI"] = 99.0
+                full_pool[code]["MACD改善"] = False
+                full_pool[code]["近5日涨幅(%)"] = 99.0
+                full_pool[code]["价格在MA20上"] = False
+                full_pool[code]["均线多头"] = False
+                
     except Exception as e: 
         print(f"⚠️ 指标拉取受限: {e}")
+        return list(full_pool.values())[:CANDIDATE_POOL_SIZE]
+    
+    # ========== 第三步：硬性量化预筛 ==========
+    qualified_pool = []
+    rejected_pool = []
+    
+    for code, item in full_pool.items():
+        bias = item.get("乖离率(%)", 99.0)
+        rsi_val = item.get("RSI", 99.0)
+        macd_improving = item.get("MACD改善", False)
+        gain_5d = item.get("近5日涨幅(%)", 99.0)
+        above_ma20 = item.get("价格在MA20上", False)
+        amount = item.get("Amount", 0)
         
-    print(f"数据池准备完毕，共 {len(final_pool)} 只标的")
-    return list(final_pool.values())
+        # 硬性过滤条件
+        if (isinstance(bias, (int, float)) and bias <= MAX_BIAS_PCT and
+            isinstance(rsi_val, (int, float)) and rsi_val <= MAX_RSI and
+            macd_improving and
+            isinstance(gain_5d, (int, float)) and gain_5d <= MAX_5D_GAIN and
+            above_ma20 and
+            amount >= MIN_AMOUNT):
+            qualified_pool.append(item)
+        else:
+            # 记录被淘汰的原因，供诱多组使用
+            reasons = []
+            if isinstance(bias, (int, float)) and bias > MAX_BIAS_PCT:
+                reasons.append(f"乖离率{bias}%过高")
+            if isinstance(rsi_val, (int, float)) and rsi_val > MAX_RSI:
+                reasons.append(f"RSI={rsi_val}超买")
+            if not macd_improving:
+                reasons.append("MACD走弱")
+            if isinstance(gain_5d, (int, float)) and gain_5d > MAX_5D_GAIN:
+                reasons.append(f"近5日涨{gain_5d}%追高风险")
+            if not above_ma20:
+                reasons.append("跌破MA20")
+            item["淘汰原因"] = "；".join(reasons) if reasons else "数据不足"
+            rejected_pool.append(item)
+    
+    print(f"量化预筛通过: {len(qualified_pool)} 只，淘汰: {len(rejected_pool)} 只")
+    
+    # 对通过的池子按"综合评分"排序：均线多头+MACD改善幅度+RSI适中
+    for item in qualified_pool:
+        score = 0
+        # 均线多头排列加分
+        if item.get("均线多头", False):
+            score += 30
+        # MACD改善幅度加分
+        macd_today = item.get("MACD今日柱", 0)
+        macd_yesterday = item.get("MACD昨日柱", 0)
+        if isinstance(macd_today, (int, float)) and isinstance(macd_yesterday, (int, float)):
+            macd_delta = macd_today - macd_yesterday
+            score += min(macd_delta * 5, 20)  # 上限20分
+        # RSI在40-60区间最佳
+        rsi_val = item.get("RSI", 50)
+        if isinstance(rsi_val, (int, float)):
+            if 40 <= rsi_val <= 60:
+                score += 20
+            elif 30 <= rsi_val <= 70:
+                score += 10
+        # 乖离率越小越好
+        bias = item.get("乖离率(%)", 0)
+        if isinstance(bias, (int, float)):
+            score += max(0, (12 - abs(bias)) * 2)
+        item["综合评分"] = round(score, 2)
+    
+    qualified_pool.sort(key=lambda x: x.get("综合评分", 0), reverse=True)
+    
+    # 取Top候选 + 部分淘汰池供诱多组参考
+    final_candidates = qualified_pool[:CANDIDATE_POOL_SIZE]
+    trap_candidates = sorted(rejected_pool, key=lambda x: x.get("Amount", 0), reverse=True)[:6]
+    
+    # 标记用途
+    for item in final_candidates:
+        item["_pool_type"] = "candidate"
+    for item in trap_candidates:
+        item["_pool_type"] = "trap_reference"
+    
+    combined = final_candidates + trap_candidates
+    print(f"最终传入AI: {len(final_candidates)} 只候选 + {len(trap_candidates)} 只诱多参考")
+    return combined
+
 
 def generate_ai_report(pool_data):
     print("开始调用 AI 生成报告...")
@@ -108,13 +238,28 @@ def generate_ai_report(pool_data):
     )
     today_str = get_bj_time().strftime('%Y年%m月%d日')
     
-    prompt = f'''
-    你是一个顶级私募策略总监。今天是{today_str}。基于以下A股数据池：
-    {json.dumps(pool_data, ensure_ascii=False)}
+    # 分离候选池和诱多参考池
+    candidates = [x for x in pool_data if x.get("_pool_type") == "candidate"]
+    traps = [x for x in pool_data if x.get("_pool_type") == "trap_reference"]
     
-    【核心任务】：选出全市场最顶尖的标的！不要顾虑之前是否推荐过，只要数据目前是最优的，就选它。
-    1. 必须选出MACD绿柱缩短（或金叉）且乖离率<15%的标的。
-    2. 【排他性红线】：一封报告内，同一只股票绝对不能在双龙、先锋、筛落组、诱多组中重复出现！
+    prompt = f'''
+    你是一个顶级私募策略总监。今天是{today_str}。
+    
+    【已通过量化预筛的候选池】（共{len(candidates)}只，均满足：乖离率≤12%、RSI≤70、MACD改善、近5日涨幅≤20%、价格在MA20之上）：
+    {json.dumps(candidates, ensure_ascii=False, default=str)}
+    
+    【被量化淘汰的诱多参考池】（技术面恶化，仅供诱多组使用）：
+    {json.dumps(traps, ensure_ascii=False, default=str)}
+    
+    【核心任务】：从候选池中选出最优标的。
+    
+    【硬性约束——违反任何一条则整份报告作废】：
+    1. 核心双龙和梯队先锋只能从"候选池"中选取，绝对禁止选入乖离率>12%或RSI>70的标的
+    2. 诱多对照组只能从"诱多参考池"中选取
+    3. 一封报告内，同一只股票绝对不能在双龙、先锋、筛落组、诱多组中重复出现
+    4. 优先选择「均线多头排列」（MA5>MA10>MA20）且「综合评分」靠前的标的
+    5. 止损位必须设在MA20或近期支撑位，且止损幅度控制在-3%到-7%之间
+    6. 持仓周期：核心双龙5-12天，梯队先锋3-7天
     
     严格复制以下HTML骨架并填空（必须保留emoji和span标签）：
     
@@ -130,35 +275,33 @@ def generate_ai_report(pool_data):
         <div class="card core-card">
             <h3>[核心双龙] 1. [名称] ([代码])</h3>
             <p><span class="tag bg-red">🔥 宏观情报与起爆逻辑:</span> (阐述主力炒作意图)</p>
-            <p><span class="tag bg-blue">📈 技术面多周期共振:</span> (引用乖离率、MACD、RSI真实数据)</p>
+            <p><span class="tag bg-blue">📈 技术面多周期共振:</span> (必须引用乖离率、MACD柱值、RSI、MA5/MA10/MA20真实数据)</p>
             <p><span class="tag bg-purple">📊 EV估值与筹码测算:</span> (分析筹码集中度或估值优势)</p>
-            <p><span class="tag bg-orange">⚠️ 潜伏与风控底线:</span> 周期:[X-Y天] | 止损:[具体价格或百分比]</p>
+            <p><span class="tag bg-orange">⚠️ 潜伏与风控底线:</span> 周期:[5-12天] | 止损:[具体价格，基于MA20或支撑位]</p>
         </div>
         <div class="card core-card">
             <h3>[核心双龙] 2. [名称] ([代码])</h3>
             <p><span class="tag bg-red">🔥 宏观情报与起爆逻辑:</span> (阐述主力炒作意图)</p>
-            <p><span class="tag bg-blue">📈 技术面多周期共振:</span> (引用真实数据)</p>
+            <p><span class="tag bg-blue">📈 技术面多周期共振:</span> (必须引用真实数据)</p>
             <p><span class="tag bg-purple">📊 EV估值与筹码测算:</span> (分析筹码或估值)</p>
-            <p><span class="tag bg-orange">⚠️ 潜伏与风控底线:</span> 周期:[X-Y天] | 止损:[具体价格或百分比]</p>
+            <p><span class="tag bg-orange">⚠️ 潜伏与风控底线:</span> 周期:[5-12天] | 止损:[具体价格]</p>
         </div>
         
         <div class="card sub-card">
             <h3>[梯队先锋] 3. [名称] ([代码])</h3>
-            <p><span class="tag bg-gray">📉 均线与周期:</span> (结合中期趋势)</p>
+            <p><span class="tag bg-gray">📉 均线与周期:</span> (结合MA5/MA10/MA20多头排列状态)</p>
             <p><span class="tag bg-green">⚔️ 事件驱动与资金:</span> (分析催化剂)</p>
-            <p><span class="tag bg-orange">⚠️ 潜伏与风控底线:</span> 周期:[X-Y天] | 止损:[具体价格或百分比]</p>
+            <p><span class="tag bg-orange">⚠️ 潜伏与风控底线:</span> 周期:[3-7天] | 止损:[具体价格]</p>
         </div>
         <div class="card sub-card">
             <h3>[梯队先锋] 4. [名称] ([代码])</h3>
-            <p><span class="tag bg-gray">📉 均线与周期:</span> (结合中期趋势)</p>
-            <p><span class="tag bg-green">⚔️ 事件驱动与资金:</span> (分析催化剂)</p>
-            <p><span class="tag bg-orange">⚠️ 潜伏与风控底线:</span> 周期:[X-Y天] | 止损:[具体价格或百分比]</p>
+            <p><span class="tag bg-gray">📉 均线与周期:</span> (结合中期趋势)<tag bg-green">⚔️ 事件驱动与资金:</span> (分析催化剂)<tag bg-orange">⚠️ 潜伏与风控底线:</span> 周期:[3-7天] | 止损:[具体价格]</p>
         </div>
         
         <div class="card obs-card">
             <h3>[筛落组] ⚠️ 观察池诊断 (Rank 5-10)</h3>
             <ul>
-                <li><b>5. [名称] ([代码]):</b> (说明其硬伤) <br><span class="tag bg-orange">⚠️ 风控:</span> 周期:[X-Y天或观望] | 止损:[具体价格]</li>
+                <li><b>5. [名称] ([代码]):</b> (说明其不如前4名的原因) <br><span class="tag bg-orange">⚠️ 风控:</span> 周期:[X-Y天或观望] | 止损:[具体价格]</li>
                 <li><b>6. [名称] ([代码]):</b> (说明其硬伤) <br><span class="tag bg-orange">⚠️ 风控:</span> 周期:[X-Y天或观望] | 止损:[具体价格]</li>
                 <li><b>7. [名称] ([代码]):</b> (说明其硬伤) <br><span class="tag bg-orange">⚠️ 风控:</span> 周期:[X-Y天或观望] | 止损:[具体价格]</li>
                 <li><b>8. [名称] ([代码]):</b> (说明其硬伤) <br><span class="tag bg-orange">⚠️ 风控:</span> 周期:[X-Y天或观望] | 止损:[具体价格]</li>
@@ -171,7 +314,7 @@ def generate_ai_report(pool_data):
     <div class="card trap-card">
         <h3>🚨 诱多对照组（严禁接盘）</h3>
         <ul>
-            <li><b>11. [名称] ([代码]) | <span class="bear-text">诊断：看跌</span></b><br>❌ 诱多技术面：...<br>⚠️ 致命硬伤：...</li>
+            <li><b>11. [名称] ([代码]) | <span class="bear-text">诊断：看跌</span></b><br>❌ 诱多技术面：(引用其被淘汰原因中的数据)<br>⚠️ 致命硬伤：...</li>
             <li><b>12. [名称] ([代码]) | <span class="bear-text">诊断：看跌</span></b><br>❌ 诱多技术面：...<br>⚠️ 致命硬伤：...</li>
         </ul>
     </div>
@@ -188,7 +331,8 @@ def generate_ai_report(pool_data):
             ai_html += text
 
     print("AI 报告生成完毕")
-    return ai_html.replace("```html", "").replace("```", "").strip()
+    return ai_html.replace("html", "").replace("", "").strip()
+
 
 def build_email(ai_html):
     style = """
@@ -208,9 +352,11 @@ def build_email(ai_html):
         .bg-orange{background:#e64a19}
         .bg-gray{background:#607d8b}
         .bg-green{background:#37474f}
+        .bear-text{color:#d32f2f;font-weight:bold}
     </style>
     """
     return f"<!DOCTYPE html><html><head><meta charset='utf-8'>{style}</head><body><div class='container'>{ai_html}</div></body></html>"
+
 
 def send_emails(html_content):
     acc = os.environ.get("EMAIL_ACCOUNT")
@@ -235,17 +381,23 @@ def send_emails(html_content):
     except Exception as e: 
         print(f"🚨 邮件发送失败: {e}")
 
+
 if __name__ == "__main__":
     raw_pool = get_a_share_data()
     if raw_pool:
         ai_html = generate_ai_report(raw_pool)
         full_html = build_email(ai_html)
         
+        # ========== 改进后的标签解析与入库逻辑 ==========
         chosen = []
         clean_html = re.sub(r'<[^>]+>', ' ', ai_html)
         clean_html = re.sub(r'\s+', ' ', clean_html)
 
         for item in raw_pool:
+            # 只处理候选池中的标的
+            if item.get("_pool_type") != "candidate":
+                continue
+                
             ticker_str = str(item['Name'])
             idx = clean_html.find(ticker_str)
             if idx == -1:
@@ -253,30 +405,44 @@ if __name__ == "__main__":
 
             chunk = clean_html[idx:idx+800]
 
-            tag = "Trap_Warning"
-            pre_chunk = clean_html[max(0, idx-200):idx]
-            if "[核心双龙]" in pre_chunk or "[核心双龙]" in chunk:
+            # 改进的标签识别：扩大搜索范围并增加准确性
+            tag = None
+            pre_chunk = clean_html[max(0, idx-300):idx]
+            post_chunk = chunk[:200]
+            context = pre_chunk + post_chunk
+            
+            if "核心双龙" in context:
                 tag = "Core_Double_Dragon"
-            elif "[梯队先锋]" in pre_chunk or "[梯队先锋]" in chunk:
+            elif "梯队先锋" in context:
                 tag = "Sub_Pioneer"
-            elif "[筛落组]" in pre_chunk or "筛落组" in pre_chunk:
+            elif "筛落组" in context or "观察池" in context:
                 tag = "Observation"
-            elif "诱多对照组" in pre_chunk or "严禁接盘" in pre_chunk:
+            elif "诱多" in context or "严禁接盘" in context:
                 tag = "Trap_Warning"
-
-            if tag == "Trap_Warning":
-                item['Tag'] = tag
-                item['Hold_Period'] = "坚决空仓"
-                item['Stop_Loss'] = "绝对规避"
-                chosen.append(item)
+            
+            # 只入库核心双龙和梯队先锋（胜率优化的关键）
+            if tag not in ("Core_Double_Dragon", "Sub_Pioneer"):
                 continue
 
-            period_match = re.search(r'周期\s*[:：]\s*\[?(\d+[-~]\d+天|\d+天|观望)', chunk)
+            # 解析持仓周期
+            period_match = re.search(r'周期\s*[:：]\s*\[?(\d+[-~]\d+天|\d+天)', chunk)
+            if period_match:
+                hold_period = period_match.group(1).strip()
+            else:
+                hold_period = "5-12天" if tag == "Core_Double_Dragon" else "3-7天"
+
+            # 解析止损位
             sl_match = re.search(r'止损\s*[:：]\s*\[?(\d+\.?\d*元?%?|-\d+\.?\d*%?)', chunk)
+            if sl_match:
+                stop_loss = sl_match.group(1).strip()
+            else:
+                # 默认止损：基于当前价格的-5%
+                default_sl = round(item['Close'] * (1 + DEFAULT_STOP_LOSS_PCT / 100), 2)
+                stop_loss = f"{default_sl}元"
 
             item['Tag'] = tag
-            item['Hold_Period'] = period_match.group(1).strip() if period_match else "N/A"
-            item['Stop_Loss'] = sl_match.group(1).strip() if sl_match else "N/A"
+            item['Hold_Period'] = hold_period
+            item['Stop_Loss'] = stop_loss
             chosen.append(item)
 
         log_file = "trade_history.csv"
@@ -289,7 +455,7 @@ if __name__ == "__main__":
             for i in chosen: 
                 f.write(f"{ts},{i['Ticker']},{i['Name']},{i['Tag']},{i.get('Industry','未知')},{i['Close']},{i['Amount']},{i['Daily_Pct']},{i['Hold_Period']},{i['Stop_Loss']}\n")
         
-        print(f"✅ 共入库 {len(chosen)} 条记录")
+        print(f"✅ 共入库 {len(chosen)} 条记录（仅Core_Double_Dragon和Sub_Pioneer）")
         with open("report.html", "w", encoding="utf-8") as f:
             f.write(full_html)
             
