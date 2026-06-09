@@ -19,7 +19,6 @@ if not os.path.exists(review_log):
     exit(0)
 
 try:
-    # 增加自动容错机制：遇到多出逗号的坏数据行，直接跳过，不让程序崩溃
     df = pd.read_csv(review_log, on_bad_lines='skip')
     df['Review_Date'] = pd.to_datetime(df['Review_Date'])
     cutoff = get_bj_time() - datetime.timedelta(days=30)
@@ -31,15 +30,19 @@ except Exception as e:
     print(f"⚠️ 复盘账本读取失败: {e}")
     exit(1)
 
+# 只统计真正执行买卖的标签，排除观望的筛落组
 overall_win_rate = 0
 if 'PnL_Pct' in recent.columns:
     recent['PnL_Pct'] = pd.to_numeric(recent['PnL_Pct'], errors='coerce')
-    valid = recent.dropna(subset=['PnL_Pct'])
+    valid = recent[
+        recent['PnL_Pct'].notna() &
+        recent['Tag'].isin(['Core_Double_Dragon', 'Sub_Pioneer'])
+    ].copy()
     if len(valid) > 0:
         overall_win_rate = round((valid['PnL_Pct'] > 0).sum() / len(valid) * 100, 1)
 
 stats = {}
-for tag in recent['Tag'].unique():
+for tag in ['Core_Double_Dragon', 'Sub_Pioneer']:
     group = recent[recent['Tag'] == tag].copy()
     group['PnL_Pct'] = pd.to_numeric(group['PnL_Pct'], errors='coerce')
     valid_group = group.dropna(subset=['PnL_Pct'])
@@ -111,7 +114,6 @@ prompt = f"""
 ===CODE_END===
 """
 
-# 流式输出，避免524超时
 raw_output = ""
 with client.messages.stream(
     model="claude-opus-4-8",
