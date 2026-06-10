@@ -223,9 +223,7 @@ def generate_ai_report(pool_data, macro_news_text):
             ai_html += text
 
     print("✅ AI 宏观穿透报告生成完毕")
-    return ai_html.replace("```html", "").replace("
-```", "").strip()
-
+    return ai_html.replace("```html", "").replace("```", "").strip()
 
 def build_email(ai_html):
     style = """
