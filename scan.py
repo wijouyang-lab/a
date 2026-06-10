@@ -1,5 +1,3 @@
-# 自动进化版本 | 时间: 2026-06-09 | 架构: 宏观驱动为主，技术面为辅
-
 # -*- coding: utf-8 -*-
 import pandas as pd
 import datetime
@@ -18,7 +16,6 @@ BEIJING_TZ = datetime.timezone(datetime.timedelta(hours=8))
 def get_bj_time():
     return datetime.datetime.now(BEIJING_TZ)
 
-print(f"当前UTC时间: {datetime.datetime.utcnow()}")
 print(f"当前北京时间: {get_bj_time()}")
 print(f"星期: {get_bj_time().weekday()} (0=周一 6=周日)")
 
@@ -146,15 +143,30 @@ def generate_ai_report(pool_data, macro_news_text):
     )
     today_str = get_bj_time().strftime('%Y年%m月%d日')
 
+    # 🔑 关键：只传必要字段，大幅压缩 prompt 体积
+    compact_pool = [
+        {
+            "名称": d["Name"],
+            "代码": d["Ticker"],
+            "行业": d["Industry"],
+            "收盘价": d["Close"],
+            "涨跌幅": d.get("pct_chg", 0),
+            "乖离率": d.get("乖离率(%)", "N/A"),
+            "RSI": d.get("RSI", "N/A"),
+            "MACD": d.get("MACD趋势", "N/A"),
+        }
+        for d in pool_data
+    ]
+
     prompt = f'''
     你是华尔街顶级游资主力量化操盘手。你的交易哲学是：【宏观定方向，产业定主线，技术定买卖】。
     今天是{today_str}。
 
-    【🔴 盘前宏观与全球重大快讯（最高优先级）】：
+    【盘前宏观与全球重大快讯（最高优先级）】：
     {macro_news_text}
 
-    【💧 今日两市资金最活跃的 Top 100 标的池】（已附带行业与底层技术数据）：
-    {json.dumps(pool_data, ensure_ascii=False, default=str)}
+    【今日两市资金最活跃的 Top 40 标的池】：
+    {json.dumps(compact_pool, ensure_ascii=False)}
 
     【核心推演任务】：
     第一步（宏观选将）：深刻阅读盘前新闻，判断今日的主线逻辑。根据你推演出的【宏观主线】，从 Top 40 池子中挑出与之行业和逻辑最契合的标的。
@@ -164,7 +176,7 @@ def generate_ai_report(pool_data, macro_news_text):
 
     【硬性纪律】：
     1. 同一只股票绝对不能在报告中重复出现。
-    2. 风控底线必须明确输出"周期:[X-Y天] | 止损:[具体A股价格，如18.50元]"，止损必须是具体价格数字加"元"，不能用百分比。
+    2. 风控底线必须明确输出"周期:[X-Y天] | 止损:[XX.XX元]"，止损必须是具体价格数字加"元"。
     3. 严格复制以下HTML骨架并填空（不要 Markdown 外框，必须保留 emoji 和 span 标签）：
 
     <div class="header-card">
@@ -331,12 +343,10 @@ if __name__ == "__main__":
                 hold_period = period_match.group(1).strip() if period_match else (
                     "5-12天" if tag == "Core_Double_Dragon" else "3-7天"
                 )
-                # 严格匹配 XX.XX元 格式，避免误抓其他数字
                 sl_match = re.search(r'止损\s*[:：]\s*\[?(\d{1,5}\.\d{1,2}元)', chunk)
                 if sl_match:
                     stop_loss = sl_match.group(1).strip()
                 else:
-                    # 默认止损：收盘价 × 95%
                     stop_loss = f"{round(item['Close'] * (1 + DEFAULT_STOP_LOSS_PCT / 100), 2)}元"
 
             item['Tag'] = tag
