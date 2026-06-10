@@ -45,7 +45,8 @@ import re
 ts.set_token(os.environ.get("TUSHARE_TOKEN"))
 pro = ts.pro_api()
 
-start_hist = (get_bj_time() - datetime.timedelta(days=35)).strftime('%Y%m%d')
+# 历史价格窗口扩大到60天，确保期满日价格能查到
+start_hist = (get_bj_time() - datetime.timedelta(days=60)).strftime('%Y%m%d')
 end_hist = get_bj_time().strftime('%Y%m%d')
 all_tickers = recent_picks['Ticker'].unique().tolist()
 
@@ -66,6 +67,7 @@ if df_today is None or df_today.empty:
     df_today = pro.daily(trade_date=trade_date)
 price_map_today = dict(zip(df_today['ts_code'], df_today['close']))
 
+
 def parse_hold_days(hold_period_str):
     if not hold_period_str or hold_period_str in ['N/A', 'nan', '坚决空仓', '观望']:
         return None
@@ -73,6 +75,7 @@ def parse_hold_days(hold_period_str):
     if nums:
         return int(nums[-1])
     return None
+
 
 def get_price_on_date(ticker, target_date_str):
     if df_hist_all.empty:
@@ -87,11 +90,12 @@ def get_price_on_date(ticker, target_date_str):
         return None
     return float(valid.iloc[-1]['close'])
 
+
 # ==========================================
-# 按票聚合，过滤掉不需要追踪的票
+# 按票聚合，区分持仓中和已超期
 # ==========================================
-active_list = []    # 持仓中（周期内）→ 继续追踪
-expired_list = []   # 已超期 → 只记录期满日结果，不再追踪
+active_list = []
+expired_list = []
 
 for ticker, group in recent_picks.groupby('Ticker'):
     group = group.sort_values('Date')
@@ -99,13 +103,12 @@ for ticker, group in recent_picks.groupby('Ticker'):
     latest_row = group.iloc[-1]
     days_held = (get_bj_time().replace(tzinfo=None) - first_row['Date']).days
 
-    # 跳过 Trap_Warning 和坚决空仓的票，完全不追踪
     latest_tag = str(latest_row.get('Tag', '')).strip()
     if latest_tag == 'Trap_Warning':
         print(f"跳过 Trap_Warning: {ticker}")
         continue
 
-    # 固定用第一次推荐的周期和止损
+    # 固定用第一次推荐的周期和止损，找到就 break
     hold_period_str = 'N/A'
     stop_loss = 'N/A'
     for _, r in group.iterrows():
@@ -113,11 +116,10 @@ for ticker, group in recent_picks.groupby('Ticker'):
             hold_period_str = r['Hold_Period']
             break
     for _, r in group.iterrows():
-        if str(r.get('Stop_Loss', 'N/A')).strip() not in ['N/A', 'nan', '', '坚决空仓', '绝对规避']:
+        if str(r.get('Stop_Loss', 'N/A')).strip() not in ['N/A', 'nan', '', '坚决空仓', '绝对规避', '观望']:
             stop_loss = r['Stop_Loss']
             break
 
-    # 没有持仓周期的也跳过（无法判断是否到期）
     hold_days = parse_hold_days(hold_period_str)
     if hold_days is None:
         print(f"跳过无持仓周期: {ticker}")
@@ -128,7 +130,7 @@ for ticker, group in recent_picks.groupby('Ticker'):
     maturity_date = maturity_date_dt.strftime('%Y-%m-%d')
 
     if maturity_date_dt.replace(tzinfo=None) <= get_bj_time().replace(tzinfo=None):
-        # 已超期 → 记录期满日结果，不再放入今日追踪列表
+        # 已超期 → 归档
         maturity_price = get_price_on_date(ticker, maturity_date)
         maturity_pnl = round(((maturity_price - rec_price) / rec_price) * 100, 2) if maturity_price else None
 
@@ -177,7 +179,7 @@ if not active_list and not expired_list:
     import sys; sys.exit(0)
 
 # ==========================================
-# Claude 纪律审判
+# Claude 纪律审判（流式输出）
 # ==========================================
 client = anthropic.Anthropic(
     api_key=os.environ.get("CLAWSOCKET_API_KEY"),
@@ -194,9 +196,9 @@ prompt = f"""
 {expired_list}
 
 字段说明：
-- 首次推荐价：买入成本基准
-- 持股周期建议：第一次推荐时的建议持仓窗口，固定不变
-- 止损价：第一次推荐时设定的止损位
+- 首次推荐价：买入成本基准，后续重复推荐不改变此基准
+- 持股周期建议：第一次推荐时固定，不被后续推荐覆盖
+- 止损价：第一次推荐时设定的具体价格止损位
 - 剩余天数：距离期满还有多少天（持仓中才有）
 - 期满日盈亏(%)：持股周期到期那天的真实盈亏（已超期才有，这才是策略真实表现）
 - 系统连续推荐次数：次数越多说明系统持续看好
@@ -240,7 +242,7 @@ with client.messages.stream(
 ai_html = ai_html.replace("```html", "").replace("```", "").strip()
 
 # ==========================================
-# 写入 review_history.csv
+# 写入 review_history.csv（列数对齐修复）
 # ==========================================
 review_log = "review_history.csv"
 need_header = not os.path.exists(review_log) or os.path.getsize(review_log) == 0
@@ -251,11 +253,12 @@ try:
         review_date = get_bj_time().strftime('%Y-%m-%d')
 
         for item in active_list:
-            f.write(f"{review_date},{item['代码']},{item['名称']},{item['标签']},{item['首次推荐日']},{item['首次推荐价']},{item['现价']},{item['持仓天数']},{item['当前盈亏(%)']},{item['持股周期建议']},{item['止损价']},{item['系统连续推荐次数']},持仓中\n")
+            # Maturity_PnL 列留空，用双逗号占位，保持列数一致
+            f.write(f"{review_date},{item['代码']},{item['名称']},{item['标签']},{item['首次推荐日']},{item['首次推荐价']},{item['现价']},{item['持仓天数']},{item['当前盈亏(%)']},,{item['持股周期建议']},{item['止损价']},{item['系统连续推荐次数']},持仓中\n")
 
         for item in expired_list:
             maturity_pnl = item['期满日盈亏(%)'] if item['期满日盈亏(%)'] != "无数据" else ""
-            f.write(f"{review_date},{item['代码']},{item['名称']},{item['标签']},{item['首次推荐日']},{item['首次推荐价']},{item['期满日价格']},{item['持仓天数']},{maturity_pnl},{item['持股周期建议']},{item['止损价']},{item['系统连续推荐次数']},已超期归档\n")
+            f.write(f"{review_date},{item['代码']},{item['名称']},{item['标签']},{item['首次推荐日']},{item['首次推荐价']},{item['期满日价格']},{item['持仓天数']},{maturity_pnl},{maturity_pnl},{item['持股周期建议']},{item['止损价']},{item['系统连续推荐次数']},已超期归档\n")
 
     print("✅ 复盘结果已写入 review_history.csv")
 except Exception as e:
@@ -267,10 +270,12 @@ except Exception as e:
 style = "body{font-family:sans-serif; background:#f4f6f9; padding:20px; color:#333; line-height:1.6} .container{max-width:900px; margin:0 auto; background:#fff; padding:30px; border-radius:10px; box-shadow:0 4px 15px rgba(0,0,0,0.05)}"
 full_html = f"<!DOCTYPE html><html><head><meta charset='utf-8'><style>{style}</style></head><body><div class='container'><h1 style='color:#37474f; text-align:center;'>Alpha 雷达 A股盘后复盘</h1>{ai_html}</div></body></html>"
 
+
 def send_mail():
     acc, pwd = os.environ.get("EMAIL_ACCOUNT"), os.environ.get("EMAIL_PASSWORD")
     email_list_str = os.environ.get("TARGET_EMAILS")
-    if not acc or not email_list_str: return
+    if not acc or not email_list_str:
+        return
     targets = [e.strip() for e in email_list_str.split(",")]
     msg = MIMEMultipart()
     msg['From'] = acc
@@ -283,5 +288,6 @@ def send_mail():
             print("✅ 复盘报告密送成功！")
     except Exception as e:
         print(f"❌ 发送失败: {e}")
+
 
 send_mail()
