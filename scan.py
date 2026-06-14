@@ -33,7 +33,7 @@ if bj_hour < 6 or bj_hour >= 15:
 
 print("时间检查通过，开始扫描...")
 
-TARGET_MODEL = 'claude-opus-4-8'
+TARGET_MODEL = 'claude-fable-5'
 
 # ===== 核心参数（优化后） =====
 # 止损参数
