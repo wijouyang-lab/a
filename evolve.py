@@ -2,6 +2,7 @@
 import pandas as pd
 import datetime
 import os
+import ast
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
@@ -90,8 +91,9 @@ prompt = f"""
 
 【任务】：
 基于真实持仓盈亏数据分析胜率低的原因，调整参数或逻辑，输出改进后的完整代码。
-可以调整：RSI阈值、乖离率门槛、MACD权重、评分公式、筛选条件等。
-不要改变代码的整体结构、API调用方式、邮件发送逻辑、入库逻辑。
+可以调整：RSI阈值、乖离率门槛、MACD趋势判断、宏观新闻权重、筛选条件等。
+严格禁止：不得改变代码整体结构、API调用方式、邮件发送逻辑、入库逻辑、模型名称。
+模型名称必须保持为 claude-opus-4-8，不得修改。
 
 【严格按以下格式输出，不要加任何其他内容】：
 
@@ -116,7 +118,7 @@ prompt = f"""
 
 raw_output = ""
 with client.messages.stream(
-    model="claude-fable-5",
+    model="claude-opus-4-8",
     max_tokens=8000,
     temperature=0.2,
     messages=[{"role": "user", "content": prompt}]
@@ -142,6 +144,52 @@ except Exception as e:
     print(f"⚠️ 解析失败: {e}")
     exit(1)
 
+# ==========================================
+# 语法检查：生成的代码必须通过才能覆盖
+# ==========================================
+try:
+    ast.parse(new_code)
+    print("✅ 语法检查通过，准备覆盖 scan.py")
+except SyntaxError as e:
+    print(f"❌ 生成的代码有语法错误，终止进化，scan.py 保持不变: {e}")
+    # 仍然发邮件告知语法错误
+    report_html += f"""
+    <div style="background:#ffebee; border-left:6px solid #c62828; padding:20px; border-radius:8px; margin-top:20px;">
+    <h3 style="color:#b71c1c; margin-top:0;">❌ 语法错误，本次进化已中止</h3>
+    <p>生成的代码存在语法错误，scan.py 未被修改，系统继续使用原版本。</p>
+    <p>错误详情：{str(e)}</p>
+    </div>
+    """
+    def send_error_mail(report_html, win_rate):
+        user = os.environ.get("EMAIL_ACCOUNT")
+        pwd = os.environ.get("EMAIL_PASSWORD")
+        if not user or not pwd:
+            return
+        style = "<style>body{font-family:sans-serif;background:#f4f6f9;color:#333;padding:20px;line-height:1.6}.container{max-width:900px;margin:0 auto;background:#fff;padding:30px;border-radius:10px;}</style>"
+        full_html = f"""<!DOCTYPE html><html><head><meta charset='utf-8'>{style}</head>
+        <body><div class='container'>
+        <h1 style='color:#c62828;text-align:center;'>⚠️ A股进化失败 - 语法错误</h1>
+        <p style='text-align:center;color:#666;'>触发胜率 <b style='color:#d32f2f;'>{win_rate}%</b>，但生成代码有语法错误，scan.py 未被修改</p>
+        {report_html}
+        </div></body></html>"""
+        msg = MIMEMultipart()
+        msg['From'] = user
+        msg['To'] = user
+        msg['Subject'] = f"【A股进化失败】语法错误，scan.py 未修改 ({get_bj_time().strftime('%Y-%m-%d')})"
+        msg.attach(MIMEText(full_html, 'html'))
+        try:
+            with smtplib.SMTP_SSL("smtp.gmail.com", 465) as s:
+                s.login(user, pwd)
+                s.sendmail(user, [user], msg.as_string())
+                print("✅ 错误通知邮件已发送！")
+        except Exception as e:
+            print(f"❌ 邮件发送失败: {e}")
+    send_error_mail(report_html, overall_win_rate)
+    exit(1)
+
+# ==========================================
+# 语法检查通过，备份并覆盖
+# ==========================================
 try:
     backup_name = f"scan_backup_{get_bj_time().strftime('%Y%m%d')}.py"
     with open(backup_name, "w", encoding="utf-8") as f:
@@ -154,6 +202,7 @@ try:
 except Exception as e:
     print(f"❌ 文件写入失败: {e}")
     exit(1)
+
 
 def send_evolve_mail(report_html, win_rate, backup_name):
     user = os.environ.get("EMAIL_ACCOUNT")
@@ -192,5 +241,6 @@ def send_evolve_mail(report_html, win_rate, backup_name):
             print("✅ 进化通知邮件已发送至本人！")
     except Exception as e:
         print(f"❌ 邮件发送失败: {e}")
+
 
 send_evolve_mail(report_html, overall_win_rate, backup_name)
