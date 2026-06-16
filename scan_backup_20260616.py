@@ -1,5 +1,3 @@
-# 自动进化版本 | 时间: 2026-06-16 21:05 | 触发胜率: 21.4%
-
 # -*- coding: utf-8 -*-
 import pandas as pd
 import datetime
@@ -87,8 +85,7 @@ def get_a_share_data():
     name_map = dict(zip(basic['ts_code'], basic['name']))
     industry_map = dict(zip(basic['ts_code'], basic.get('industry', ['核心资产'] * len(basic))))
 
-    # 多取一些候选，给后续技术面预过滤留出余量
-    df_sorted = df_daily.sort_values(by='amount', ascending=False).head(80)
+    df_sorted = df_daily.sort_values(by='amount', ascending=False).head(60)
     codes = [row['ts_code'] for _, row in df_sorted.iterrows()]
 
     full_pool = {}
@@ -112,39 +109,21 @@ def get_a_share_data():
             if len(stock_data) >= 30:
                 close_px = stock_data['close']
                 ma20 = close_px.rolling(window=20).mean().iloc[-1]
-                ma5 = close_px.rolling(window=5).mean().iloc[-1]
-                ma10 = close_px.rolling(window=10).mean().iloc[-1]
                 current_close = full_pool[code]["Close"]
                 full_pool[code]["乖离率(%)"] = round(((current_close - ma20) / ma20) * 100, 2)
-                # 新增：5日线乖离率，用于识别是否回踩到健康买点
-                full_pool[code]["5日乖离(%)"] = round(((current_close - ma5) / ma5) * 100, 2)
-                full_pool[code]["均线多头"] = "是" if (ma5 > ma10 > ma20) else "否"
 
                 exp1 = close_px.ewm(span=12, adjust=False).mean()
                 exp2 = close_px.ewm(span=26, adjust=False).mean()
                 macd_line = exp1 - exp2
                 signal_line = macd_line.ewm(span=9, adjust=False).mean()
                 macd_hist = (macd_line - signal_line) * 2
-                # 升级：连续三根柱抬升且翻红才算真走强，过滤衰竭动量
-                h1, h2, h3 = macd_hist.iloc[-1], macd_hist.iloc[-2], macd_hist.iloc[-3]
-                if h1 > h2 > h3 and h1 > 0:
-                    full_pool[code]["MACD趋势"] = "走强"
-                elif h1 < h2:
-                    full_pool[code]["MACD趋势"] = "走弱"
-                else:
-                    full_pool[code]["MACD趋势"] = "盘整"
+                full_pool[code]["MACD趋势"] = "走强" if macd_hist.iloc[-1] > macd_hist.iloc[-2] else "走弱"
 
                 delta = close_px.diff()
                 gain = delta.clip(lower=0).ewm(com=13, adjust=False).mean()
                 loss = (-1 * delta.clip(upper=0)).ewm(com=13, adjust=False).mean()
                 rs = gain / loss
-                rsi_val = round((100 - (100 / (1 + rs))).iloc[-1], 2)
-                full_pool[code]["RSI"] = rsi_val
-
-                # 源头预过滤：剔除极端高位/超买票，杜绝顶部接盘
-                bias20 = full_pool[code]["乖离率(%)"]
-                if bias20 > 18 or rsi_val > 80:
-                    del full_pool[code]
+                full_pool[code]["RSI"] = round((100 - (100 / (1 + rs))).iloc[-1], 2)
             else:
                 del full_pool[code]
 
@@ -173,8 +152,6 @@ def generate_ai_report(pool_data, macro_news_text):
             "收盘价": d["Close"],
             "涨跌幅": d.get("pct_chg", 0),
             "乖离率": d.get("乖离率(%)", "N/A"),
-            "5日乖离": d.get("5日乖离(%)", "N/A"),
-            "均线多头": d.get("均线多头", "N/A"),
             "RSI": d.get("RSI", "N/A"),
             "MACD": d.get("MACD趋势", "N/A"),
         }
@@ -185,21 +162,17 @@ def generate_ai_report(pool_data, macro_news_text):
     你是华尔街顶级游资主力量化操盘手。你的交易哲学是：【宏观定方向，产业定主线，技术定买卖】。
     今天是{today_str}。
 
-    【血泪教训（最高纪律）】：过去30天系统胜率仅21%，根因是【追高接盘】——专挑成交额最大的票在局部顶部买入，4天必亏。
-    本次必须彻底反转思路：宁可错过，绝不追高。只在【动量真实走强 + 未超买 + 回踩支撑】的位置进攻。
-
     【盘前宏观与全球重大快讯（最高优先级）】：
     {macro_news_text}
 
-    【今日两市资金最活跃的标的池（已剔除极端高位票）】：
+    【今日两市资金最活跃的 Top 40 标的池】：
     {json.dumps(compact_pool, ensure_ascii=False)}
 
     【核心推演任务】：
-    第一步（宏观选将）：深刻阅读盘前新闻，判断今日的主线逻辑。根据你推演出的【宏观主线】，从池子中挑出与之行业和逻辑最契合的标的。
-    第二步（技术风控，三重确认，缺一不可）：审查你挑出的标的。
-    - 列为【核心双龙】的硬性条件（必须同时满足）：①宏观主线高度契合；②乖离率 < 7% 且 RSI < 65（未超买）；③MACD趋势为"走强"（真实动量）；④当日涨跌幅 ≤ 7%（未追大阳线）。优先选回踩5日线（5日乖离接近0或为负）的健康标的。
-    - 列为【梯队先锋】的条件：宏观逻辑较好且 乖离率 < 9%、RSI < 68、MACD非"走弱"。
-    - 凡满足下列任一条件者，一律打入【诱多对照组】严禁接盘：乖离率 > 10%、或 RSI > 72、或 当日涨跌幅 > 7%、或 MACD"走弱"。无论宏观逻辑多好都不许碰！
+    第一步（宏观选将）：深刻阅读盘前新闻，判断今日的主线逻辑。根据你推演出的【宏观主线】，从 Top 40 池子中挑出与之行业和逻辑最契合的标的。
+    第二步（技术风控）：审查你挑出的标的。
+    - 若其技术面安全（乖离率 < 12%，RSI < 75），将其列为【核心双龙】或【梯队先锋】。
+    - 若其宏观逻辑极好，但技术面极度危险（乖离率 > 15%，严重超买），必须将其列入【诱多对照组】，严禁追高接盘！
 
     【硬性纪律】：
     1. 同一只股票绝对不能在报告中重复出现。
@@ -218,26 +191,26 @@ def generate_ai_report(pool_data, macro_news_text):
         <div class="card core-card">
             <h3>[核心双龙] 1. [名称] ([代码])</h3>
             <p><span class="tag bg-red">🔥 宏观驱动与逻辑:</span> (说明为什么它最契合今天的盘前宏观主线)</p>
-            <p><span class="tag bg-blue">📈 技术面与安全垫:</span> (引用乖离率、5日乖离、MACD、RSI数据证明三重确认成立，强调非超买与回踩买点)</p>
+            <p><span class="tag bg-blue">📈 技术面与安全垫:</span> (引用传入的乖离率、MACD、RSI数据说明买点)</p>
             <p><span class="tag bg-orange">⚠️ 潜伏与风控底线:</span> 周期:[5-12天] | 止损:[XX.XX元]</p>
         </div>
         <div class="card core-card">
             <h3>[核心双龙] 2. [名称] ([代码])</h3>
             <p><span class="tag bg-red">🔥 宏观驱动与逻辑:</span> (说明主线契合度)</p>
-            <p><span class="tag bg-blue">📈 技术面与安全垫:</span> (引用真实数据证明三重确认成立)</p>
+            <p><span class="tag bg-blue">📈 技术面与安全垫:</span> (引用真实数据)</p>
             <p><span class="tag bg-orange">⚠️ 潜伏与风控底线:</span> 周期:[5-12天] | 止损:[XX.XX元]</p>
         </div>
 
         <div class="card sub-card">
             <h3>[梯队先锋] 3. [名称] ([代码])</h3>
             <p><span class="tag bg-green">⚔️ 产业事件与资金:</span> (分析其行业催化剂)</p>
-            <p><span class="tag bg-gray">📉 辅助风控点:</span> (分析技术面，确认未超买)</p>
+            <p><span class="tag bg-gray">📉 辅助风控点:</span> (分析技术面)</p>
             <p><span class="tag bg-orange">⚠️ 潜伏与风控底线:</span> 周期:[3-7天] | 止损:[XX.XX元]</p>
         </div>
         <div class="card sub-card">
             <h3>[梯队先锋] 4. [名称] ([代码])</h3>
             <p><span class="tag bg-green">⚔️ 产业事件与资金:</span> (分析催化剂)</p>
-            <p><span class="tag bg-gray">📉 辅助风控点:</span> (分析技术面，确认未超买)</p>
+            <p><span class="tag bg-gray">📉 辅助风控点:</span> (分析技术面)</p>
             <p><span class="tag bg-orange">⚠️ 潜伏与风控底线:</span> 周期:[3-7天] | 止损:[XX.XX元]</p>
         </div>
 
@@ -257,7 +230,7 @@ def generate_ai_report(pool_data, macro_news_text):
     <div class="card trap-card">
         <h3>🚨 诱多对照组（严禁接盘）</h3>
         <ul>
-            <li><b>11. [名称] ([代码]) | <span class="bear-text">诊断：坚决回避</span></b><br>❌ 宏观或技术硬伤：(说明为何不能碰，引用超买/追高/MACD走弱数据)<br>⚠️ 致命硬伤：...</li>
+            <li><b>11. [名称] ([代码]) | <span class="bear-text">诊断：坚决回避</span></b><br>❌ 宏观或技术硬伤：(说明为何不能碰)<br>⚠️ 致命硬伤：...</li>
             <li><b>12. [名称] ([代码]) | <span class="bear-text">诊断：坚决回避</span></b><br>❌ 宏观或技术硬伤：...<br>⚠️ 致命硬伤：...</li>
         </ul>
     </div>
@@ -274,7 +247,7 @@ def generate_ai_report(pool_data, macro_news_text):
             ai_html += text
 
     print("✅ AI 宏观穿透报告生成完毕")
-    return ai_html.replace("html", "").replace("", "").strip()
+    return ai_html.replace("```html", "").replace("```", "").strip()
 
 
 def build_email(ai_html):
