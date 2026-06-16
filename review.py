@@ -20,7 +20,7 @@ if bj_hour < 15:
     print(f"现在是北京时间 {bj_hour} 点，A股尚未收盘，跳过复盘。")
     import sys; sys.exit(0)
 
-TARGET_MODEL = 'claude-fable-5'
+TARGET_MODEL = 'claude-opus-4-8'
 print("启动 A 股盘后复盘引擎...")
 
 log_file = "trade_history.csv"
