@@ -1,5 +1,4 @@
 # 消息+逻辑推演驱动版 | 事件→产业链→受益标的
-
 # -*- coding: utf-8 -*-
 import pandas as pd
 import datetime
@@ -41,65 +40,20 @@ pro = ts.pro_api()
 
 
 # ==========================================
-# 1. 多源新闻采集（全球宏观 + A股消息面）
+# 1. 获取交易额 Top 300（轻量级圈定主力池）
 # ==========================================
-def get_latest_macro_news():
-    print("正在抓取全球财经与A股消息面...")
-    news_lines = []
-
-    # 英文全球宏观
-    sources = [
-        ("CNBC", "https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss01&id=100003114"),
-        ("Reuters", "https://feeds.reuters.com/reuters/businessNews"),
-        ("MarketWatch", "https://feeds.marketwatch.com/marketwatch/topstories/"),
-    ]
-    for source_name, url in sources:
-        try:
-            req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-            with urllib.request.urlopen(req, timeout=10) as response:
-                xml_data = response.read()
-            root = ET.fromstring(xml_data)
-            items = root.findall('.//item')[:5]
-            for item in items:
-                title = item.find('title')
-                pub_date = item.find('pubDate')
-                if title is not None:
-                    time_str = pub_date.text[:16] if pub_date is not None else ""
-                    news_lines.append(f"[{source_name}] {time_str} - {title.text}")
-        except Exception as e:
-            print(f"⚠️ {source_name} 抓取失败: {e}")
-
-    # 新浪财经A股国内消息
-    try:
-        df_news = pro.news(src='sina', limit=15)
-        if df_news is not None and not df_news.empty:
-            for _, row in df_news.iterrows():
-                news_lines.append(f"[新浪财经] {row['datetime'][11:16]} - {row['title']}")
-            print("✅ 新浪财经新闻抓取成功")
-    except Exception as e:
-        print(f"⚠️ 新浪财经抓取失败: {e}")
-
-    if news_lines:
-        print(f"✅ 共抓取 {len(news_lines)} 条新闻")
-        return "\n".join(news_lines)
-    return "暂无实时新闻，请基于昨日收盘及产业逻辑推演。"
-
-
-# ==========================================
-# 2. 获取交易额 Top 300 + 基础技术数据
-# ==========================================
-def get_a_share_data():
+def get_top_300_pool():
     trade_date = (get_bj_time() - datetime.timedelta(days=1)).strftime('%Y%m%d')
-    print(f"正在拉取 {trade_date} 的A股主力资金活跃数据...")
+    print(f"🔍 [阶段1] 正在拉取 {trade_date} 的A股全市场数据，圈定 Top 300 主力资金池...")
 
     df_daily = pro.daily(trade_date=trade_date)
     if df_daily is None or df_daily.empty:
         trade_date = (get_bj_time() - datetime.timedelta(days=2)).strftime('%Y%m%d')
-        print(f"昨日数据为空，尝试 {trade_date}...")
+        print(f"   昨日数据为空，尝试 {trade_date}...")
         df_daily = pro.daily(trade_date=trade_date)
         if df_daily is None or df_daily.empty:
-            print("数据拉取失败，返回空。")
-            return []
+            print("🚨 数据拉取失败，返回空池。")
+            return {}, []
 
     basic = pro.stock_basic(exchange='', list_status='L', fields='ts_code,name,industry')
     name_map = dict(zip(basic['ts_code'], basic['name']))
@@ -120,10 +74,59 @@ def get_a_share_data():
             "Amount": row['amount'],
             "pct_chg": row.get('pct_chg', 0),
         }
+        
+    print(f"✅ 成功圈定 {len(full_pool)} 只核心活跃标的。")
+    return full_pool, codes
 
-    # 技术数据（仅作风控兜底，不做选股过滤）
+
+# ==========================================
+# 2. 多源免费新闻采集（彻底避开 Tushare 权限）
+# ==========================================
+def get_free_macro_news():
+    print("📡 [阶段2] 正在跨过 Tushare，从免费公网节点抓取全球财经与A股新闻...")
+    news_lines = []
+
+    # 使用国内外免费且稳定的 RSS 接口
+    sources = [
+        ("新浪A股热点", "https://rss.sina.com.cn/roll/finance/hot_roll.xml"),
+        ("华尔街日报(宏观)", "https://feeds.a.dj.com/rss/RSSMarketsMain.xml"),
+        ("CNBC(宏观)", "https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss01&id=10000664"),
+    ]
+    
+    for source_name, url in sources:
+        try:
+            # 伪装浏览器请求头，防止被反爬屏蔽
+            req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'})
+            with urllib.request.urlopen(req, timeout=10) as response:
+                xml_data = response.read()
+            root = ET.fromstring(xml_data)
+            items = root.findall('.//item')[:8] # 每个源取前8条
+            for item in items:
+                title = item.find('title')
+                pub_date = item.find('pubDate')
+                if title is not None:
+                    time_str = pub_date.text[:25] if pub_date is not None else ""
+                    news_lines.append(f"[{source_name}] {time_str} - {title.text}")
+            print(f"   ✅ {source_name} 节点抓取成功")
+        except Exception as e:
+            print(f"   ⚠️ {source_name} 节点抓取失败: {e}")
+
+    if news_lines:
+        print(f"✅ 盘前免费新闻矩阵组装完毕，共 {len(news_lines)} 条。")
+        return "\n".join(news_lines)
+    return "暂无实时新闻，请基于昨日收盘及底层产业逻辑推演。"
+
+
+# ==========================================
+# 3. 定向计算技术指标（仅针对这 300 只票）
+# ==========================================
+def calc_tech_indicators(full_pool, codes):
+    trade_date = (get_bj_time() - datetime.timedelta(days=1)).strftime('%Y%m%d')
+    print("⚙️ [阶段3] 正在回头定向拉取 Top 300 的历史K线，计算风控技术指标...")
+    
     try:
         start_hist = (get_bj_time() - datetime.timedelta(days=120)).strftime('%Y%m%d')
+        # 仅请求这300只股票的历史数据，大幅节约接口性能
         df_hist = pro.daily(
             ts_code=",".join(codes),
             start_date=start_hist,
@@ -151,21 +154,21 @@ def get_a_share_data():
                 rs = gain / loss
                 full_pool[code]["RSI"] = round((100 - (100 / (1 + rs))).iloc[-1], 2)
             else:
-                del full_pool[code]
+                del full_pool[code] # 剔除次新股等数据不足的标的
 
     except Exception as e:
-        print(f"⚠️ 指标拉取受限: {e}")
+        print(f"🚨 指标拉取受限: {e}")
 
     final_pool = sorted(list(full_pool.values()), key=lambda x: x.get("Amount", 0), reverse=True)
-    print(f"✅ 共 {len(final_pool)} 只标的准备就绪。")
+    print(f"✅ 技术指标运算完成，最终 {len(final_pool)} 只标的打包装车。")
     return final_pool
 
 
 # ==========================================
-# 3. Claude 事件逻辑推演选股
+# 4. Claude 事件逻辑推演选股
 # ==========================================
 def generate_ai_report(pool_data, macro_news_text):
-    print("🧠 开始调用 AI（事件→产业链→受益标的逻辑推演）...")
+    print("🧠 [阶段4] 召唤 AI 大脑（执行：事件→产业链→受益标的逻辑推演）...")
     client = anthropic.Anthropic(
         api_key=os.environ.get("CLAWSOCKET_API_KEY"),
         base_url=os.environ.get("CLAWSOCKET_BASE_URL")
@@ -195,7 +198,8 @@ def generate_ai_report(pool_data, macro_news_text):
 {macro_news_text}
 
 【今日A股交易额 Top 100（资金已在此聚集）】：
-{json.dumps(compact_pool, ensure_ascii=False)}
+{json.dumps(compact_pool[:100], ensure_ascii=False)} 
+*(注：为保证专注力，仅向你展示前100只最核心活跃池)*
 
 技术数据字段说明（仅作风控参考，不作选股依据）：
 - 今日涨跌(%)：今日市场情绪
@@ -218,24 +222,11 @@ def generate_ai_report(pool_data, macro_news_text):
 → 间接受损：依赖进口钨粉的欧美半导体厂
 → 在A股Top 100中寻找：钨矿、钨加工、六氟化钨相关企业
 
-事件：政府工作报告提出加大新能源补贴
-→ 逻辑链：政策支持 → 需求拉动 → 产业链景气度上升
-→ 直接受益：整车（尤其纯电）、动力电池、充电桩
-→ 间接受益：锂矿、正极材料、负极材料、电解液
-→ 在A股Top 100中寻找对应标的
-
-事件：美伊签署协议，石油出口限制解除
-→ 逻辑链：伊朗石油重回市场 → 全球供给增加 → 油价下跌
-→ 直接受损：A股石油开采企业（中石油、中石化系）
-→ 直接受益：航空公司（燃油成本占40%，油价跌=成本大降）、化工企业（石化原料成本下降）
-→ 在A股Top 100中寻找航空股、化工股
-
 ━━━━━━━━━━━━━━━━━━━━━━
-第二步：从Top 100中匹配受益标的
+第二步：从核心池中匹配受益标的
 ━━━━━━━━━━━━━━━━━━━━━━
-基于你推演出的逻辑，在提供的Top 100中找出行业最直接契合的标的。
+基于你推演出的逻辑，在提供的池子中找出行业最直接契合的标的。
 优先选择：逻辑链最短（直接受益）> 逻辑链较长（间接受益）。
-资金验证：今日在Top 100中说明市场已在关注这个方向。
 
 ━━━━━━━━━━━━━━━━━━━━━━
 第三步：技术面风控兜底（非选股依据）
@@ -272,7 +263,7 @@ def generate_ai_report(pool_data, macro_news_text):
     <div class="card core-card">
         <h3>[核心双龙] 1. [名称] ([代码]) | [行业]</h3>
         <p><span class="tag bg-red">🔗 事件逻辑链：</span>[具体事件] → [传导机制，1-2句话说清楚] → [该企业为什么是直接受益方，不能只说"行业受益"]</p>
-        <p><span class="tag bg-blue">💰 资金验证：</span>今日交易额排名Top [N]，涨跌[X]%，资金已在关注此方向</p>
+        <p><span class="tag bg-blue">💰 资金验证：</span>今日属于巨量核心池标的，涨跌[X]%，资金已在关注此方向</p>
         <p><span class="tag bg-gray">📈 技术风控：</span>乖离率[X]%，RSI[X]，[是否存在透支风险的简短判断]</p>
         <p><span class="tag bg-orange">⚠️ 风控底线：</span>周期:[5-12天] | 止损:[XX.XX元]</p>
     </div>
@@ -288,32 +279,24 @@ def generate_ai_report(pool_data, macro_news_text):
     <div class="card sub-card">
         <h3>[梯队先锋] 3. [名称] ([代码]) | [行业]</h3>
         <p><span class="tag bg-red">🔗 事件逻辑链：</span>(...)</p>
-        <p><span class="tag bg-blue">💰 资金验证：</span>(...)</p>
-        <p><span class="tag bg-gray">📈 技术风控：</span>(...)</p>
         <p><span class="tag bg-orange">⚠️ 风控底线：</span>周期:[3-7天] | 止损:[XX.XX元]</p>
     </div>
 
     <div class="card sub-card">
         <h3>[梯队先锋] 4. [名称] ([代码]) | [行业]</h3>
         <p><span class="tag bg-red">🔗 事件逻辑链：</span>(...)</p>
-        <p><span class="tag bg-blue">💰 资金验证：</span>(...)</p>
-        <p><span class="tag bg-gray">📈 技术风控：</span>(...)</p>
         <p><span class="tag bg-orange">⚠️ 风控底线：</span>周期:[3-7天] | 止损:[XX.XX元]</p>
     </div>
 
     <div class="card sub-card">
         <h3>[梯队先锋] 5. [名称] ([代码]) | [行业]</h3>
         <p><span class="tag bg-red">🔗 事件逻辑链：</span>(...)</p>
-        <p><span class="tag bg-blue">💰 资金验证：</span>(...)</p>
-        <p><span class="tag bg-gray">📈 技术风控：</span>(...)</p>
         <p><span class="tag bg-orange">⚠️ 风控底线：</span>周期:[3-7天] | 止损:[XX.XX元]</p>
     </div>
 
     <div class="card sub-card">
         <h3>[梯队先锋] 6. [名称] ([代码]) | [行业]</h3>
         <p><span class="tag bg-red">🔗 事件逻辑链：</span>(...)</p>
-        <p><span class="tag bg-blue">💰 资金验证：</span>(...)</p>
-        <p><span class="tag bg-gray">📈 技术风控：</span>(...)</p>
         <p><span class="tag bg-orange">⚠️ 风控底线：</span>周期:[3-7天] | 止损:[XX.XX元]</p>
     </div>
 
@@ -401,18 +384,26 @@ def send_emails(html_content):
 
 
 if __name__ == "__main__":
-    macro_news = get_latest_macro_news()
-    raw_pool = get_a_share_data()
+    # 步骤 1：寻找全场最热的 300 只股票
+    full_pool, codes = get_top_300_pool()
 
-    if raw_pool:
-        ai_html = generate_ai_report(raw_pool, macro_news)
+    if full_pool:
+        # 步骤 2：去公网白嫖全量新闻（规避 Tushare 接口报错）
+        macro_news = get_free_macro_news()
+        
+        # 步骤 3：带着前 300 的名单，回头去算风控技术面
+        final_pool = calc_tech_indicators(full_pool, codes)
+
+        # 步骤 4：送交 AI 大脑推演
+        ai_html = generate_ai_report(final_pool, macro_news)
         full_html = build_email(ai_html)
 
+        # ====== 账本清算逻辑 ======
         chosen = []
         clean_html = re.sub(r'<[^>]+>', ' ', ai_html)
         clean_html = re.sub(r'\s+', ' ', clean_html)
 
-        for item in raw_pool:
+        for item in final_pool:
             ticker_str = str(item['Name'])
             idx = clean_html.find(ticker_str)
             if idx == -1:
@@ -422,34 +413,22 @@ if __name__ == "__main__":
             tag = None
             context = clean_html[max(0, idx-300):idx] + chunk[:200]
 
-            if "核心双龙" in context:
-                tag = "Core_Double_Dragon"
-            elif "梯队先锋" in context:
-                tag = "Sub_Pioneer"
-            elif "观察池" in context:
-                tag = "Observation"
-            elif "逻辑受损" in context or "坚决回避" in context:
-                tag = "Trap_Warning"
+            if "核心双龙" in context: tag = "Core_Double_Dragon"
+            elif "梯队先锋" in context: tag = "Sub_Pioneer"
+            elif "观察池" in context: tag = "Observation"
+            elif "逻辑受损" in context or "坚决回避" in context: tag = "Trap_Warning"
 
-            if tag is None:
-                continue
-            if tag == "Trap_Warning":
+            if tag is None or tag == "Trap_Warning":
                 continue
 
             period_match = re.search(r'周期\s*[:：]\s*\[?(\d+[-~]\d+天|\d+天|观望)', chunk)
 
             if tag == "Observation":
-                hold_period = "观望"
-                stop_loss = "观望"
+                hold_period, stop_loss = "观望", "观望"
             else:
-                hold_period = period_match.group(1).strip() if period_match else (
-                    "5-12天" if tag == "Core_Double_Dragon" else "3-7天"
-                )
+                hold_period = period_match.group(1).strip() if period_match else ("5-12天" if tag == "Core_Double_Dragon" else "3-7天")
                 sl_match = re.search(r'止损\s*[:：]\s*\[?(\d{1,5}\.\d{1,2}元)', chunk)
-                if sl_match:
-                    stop_loss = sl_match.group(1).strip()
-                else:
-                    stop_loss = f"{round(item['Close'] * (1 + DEFAULT_STOP_LOSS_PCT / 100), 2)}元"
+                stop_loss = sl_match.group(1).strip() if sl_match else f"{round(item['Close'] * (1 + DEFAULT_STOP_LOSS_PCT / 100), 2)}元"
 
             item['Tag'] = tag
             item['Hold_Period'] = hold_period
