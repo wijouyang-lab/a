@@ -45,7 +45,6 @@ import re
 ts.set_token(os.environ.get("TUSHARE_TOKEN"))
 pro = ts.pro_api()
 
-# 历史价格窗口扩大到60天，确保期满日价格能查到
 start_hist = (get_bj_time() - datetime.timedelta(days=60)).strftime('%Y%m%d')
 end_hist = get_bj_time().strftime('%Y%m%d')
 all_tickers = recent_picks['Ticker'].unique().tolist()
@@ -91,9 +90,6 @@ def get_price_on_date(ticker, target_date_str):
     return float(valid.iloc[-1]['close'])
 
 
-# ==========================================
-# 按票聚合，区分持仓中和已超期
-# ==========================================
 active_list = []
 expired_list = []
 
@@ -108,7 +104,6 @@ for ticker, group in recent_picks.groupby('Ticker'):
         print(f"跳过 Trap_Warning: {ticker}")
         continue
 
-    # 固定用第一次推荐的周期和止损，找到就 break
     hold_period_str = 'N/A'
     stop_loss = 'N/A'
     for _, r in group.iterrows():
@@ -130,7 +125,6 @@ for ticker, group in recent_picks.groupby('Ticker'):
     maturity_date = maturity_date_dt.strftime('%Y-%m-%d')
 
     if maturity_date_dt.replace(tzinfo=None) <= get_bj_time().replace(tzinfo=None):
-        # 已超期 → 归档
         maturity_price = get_price_on_date(ticker, maturity_date)
         maturity_pnl = round(((maturity_price - rec_price) / rec_price) * 100, 2) if maturity_price else None
 
@@ -149,7 +143,6 @@ for ticker, group in recent_picks.groupby('Ticker'):
             "系统连续推荐次数": len(group),
         })
     else:
-        # 持仓中 → 继续追踪
         cur_price = price_map_today.get(ticker)
         if not cur_price:
             continue
@@ -178,9 +171,6 @@ if not active_list and not expired_list:
     print("⚠️ 无需复盘的标的，退出。")
     import sys; sys.exit(0)
 
-# ==========================================
-# Claude 纪律审判（流式输出）
-# ==========================================
 client = anthropic.Anthropic(
     api_key=os.environ.get("CLAWSOCKET_API_KEY"),
     base_url=os.environ.get("CLAWSOCKET_BASE_URL")
@@ -242,7 +232,7 @@ with client.messages.stream(
 ai_html = ai_html.replace("```html", "").replace("```", "").strip()
 
 # ==========================================
-# 写入 review_history.csv（列数对齐修复）
+# 写入 review_history.csv
 # ==========================================
 review_log = "review_history.csv"
 need_header = not os.path.exists(review_log) or os.path.getsize(review_log) == 0
@@ -253,7 +243,6 @@ try:
         review_date = get_bj_time().strftime('%Y-%m-%d')
 
         for item in active_list:
-            # Maturity_PnL 列留空，用双逗号占位，保持列数一致
             f.write(f"{review_date},{item['代码']},{item['名称']},{item['标签']},{item['首次推荐日']},{item['首次推荐价']},{item['现价']},{item['持仓天数']},{item['当前盈亏(%)']},,{item['持股周期建议']},{item['止损价']},{item['系统连续推荐次数']},持仓中\n")
 
         for item in expired_list:
@@ -265,27 +254,31 @@ except Exception as e:
     print(f"⚠️ 复盘写入失败: {e}")
 
 # ==========================================
-# 发送邮件
+# 发送邮件（只发给仓库主人，读取 OWNER_EMAIL Secret）
 # ==========================================
 style = "body{font-family:sans-serif; background:#f4f6f9; padding:20px; color:#333; line-height:1.6} .container{max-width:900px; margin:0 auto; background:#fff; padding:30px; border-radius:10px; box-shadow:0 4px 15px rgba(0,0,0,0.05)}"
 full_html = f"<!DOCTYPE html><html><head><meta charset='utf-8'><style>{style}</style></head><body><div class='container'><h1 style='color:#37474f; text-align:center;'>Alpha 雷达 A股盘后复盘</h1>{ai_html}</div></body></html>"
 
 
 def send_mail():
-    acc, pwd = os.environ.get("EMAIL_ACCOUNT"), os.environ.get("EMAIL_PASSWORD")
-    email_list_str = os.environ.get("TARGET_EMAILS")
-    if not acc or not email_list_str:
+    acc = os.environ.get("EMAIL_ACCOUNT")
+    pwd = os.environ.get("EMAIL_PASSWORD")
+    # 复盘只发给仓库主人，从 OWNER_EMAIL Secret 读取
+    owner_email = os.environ.get("OWNER_EMAIL")
+    if not acc or not pwd or not owner_email:
+        print("⚠️ 邮箱配置缺失（需要 EMAIL_ACCOUNT、EMAIL_PASSWORD、OWNER_EMAIL），跳过发送。")
         return
-    targets = [e.strip() for e in email_list_str.split(",")]
+
     msg = MIMEMultipart()
     msg['From'] = acc
+    msg['To'] = owner_email
     msg['Subject'] = f"【盘后清算】A股风控纪律与复盘 ({get_bj_time().strftime('%Y-%m-%d')})"
     msg.attach(MIMEText(full_html, 'html'))
     try:
         with smtplib.SMTP_SSL("smtp.gmail.com", 465) as s:
             s.login(acc, pwd)
-            s.sendmail(acc, targets, msg.as_string())
-            print("✅ 复盘报告密送成功！")
+            s.sendmail(acc, [owner_email], msg.as_string())
+            print(f"✅ 复盘报告已私密发送至仓库主人！")
     except Exception as e:
         print(f"❌ 发送失败: {e}")
 
