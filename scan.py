@@ -12,6 +12,7 @@ import tushare as ts
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 import anthropic
+import time
 
 BEIJING_TZ = datetime.timezone(datetime.timedelta(hours=8))
 def get_bj_time():
@@ -85,11 +86,8 @@ def get_top_300_pool():
 def get_free_macro_news():
     print("📡 [阶段2] 正在跨过 Tushare，从免费公网节点抓取全球财经与A股新闻...")
     news_lines = []
-    
-    # 🔒 安全锁1：获取当前年份，用于剔除穿越的旧新闻
     current_year = str(get_bj_time().year)
 
-    # 使用国内外免费且稳定的 RSS 接口
     sources = [
         ("新浪A股热点", "https://rss.sina.com.cn/roll/finance/hot_roll.xml"),
         ("华尔街日报(宏观)", "https://feeds.a.dj.com/rss/RSSMarketsMain.xml"),
@@ -98,75 +96,96 @@ def get_free_macro_news():
     
     for source_name, url in sources:
         try:
-            # 伪装浏览器请求头，防止被反爬屏蔽
-            req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'})
+            req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
             with urllib.request.urlopen(req, timeout=10) as response:
                 xml_data = response.read()
             root = ET.fromstring(xml_data)
-            items = root.findall('.//item')[:8] # 每个源取前8条
+            items = root.findall('.//item')[:8]
             for item in items:
                 title = item.find('title')
                 pub_date = item.find('pubDate')
                 if title is not None:
                     time_str = pub_date.text[:25] if pub_date is not None else ""
-                    # 🔒 安全锁1执行：如果时间戳里没有今年的年份，直接视为脏数据丢弃！
-                    if current_year not in time_str:
-                        continue
+                    if current_year not in time_str: continue # 剔除旧闻
                     news_lines.append(f"[{source_name}] {time_str} - {title.text}")
             print(f"   ✅ {source_name} 节点抓取成功")
         except Exception as e:
             print(f"   ⚠️ {source_name} 节点抓取失败: {e}")
 
     if news_lines:
-        print(f"✅ 盘前免费新闻矩阵组装完毕，共 {len(news_lines)} 条新鲜资讯。")
+        print(f"✅ 盘前免费新闻矩阵组装完毕，共 {len(news_lines)} 条。")
         return "\n".join(news_lines)
     return "暂无实时新闻，请基于昨日收盘及底层产业逻辑推演。"
 
 
 # ==========================================
-# 3. 定向计算技术指标（仅针对这 300 只票）
+# 3. 定向计算技术指标（分批抓取 + 免死金牌）
 # ==========================================
 def calc_tech_indicators(full_pool, codes):
     trade_date = (get_bj_time() - datetime.timedelta(days=1)).strftime('%Y%m%d')
-    print("⚙️ [阶段3] 正在回头定向拉取 Top 300 的历史K线，计算风控技术指标...")
+    print("⚙️ [阶段3] 正在回头定向拉取 Top 300 的历史K线，分批次绕过 API 限制...")
+    
+    start_hist = (get_bj_time() - datetime.timedelta(days=120)).strftime('%Y%m%d')
+    all_hist_data = []
+    batch_size = 40 # 每批 40 只，绝不会超载
     
     try:
-        start_hist = (get_bj_time() - datetime.timedelta(days=120)).strftime('%Y%m%d')
-        # 仅请求这300只股票的历史数据，大幅节约接口性能
-        df_hist = pro.daily(
-            ts_code=",".join(codes),
-            start_date=start_hist,
-            end_date=trade_date
-        ).sort_values(['ts_code', 'trade_date'])
+        for i in range(0, len(codes), batch_size):
+            batch_codes = codes[i:i+batch_size]
+            try:
+                df_batch = pro.daily(
+                    ts_code=",".join(batch_codes),
+                    start_date=start_hist,
+                    end_date=trade_date
+                )
+                if df_batch is not None and not df_batch.empty:
+                    all_hist_data.append(df_batch)
+                time.sleep(0.12) # 保护 Tushare 请求频率
+            except Exception as e:
+                print(f"   ⚠️ 批次拉取受限: {e}")
+                
+        # 拼接所有拉取到的历史数据
+        df_hist = pd.concat(all_hist_data, ignore_index=True) if all_hist_data else pd.DataFrame()
 
+        # 遍历全量 300 只活跃股，就算没拉到数据也发免死金牌
         for code in list(full_pool.keys()):
-            stock_data = df_hist[df_hist['ts_code'] == code].copy()
-            if len(stock_data) >= 30:
-                close_px = stock_data['close']
-                ma20 = close_px.rolling(window=20).mean().iloc[-1]
-                current_close = full_pool[code]["Close"]
-                full_pool[code]["乖离率(%)"] = round(((current_close - ma20) / ma20) * 100, 2)
+            if not df_hist.empty and code in df_hist['ts_code'].values:
+                stock_data = df_hist[df_hist['ts_code'] == code].copy().sort_values('trade_date')
+                if len(stock_data) >= 30:
+                    close_px = stock_data['close']
+                    ma20 = close_px.rolling(window=20).mean().iloc[-1]
+                    current_close = full_pool[code]["Close"]
+                    full_pool[code]["乖离率(%)"] = round(((current_close - ma20) / ma20) * 100, 2)
 
-                exp1 = close_px.ewm(span=12, adjust=False).mean()
-                exp2 = close_px.ewm(span=26, adjust=False).mean()
-                macd_line = exp1 - exp2
-                signal_line = macd_line.ewm(span=9, adjust=False).mean()
-                macd_hist = (macd_line - signal_line) * 2
-                full_pool[code]["MACD趋势"] = "走强" if macd_hist.iloc[-1] > macd_hist.iloc[-2] else "走弱"
+                    exp1 = close_px.ewm(span=12, adjust=False).mean()
+                    exp2 = close_px.ewm(span=26, adjust=False).mean()
+                    macd_line = exp1 - exp2
+                    signal_line = macd_line.ewm(span=9, adjust=False).mean()
+                    macd_hist = (macd_line - signal_line) * 2
+                    full_pool[code]["MACD趋势"] = "走强" if macd_hist.iloc[-1] > macd_hist.iloc[-2] else "走弱"
 
-                delta = close_px.diff()
-                gain = delta.clip(lower=0).ewm(com=13, adjust=False).mean()
-                loss = (-1 * delta.clip(upper=0)).ewm(com=13, adjust=False).mean()
-                rs = gain / loss
-                full_pool[code]["RSI"] = round((100 - (100 / (1 + rs))).iloc[-1], 2)
-            else:
-                del full_pool[code] # 剔除次新股等数据不足的标的
+                    delta = close_px.diff()
+                    gain = delta.clip(lower=0).ewm(com=13, adjust=False).mean()
+                    loss = (-1 * delta.clip(upper=0)).ewm(com=13, adjust=False).mean()
+                    rs = gain / loss
+                    full_pool[code]["RSI"] = round((100 - (100 / (1 + rs))).iloc[-1], 2)
+                    continue # 如果正常算出来了，就跳过下面的兜底
+
+            # 🔥 免死金牌：没有历史数据绝不删主力股！赋予占位符，让 AI 靠逻辑强选
+            full_pool[code]["乖离率(%)"] = 0.0
+            full_pool[code]["RSI"] = 50.0
+            full_pool[code]["MACD趋势"] = "API限流(纯事件驱动)"
 
     except Exception as e:
-        print(f"🚨 指标拉取受限: {e}")
+        print(f"🚨 指标全局处理受限: {e}，启用全量兜底，确保 AI 不断粮。")
+        for code in full_pool:
+            if "RSI" not in full_pool[code]:
+                full_pool[code]["乖离率(%)"] = 0.0
+                full_pool[code]["RSI"] = 50.0
+                full_pool[code]["MACD趋势"] = "API崩溃保护"
 
     final_pool = sorted(list(full_pool.values()), key=lambda x: x.get("Amount", 0), reverse=True)
-    print(f"✅ 技术指标运算完成，最终 {len(final_pool)} 只标的打包装车。")
+    print(f"✅ 技术指标模块执行完毕，最终保全 {len(final_pool)} 只核心标的打包装车。")
     return final_pool
 
 
@@ -390,26 +409,19 @@ def send_emails(html_content):
 
 
 if __name__ == "__main__":
-    # 步骤 1：寻找全场最热的 300 只股票
     full_pool, codes = get_top_300_pool()
 
     if full_pool:
-        # 步骤 2：去公网白嫖全量新闻（规避 Tushare 接口报错）
         macro_news = get_free_macro_news()
-        
-        # 步骤 3：带着前 300 的名单，回头去算风控技术面
         final_pool = calc_tech_indicators(full_pool, codes)
 
-        # 🔒 安全锁2执行：防止数据枯竭导致AI生成空列表报错
         if len(final_pool) < 10:
             print("🚨 触发安全熔断：清洗后有效标的不足10只，终止 AI 调用防崩溃。请检查接口额度！")
             import sys; sys.exit(0)
 
-        # 步骤 4：送交 AI 大脑推演
         ai_html = generate_ai_report(final_pool, macro_news)
         full_html = build_email(ai_html)
 
-        # ====== 账本清算逻辑 ======
         chosen = []
         clean_html = re.sub(r'<[^>]+>', ' ', ai_html)
         clean_html = re.sub(r'\s+', ' ', clean_html)
