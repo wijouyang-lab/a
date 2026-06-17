@@ -86,7 +86,7 @@ def get_latest_macro_news():
 
 
 # ==========================================
-# 2. 获取交易额 Top 100 + 基础技术数据
+# 2. 获取交易额 Top 300 + 基础技术数据
 # ==========================================
 def get_a_share_data():
     trade_date = (get_bj_time() - datetime.timedelta(days=1)).strftime('%Y%m%d')
@@ -105,8 +105,8 @@ def get_a_share_data():
     name_map = dict(zip(basic['ts_code'], basic['name']))
     industry_map = dict(zip(basic['ts_code'], basic.get('industry', ['未知'] * len(basic))))
 
-    # 交易额 Top 100，资金已在此聚集
-    df_sorted = df_daily.sort_values(by='amount', ascending=False).head(100)
+    # 交易额 Top 300，资金已在此聚集
+    df_sorted = df_daily.sort_values(by='amount', ascending=False).head(300)
     codes = [row['ts_code'] for _, row in df_sorted.iterrows()]
 
     full_pool = {}
