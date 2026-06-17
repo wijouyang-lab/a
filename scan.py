@@ -85,6 +85,9 @@ def get_top_300_pool():
 def get_free_macro_news():
     print("📡 [阶段2] 正在跨过 Tushare，从免费公网节点抓取全球财经与A股新闻...")
     news_lines = []
+    
+    # 🔒 安全锁1：获取当前年份，用于剔除穿越的旧新闻
+    current_year = str(get_bj_time().year)
 
     # 使用国内外免费且稳定的 RSS 接口
     sources = [
@@ -106,13 +109,16 @@ def get_free_macro_news():
                 pub_date = item.find('pubDate')
                 if title is not None:
                     time_str = pub_date.text[:25] if pub_date is not None else ""
+                    # 🔒 安全锁1执行：如果时间戳里没有今年的年份，直接视为脏数据丢弃！
+                    if current_year not in time_str:
+                        continue
                     news_lines.append(f"[{source_name}] {time_str} - {title.text}")
             print(f"   ✅ {source_name} 节点抓取成功")
         except Exception as e:
             print(f"   ⚠️ {source_name} 节点抓取失败: {e}")
 
     if news_lines:
-        print(f"✅ 盘前免费新闻矩阵组装完毕，共 {len(news_lines)} 条。")
+        print(f"✅ 盘前免费新闻矩阵组装完毕，共 {len(news_lines)} 条新鲜资讯。")
         return "\n".join(news_lines)
     return "暂无实时新闻，请基于昨日收盘及底层产业逻辑推演。"
 
@@ -393,6 +399,11 @@ if __name__ == "__main__":
         
         # 步骤 3：带着前 300 的名单，回头去算风控技术面
         final_pool = calc_tech_indicators(full_pool, codes)
+
+        # 🔒 安全锁2执行：防止数据枯竭导致AI生成空列表报错
+        if len(final_pool) < 10:
+            print("🚨 触发安全熔断：清洗后有效标的不足10只，终止 AI 调用防崩溃。请检查接口额度！")
+            import sys; sys.exit(0)
 
         # 步骤 4：送交 AI 大脑推演
         ai_html = generate_ai_report(final_pool, macro_news)
