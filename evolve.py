@@ -8,7 +8,7 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 import anthropic
 
-print("启动 A股 scan.py 自动进化引擎...")
+print("启动 A股 scan.py 自动进化引擎（事件驱动版）...")
 
 BEIJING_TZ = datetime.timezone(datetime.timedelta(hours=8))
 def get_bj_time():
@@ -42,6 +42,7 @@ if 'PnL_Pct' in recent.columns:
     if len(valid) > 0:
         overall_win_rate = round((valid['PnL_Pct'] > 0).sum() / len(valid) * 100, 1)
 
+# 各标签细分统计
 stats = {}
 for tag in ['Core_Double_Dragon', 'Sub_Pioneer']:
     group = recent[recent['Tag'] == tag].copy()
@@ -56,7 +57,24 @@ for tag in ['Core_Double_Dragon', 'Sub_Pioneer']:
             "平均持仓天数": round(pd.to_numeric(valid_group['Days_Held'], errors='coerce').mean(), 1)
         }
 
+# 按行业统计，找出哪些行业逻辑推演准确率高
+industry_stats = {}
+if 'Name' in recent.columns:
+    core_valid = recent[
+        recent['PnL_Pct'].notna() &
+        recent['Tag'].isin(['Core_Double_Dragon', 'Sub_Pioneer'])
+    ].copy()
+    # 尝试从 review_history 里读行业信息
+    if 'Industry' in recent.columns:
+        for industry, grp in core_valid.groupby('Industry'):
+            if len(grp) >= 2:
+                win_rate = round((grp['PnL_Pct'] > 0).sum() / len(grp) * 100, 1)
+                avg_pnl = round(grp['PnL_Pct'].mean(), 2)
+                industry_stats[industry] = {"胜率": win_rate, "平均盈亏": avg_pnl, "样本数": len(grp)}
+
 print(f"📊 近30天真实胜率: {overall_win_rate}% | 各标签: {stats}")
+if industry_stats:
+    print(f"📊 行业胜率分布: {industry_stats}")
 
 EVOLVE_THRESHOLD = 60
 if overall_win_rate >= EVOLVE_THRESHOLD:
@@ -77,35 +95,82 @@ client = anthropic.Anthropic(
     base_url=os.environ.get("CLAWSOCKET_BASE_URL")
 )
 
+# 整理亏损样本供 AI 分析
+loss_samples = recent[
+    recent['PnL_Pct'].notna() &
+    recent['Tag'].isin(['Core_Double_Dragon', 'Sub_Pioneer']) &
+    (recent['PnL_Pct'] < 0)
+].copy()
+
+win_samples = recent[
+    recent['PnL_Pct'].notna() &
+    recent['Tag'].isin(['Core_Double_Dragon', 'Sub_Pioneer']) &
+    (recent['PnL_Pct'] > 0)
+].copy()
+
 prompt = f"""
-你是一个A股量化策略优化专家。以下是当前系统的真实持仓盈亏数据和代码。
+你是一个A股事件驱动型量化策略优化专家。当前系统是【消息+逻辑推演驱动版】，核心逻辑是：
+事件识别 → 产业链推演 → 匹配资金活跃标的 → 技术面仅作风控兜底
 
 【近30天真实持仓表现】：
 整体胜率：{overall_win_rate}%（目标>60%）
 各标签细分：{stats}
-近期20条复盘样本：
-{recent.tail(20).to_string()}
+行业胜率分布：{industry_stats}
+
+【亏损样本（最近{len(loss_samples.tail(10))}条）】：
+{loss_samples.tail(10).to_string()}
+
+【盈利样本（最近{len(win_samples.tail(10))}条）】：
+{win_samples.tail(10).to_string()}
 
 【当前 scan.py 代码】：
 {current_scan_code}
 
-【任务】：
-基于真实持仓盈亏数据分析胜率低的原因，调整参数或逻辑，输出改进后的完整代码。
-可以调整：RSI阈值、乖离率门槛、MACD趋势判断、宏观新闻权重、筛选条件等。
-严格禁止：不得改变代码整体结构、API调用方式、邮件发送逻辑、入库逻辑、模型名称。
-模型名称必须保持为 claude-opus-4-8，不得修改。
+【分析任务】：
+这是一个事件驱动系统，不是纯技术系统。请从以下几个维度分析胜率低的原因并提出改进：
+
+1. 事件逻辑质量问题：
+   - AI 是否在没有强事件时仍强行选股（凑数推荐）？
+   - 事件到产业链的推演是否过于间接（三手四手受益）？
+   - 是否存在"消息已经打完了"但仍然推荐的情况（涨跌幅已很大）？
+
+2. 资金验证问题：
+   - Top 300 中是否包含了太多与消息无关的纯技术票？
+   - 是否应该提高涨跌幅过滤（例如当日已涨超8%的票消息已被充分消化）？
+
+3. 止损设置问题：
+   - 默认5%止损是否太紧或太松？
+   - 不同行业/标签的止损应该差异化吗？
+
+4. 新闻来源质量：
+   - 当前新闻源是否能覆盖A股最重要的政策消息？
+   - 是否需要补充更多A股专项消息源？
+
+可以调整的内容：
+- prompt 中的事件逻辑推演指令（让 AI 更严格地要求直接受益逻辑）
+- 涨跌幅过滤门槛（当日涨跌幅区间限制）
+- 止损比例（DEFAULT_STOP_LOSS_PCT）
+- 持仓周期建议
+- 新闻抓取来源和数量
+- Top N 送给 AI 的标的数量
+
+严格禁止：
+- 不得改变代码整体结构、入库逻辑、邮件发送逻辑
+- 不得修改模型名称（必须保持 claude-opus-4-8）
+- 不得把系统改回技术指标驱动逻辑（RSI/MACD 阈值过滤）
+- 不得删除"免死金牌"机制（无历史数据的票赋予占位符而不是删除）
 
 【严格按以下格式输出，不要加任何其他内容】：
 
 ===REPORT_START===
 <div style="background:#e8f5e9; border-left:6px solid #388e3c; padding:20px; border-radius:8px; margin-bottom:20px;">
-<h3 style="color:#1b5e20; margin-top:0;">🔬 胜率诊断</h3>
-<p>(基于真实盈亏数据说明胜率低的核心原因)</p>
+<h3 style="color:#1b5e20; margin-top:0;">🔬 胜率诊断（事件驱动视角）</h3>
+<p>(分析是事件逻辑质量问题、资金匹配问题还是止损设置问题，结合亏损样本说明)</p>
 </div>
 <div style="background:#e3f2fd; border-left:6px solid #1976d2; padding:20px; border-radius:8px;">
 <h3 style="color:#0d47a1; margin-top:0;">🔧 本次改进内容</h3>
 <ul>
-<li>(改动1：具体参数变化)</li>
+<li>(改动1：具体说明改了什么，为什么这样改能提升胜率)</li>
 <li>(改动2：...)</li>
 </ul>
 </div>
@@ -152,7 +217,6 @@ try:
     print("✅ 语法检查通过，准备覆盖 scan.py")
 except SyntaxError as e:
     print(f"❌ 生成的代码有语法错误，终止进化，scan.py 保持不变: {e}")
-    # 仍然发邮件告知语法错误
     report_html += f"""
     <div style="background:#ffebee; border-left:6px solid #c62828; padding:20px; border-radius:8px; margin-top:20px;">
     <h3 style="color:#b71c1c; margin-top:0;">❌ 语法错误，本次进化已中止</h3>
@@ -220,7 +284,7 @@ def send_evolve_mail(report_html, win_rate, backup_name):
     style = "<style>body{font-family:sans-serif;background:#f4f6f9;color:#333;padding:20px;line-height:1.6}.container{max-width:900px;margin:0 auto;background:#fff;padding:30px;border-radius:10px;}</style>"
     full_html = f"""<!DOCTYPE html><html><head><meta charset='utf-8'>{style}</head>
     <body><div class='container'>
-    <h1 style='color:#d32f2f;text-align:center;'>A股 scan.py 已自动进化</h1>
+    <h1 style='color:#d32f2f;text-align:center;'>A股 scan.py 已自动进化（事件驱动版）</h1>
     <p style='text-align:center;color:#666;'>近30天真实胜率 <b style='color:#d32f2f;'>{win_rate}%</b>，系统已自动优化</p>
     {notice}
     <hr>
