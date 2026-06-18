@@ -1,4 +1,4 @@
-# 消息+逻辑推演驱动版 | 事件→产业链→受益标的 | 个股新闻深度版
+# 消息+逻辑推演驱动版 | 事件→产业链→受益标的 | 个股新闻深度版 | Top5详细分析+评分版
 # -*- coding: utf-8 -*-
 import pandas as pd
 import datetime
@@ -119,16 +119,11 @@ def get_free_macro_news():
 
 
 # ==========================================
-# 3. 个股新闻抓取（Yahoo Finance RSS，免费无需API）
+# 3. 个股新闻抓取（保留原有逻辑，未改动）
 # ==========================================
 def get_stock_news(ticker_name, max_items=3):
-    """
-    用新浪财经搜索个股新闻标题。
-    ticker_name 传股票中文名前2-3个字，做关键词匹配。
-    """
     headlines = []
     try:
-        # 先尝试从已抓取的新浪热点里关键词匹配
         pass
     except Exception:
         pass
@@ -142,7 +137,6 @@ def enrich_pool_with_news(pool_data):
     """
     print("📰 [阶段3.5] 正在为 Top 100 标的抓取个股新闻...")
 
-    # 一次性拉取新浪财经最新200条新闻，然后按股票名匹配
     all_sina_news = []
     try:
         req = urllib.request.Request(
@@ -160,7 +154,6 @@ def enrich_pool_with_news(pool_data):
     except Exception as e:
         print(f"   ⚠️ 新浪新闻批量抓取失败: {e}")
 
-    # 同时尝试 Tushare 新闻接口（如有权限）
     tushare_news = []
     try:
         df_news = pro.news(src='sina', limit=100)
@@ -171,11 +164,10 @@ def enrich_pool_with_news(pool_data):
 
     combined_news = all_sina_news + tushare_news
 
-    # 为每只股票匹配相关新闻
     enriched = 0
-    for item in pool_data[:100]:  # 只处理 Top 100
+    for item in pool_data[:100]:
         name = item.get('Name', '')
-        keyword = name[:3] if len(name) >= 3 else name  # 取前3个字做关键词
+        keyword = name[:3] if len(name) >= 3 else name
 
         matched = []
         for news_title in combined_news:
@@ -193,7 +185,7 @@ def enrich_pool_with_news(pool_data):
 
 
 # ==========================================
-# 4. 定向计算技术指标（分批抓取 + 免死金牌）
+# 4. 定向计算技术指标（分批抓取 + 免死金牌，未改动）
 # ==========================================
 def calc_tech_indicators(full_pool, codes):
     trade_date = (get_bj_time() - datetime.timedelta(days=1)).strftime('%Y%m%d')
@@ -262,17 +254,16 @@ def calc_tech_indicators(full_pool, codes):
 
 
 # ==========================================
-# 5. Claude 事件逻辑推演选股（含个股新闻）
+# 5. Claude 事件逻辑推演选股（Top1-5详细分析 + 1-100评分）
 # ==========================================
 def generate_ai_report(pool_data, macro_news_text):
-    print("🧠 [阶段4] 召唤 AI 大脑（事件→产业链→个股新闻三重交叉验证）...")
+    print("🧠 [阶段4] 召唤 AI 大脑（事件→产业链→个股新闻三重交叉验证，Top5详细分析）...")
     client = anthropic.Anthropic(
         api_key=os.environ.get("CLAWSOCKET_API_KEY"),
         base_url=os.environ.get("CLAWSOCKET_BASE_URL")
     )
     today_str = get_bj_time().strftime('%Y年%m月%d日')
 
-    # 构建含个股新闻的详细标的数据
     compact_pool = []
     for d in pool_data[:100]:
         stock_info = {
@@ -285,7 +276,6 @@ def generate_ai_report(pool_data, macro_news_text):
             "RSI": d.get("RSI", "N/A"),
             "MACD": d.get("MACD趋势", "N/A"),
         }
-        # 只有有新闻的才加入，节省 token
         individual_news = d.get('个股新闻', [])
         if individual_news:
             stock_info["个股新闻"] = individual_news
@@ -348,14 +338,26 @@ def generate_ai_report(pool_data, macro_news_text):
 其他技术状况不影响选股，但用于设定合理止损位。
 
 ━━━━━━━━━━━━━━━━━━━━━━
-第四步：输出详细报告（精选10只）
+第四步：推荐评分（1-100分，核心要求）
+━━━━━━━━━━━━━━━━━━━━━━
+对每一只进入【核心精选】（Top 1-5）的标的，必须给出一个1-100的综合评分，评分依据：
+- 事件逻辑链是否完整、直接（直接受益方通常80分以上，三四手受益方应低于60分）
+- 个股新闻是否强力佐证（有正面新闻共振+10~15分，有负面新闻应直接降到观察池甚至不评分）
+- 资金验证是否充分（巨量+明显异动应加分，温和放量应正常评分）
+- 技术面是否健康（极度超买应扣分，正常区间不扣分）
+评分必须客观区分质量差异，禁止5只全部给相近分数（如全部85分左右），必须体现你对不同标的确信程度的真实差异。
+
+━━━━━━━━━━━━━━━━━━━━━━
+第五步：输出详细报告
 ━━━━━━━━━━━━━━━━━━━━━━
 【硬性纪律】：
-1. 每只推荐必须写完整逻辑链 + 个股新闻验证结论，两者缺一不可。
-2. 同一只股票绝对不能重复出现。
-3. 风控底线格式：周期:[X-Y天] | 止损:[XX.XX元]（止损必须是具体价格加"元"）。
-4. 如果今日新闻中找不到足够强的事件逻辑，宁可少选，不要凑数推荐。
-5. 严格按以下HTML骨架输出，不加markdown外框：
+1. 【核心精选】Top 1-5 每只都必须按完整模板逐项写满，不能因为排名靠后而简化，5只的详细程度必须一致。
+2. 每只推荐必须写完整逻辑链 + 个股新闻验证结论 + 评分理由，三者缺一不可。
+3. 同一只股票绝对不能重复出现。
+4. 风控底线格式：周期:[X-Y天] | 止损:[XX.XX元]（止损必须是具体价格加"元"）。
+5. 评分格式必须严格为：评分:[XX]/100（XX是1-100的整数，必须用这个精确格式，不要写成"XX分"或"XX/100分"等变体）。
+6. 如果今日新闻中找不到足够强的事件逻辑，宁可少选（哪怕只有3只进入核心精选），不要凑数推荐到5只。
+7. 严格按以下HTML骨架输出，不加markdown外框：
 
 <div class="header-card">
     <h2>🌍 今日事件逻辑推演中心</h2>
@@ -369,62 +371,63 @@ def generate_ai_report(pool_data, macro_news_text):
 </div>
 
 <div class="market-section">
-    <div class="market-title">🇨🇳 A股事件驱动精选</div>
+    <div class="market-title">🇨🇳 [核心精选] A股事件驱动 Top 1-5 详细分析</div>
 
     <div class="card core-card">
-        <h3>[核心双龙] 1. [名称] ([代码]) | [行业]</h3>
+        <h3>[核心精选] 1. [名称] ([代码]) | [行业]</h3>
         <p><span class="tag bg-red">🔗 宏观事件逻辑链：</span>[具体事件] → [产业链传导机制，2-3句话说清楚] → [该企业为什么是直接受益方，说明公司在产业链中的具体位置和核心竞争力]</p>
         <p><span class="tag bg-purple">📰 个股新闻验证：</span>[列出该股相关个股新闻标题，说明是否与宏观主线形成共振；若无新闻则注明"暂无最新个股消息，纯宏观逻辑推演"]</p>
         <p><span class="tag bg-blue">💰 资金验证：</span>今日交易额位于巨量核心池，涨跌[X]%，[分析资金行为：是主力吸筹、机构建仓还是散户追涨]</p>
         <p><span class="tag bg-gray">📈 技术风控：</span>乖离率[X]%，RSI[X]，MACD[走强/走弱]，[给出技术面综合判断：当前位置是否安全，有无极度超买风险]</p>
+        <p><span class="tag bg-teal">⭐ 推荐评分：</span>评分:[XX]/100 — [一句话说明评分理由：逻辑链是否直接、新闻是否强力佐证、资金是否充分验证]</p>
         <p><span class="tag bg-orange">⚠️ 风控底线：</span>周期:[5-12天] | 止损:[XX.XX元] | [说明止损价设定依据：基于哪个支撑位或均线]</p>
     </div>
 
     <div class="card core-card">
-        <h3>[核心双龙] 2. [名称] ([代码]) | [行业]</h3>
-        <p><span class="tag bg-red">🔗 宏观事件逻辑链：</span>(...)</p>
+        <h3>[核心精选] 2. [名称] ([代码]) | [行业]</h3>
+        <p><span class="tag bg-red">🔗 宏观事件逻辑链：</span>(同等详细程度)</p>
         <p><span class="tag bg-purple">📰 个股新闻验证：</span>(...)</p>
         <p><span class="tag bg-blue">💰 资金验证：</span>(...)</p>
         <p><span class="tag bg-gray">📈 技术风控：</span>(...)</p>
+        <p><span class="tag bg-teal">⭐ 推荐评分：</span>评分:[XX]/100 — (...)</p>
         <p><span class="tag bg-orange">⚠️ 风控底线：</span>周期:[5-12天] | 止损:[XX.XX元] | (...)</p>
     </div>
 
-    <div class="card sub-card">
-        <h3>[梯队先锋] 3. [名称] ([代码]) | [行业]</h3>
-        <p><span class="tag bg-red">🔗 宏观事件逻辑链：</span>(...)</p>
+    <div class="card core-card">
+        <h3>[核心精选] 3. [名称] ([代码]) | [行业]</h3>
+        <p><span class="tag bg-red">🔗 宏观事件逻辑链：</span>(同等详细程度)</p>
         <p><span class="tag bg-purple">📰 个股新闻验证：</span>(...)</p>
+        <p><span class="tag bg-blue">💰 资金验证：</span>(...)</p>
         <p><span class="tag bg-gray">📈 技术风控：</span>(...)</p>
-        <p><span class="tag bg-orange">⚠️ 风控底线：</span>周期:[3-7天] | 止损:[XX.XX元] | (...)</p>
+        <p><span class="tag bg-teal">⭐ 推荐评分：</span>评分:[XX]/100 — (...)</p>
+        <p><span class="tag bg-orange">⚠️ 风控底线：</span>周期:[5-12天] | 止损:[XX.XX元] | (...)</p>
     </div>
 
-    <div class="card sub-card">
-        <h3>[梯队先锋] 4. [名称] ([代码]) | [行业]</h3>
-        <p><span class="tag bg-red">🔗 宏观事件逻辑链：</span>(...)</p>
+    <div class="card core-card">
+        <h3>[核心精选] 4. [名称] ([代码]) | [行业]</h3>
+        <p><span class="tag bg-red">🔗 宏观事件逻辑链：</span>(同等详细程度)</p>
         <p><span class="tag bg-purple">📰 个股新闻验证：</span>(...)</p>
+        <p><span class="tag bg-blue">💰 资金验证：</span>(...)</p>
         <p><span class="tag bg-gray">📈 技术风控：</span>(...)</p>
-        <p><span class="tag bg-orange">⚠️ 风控底线：</span>周期:[3-7天] | 止损:[XX.XX元] | (...)</p>
+        <p><span class="tag bg-teal">⭐ 推荐评分：</span>评分:[XX]/100 — (...)</p>
+        <p><span class="tag bg-orange">⚠️ 风控底线：</span>周期:[5-12天] | 止损:[XX.XX元] | (...)</p>
     </div>
 
-    <div class="card sub-card">
-        <h3>[梯队先锋] 5. [名称] ([代码]) | [行业]</h3>
-        <p><span class="tag bg-red">🔗 宏观事件逻辑链：</span>(...)</p>
+    <div class="card core-card">
+        <h3>[核心精选] 5. [名称] ([代码]) | [行业]</h3>
+        <p><span class="tag bg-red">🔗 宏观事件逻辑链：</span>(同等详细程度)</p>
         <p><span class="tag bg-purple">📰 个股新闻验证：</span>(...)</p>
+        <p><span class="tag bg-blue">💰 资金验证：</span>(...)</p>
         <p><span class="tag bg-gray">📈 技术风控：</span>(...)</p>
-        <p><span class="tag bg-orange">⚠️ 风控底线：</span>周期:[3-7天] | 止损:[XX.XX元] | (...)</p>
-    </div>
-
-    <div class="card sub-card">
-        <h3>[梯队先锋] 6. [名称] ([代码]) | [行业]</h3>
-        <p><span class="tag bg-red">🔗 宏观事件逻辑链：</span>(...)</p>
-        <p><span class="tag bg-purple">📰 个股新闻验证：</span>(...)</p>
-        <p><span class="tag bg-gray">📈 技术风控：</span>(...)</p>
-        <p><span class="tag bg-orange">⚠️ 风控底线：</span>周期:[3-7天] | 止损:[XX.XX元] | (...)</p>
+        <p><span class="tag bg-teal">⭐ 推荐评分：</span>评分:[XX]/100 — (...)</p>
+        <p><span class="tag bg-orange">⚠️ 风控底线：</span>周期:[5-12天] | 止损:[XX.XX元] | (...)</p>
     </div>
 
     <div class="card obs-card">
-        <h3>[观察池] ⚠️ 逻辑待确认或个股新闻有瑕疵 (Rank 7-10)</h3>
+        <h3>[观察池] ⚠️ 逻辑待确认或个股新闻有瑕疵 (Rank 6-10)</h3>
         <ul>
-            <li><b>7. [名称] ([代码]) | [行业]：</b>[说明逻辑链较弱、事件尚未确认、或个股新闻有负面信号的具体原因] <br><span class="tag bg-orange">⚠️ 风控:</span> 周期:[观望] | 止损:[观望]</li>
+            <li><b>6. [名称] ([代码]) | [行业]：</b>[说明逻辑链较弱、事件尚未确认、或个股新闻有负面信号的具体原因] <br><span class="tag bg-orange">⚠️ 风控:</span> 周期:[观望] | 止损:[观望]</li>
+            <li><b>7. [名称] ([代码]) | [行业]：</b>(...) <br><span class="tag bg-orange">⚠️ 风控:</span> 周期:[观望] | 止损:[观望]</li>
             <li><b>8. [名称] ([代码]) | [行业]：</b>(...) <br><span class="tag bg-orange">⚠️ 风控:</span> 周期:[观望] | 止损:[观望]</li>
             <li><b>9. [名称] ([代码]) | [行业]：</b>(...) <br><span class="tag bg-orange">⚠️ 风控:</span> 周期:[观望] | 止损:[观望]</li>
             <li><b>10. [名称] ([代码]) | [行业]：</b>(...) <br><span class="tag bg-orange">⚠️ 风控:</span> 周期:[观望] | 止损:[观望]</li>
@@ -444,7 +447,7 @@ def generate_ai_report(pool_data, macro_news_text):
     ai_html = ""
     with client.messages.stream(
         model=TARGET_MODEL,
-        max_tokens=6000,
+        max_tokens=8000,
         temperature=0.3,
         messages=[{"role": "user", "content": prompt}]
     ) as stream:
@@ -473,6 +476,7 @@ def build_email(ai_html):
         .bg-orange{background:#e64a19}
         .bg-gray{background:#607d8b}
         .bg-green{background:#37474f}
+        .bg-teal{background:#00897b}
         .bear-text{color:#d32f2f;font-weight:bold}
         .market-section{margin-bottom:30px}
         .market-title{font-size:20px;font-weight:bold;color:#1565c0;margin-bottom:20px;padding-bottom:10px;border-bottom:2px solid #1565c0}
@@ -491,7 +495,7 @@ def send_emails(html_content):
         return
 
     msg = MIMEMultipart()
-    msg['Subject'], msg['From'] = "【事件驱动】A股逻辑推演精选", f"Alpha Radar <{acc}>"
+    msg['Subject'], msg['From'] = "【事件驱动】A股逻辑推演精选(Top5详细+评分)", f"Alpha Radar <{acc}>"
     msg.attach(MIMEText(html_content, 'html'))
     targets = [e.strip() for e in email_list_str.split(",")]
 
@@ -516,7 +520,6 @@ if __name__ == "__main__":
             print("🚨 触发安全熔断：清洗后有效标的不足10只，终止 AI 调用。")
             import sys; sys.exit(0)
 
-        # 为 Top 100 补充个股新闻
         final_pool = enrich_pool_with_news(final_pool)
 
         ai_html = generate_ai_report(final_pool, macro_news)
@@ -536,10 +539,8 @@ if __name__ == "__main__":
             tag = None
             context = clean_html[max(0, idx-300):idx] + chunk[:200]
 
-            if "核心双龙" in context:
-                tag = "Core_Double_Dragon"
-            elif "梯队先锋" in context:
-                tag = "Sub_Pioneer"
+            if "核心精选" in context:
+                tag = "Core_Dragon"
             elif "观察池" in context:
                 tag = "Observation"
             elif "逻辑受损" in context or "坚决回避" in context or "新闻预警" in context:
@@ -551,29 +552,44 @@ if __name__ == "__main__":
             period_match = re.search(r'周期\s*[:：]\s*\[?(\d+[-~]\d+天|\d+天|观望)', chunk)
 
             if tag == "Observation":
-                hold_period, stop_loss = "观望", "观望"
+                hold_period, stop_loss, score = "观望", "观望", "N/A"
             else:
-                hold_period = period_match.group(1).strip() if period_match else (
-                    "5-12天" if tag == "Core_Double_Dragon" else "3-7天"
-                )
+                hold_period = period_match.group(1).strip() if period_match else "5-12天"
                 sl_match = re.search(r'止损\s*[:：]\s*\[?(\d{1,5}\.\d{1,2}元)', chunk)
                 stop_loss = sl_match.group(1).strip() if sl_match else f"{round(item['Close'] * (1 + DEFAULT_STOP_LOSS_PCT / 100), 2)}元"
+                score_match = re.search(r'评分\s*[:：]\s*\[?(\d{1,3})\s*/\s*100', chunk)
+                score = score_match.group(1).strip() if score_match else "N/A"
 
             item['Tag'] = tag
             item['Hold_Period'] = hold_period
             item['Stop_Loss'] = stop_loss
+            item['Score'] = score
             item['Daily_Pct'] = item.get('pct_chg', 0)
             chosen.append(item)
 
+        # ==========================================
+        # 写入 trade_history.csv（含 Score 列自动迁移）
+        # ==========================================
         log_file = "trade_history.csv"
-        need_header = not os.path.exists(log_file) or os.path.getsize(log_file) == 0
+        new_header = "Date,Ticker,Name,Tag,Industry,Close_Price,Amount,Daily_Pct,Hold_Period,Stop_Loss,Score\n"
+        file_exists = os.path.exists(log_file) and os.path.getsize(log_file) > 0
+        need_header = not file_exists
+
+        if file_exists:
+            with open(log_file, "r", encoding="utf-8") as f:
+                lines = f.readlines()
+            if lines and "Score" not in lines[0]:
+                lines[0] = new_header
+                with open(log_file, "w", encoding="utf-8") as f:
+                    f.writelines(lines)
+                print("⚠️ 检测到旧版trade_history.csv缺少Score列，已自动升级表头（历史行Score将显示为空，不影响读取）")
 
         with open(log_file, "a", encoding="utf-8") as f:
             if need_header:
-                f.write("Date,Ticker,Name,Tag,Industry,Close_Price,Amount,Daily_Pct,Hold_Period,Stop_Loss\n")
+                f.write(new_header)
             ts_date = get_bj_time().strftime('%Y-%m-%d')
             for i in chosen:
-                f.write(f"{ts_date},{i['Ticker']},{i['Name']},{i['Tag']},{i.get('Industry','未知')},{i['Close']},{i['Amount']},{i['Daily_Pct']},{i['Hold_Period']},{i['Stop_Loss']}\n")
+                f.write(f"{ts_date},{i['Ticker']},{i['Name']},{i['Tag']},{i.get('Industry','未知')},{i['Close']},{i['Amount']},{i['Daily_Pct']},{i['Hold_Period']},{i['Stop_Loss']},{i.get('Score','N/A')}\n")
 
         print(f"✅ 共安全记账 {len(chosen)} 条核心数据。")
         with open("report.html", "w", encoding="utf-8") as f:
