@@ -31,20 +31,21 @@ except Exception as e:
     print(f"⚠️ 复盘账本读取失败: {e}")
     exit(1)
 
-# 只统计真正执行买卖的标签，排除观望的筛落组
+# 兼容历史标签名（Core_Double_Dragon/Sub_Pioneer）和新版统一标签（Core_Dragon）
+ALL_CORE_TAGS = ['Core_Double_Dragon', 'Sub_Pioneer', 'Core_Dragon']
+
 overall_win_rate = 0
 if 'PnL_Pct' in recent.columns:
     recent['PnL_Pct'] = pd.to_numeric(recent['PnL_Pct'], errors='coerce')
     valid = recent[
         recent['PnL_Pct'].notna() &
-        recent['Tag'].isin(['Core_Double_Dragon', 'Sub_Pioneer'])
+        recent['Tag'].isin(ALL_CORE_TAGS)
     ].copy()
     if len(valid) > 0:
         overall_win_rate = round((valid['PnL_Pct'] > 0).sum() / len(valid) * 100, 1)
 
-# 各标签细分统计
 stats = {}
-for tag in ['Core_Double_Dragon', 'Sub_Pioneer']:
+for tag in ALL_CORE_TAGS:
     group = recent[recent['Tag'] == tag].copy()
     group['PnL_Pct'] = pd.to_numeric(group['PnL_Pct'], errors='coerce')
     valid_group = group.dropna(subset=['PnL_Pct'])
@@ -57,14 +58,13 @@ for tag in ['Core_Double_Dragon', 'Sub_Pioneer']:
             "平均持仓天数": round(pd.to_numeric(valid_group['Days_Held'], errors='coerce').mean(), 1)
         }
 
-# 按行业统计，找出哪些行业逻辑推演准确率高
+# 按行业统计
 industry_stats = {}
 if 'Name' in recent.columns:
     core_valid = recent[
         recent['PnL_Pct'].notna() &
-        recent['Tag'].isin(['Core_Double_Dragon', 'Sub_Pioneer'])
+        recent['Tag'].isin(ALL_CORE_TAGS)
     ].copy()
-    # 尝试从 review_history 里读行业信息
     if 'Industry' in recent.columns:
         for industry, grp in core_valid.groupby('Industry'):
             if len(grp) >= 2:
@@ -72,9 +72,36 @@ if 'Name' in recent.columns:
                 avg_pnl = round(grp['PnL_Pct'].mean(), 2)
                 industry_stats[industry] = {"胜率": win_rate, "平均盈亏": avg_pnl, "样本数": len(grp)}
 
+# 按推荐评分分桶统计（验证评分是否真的有预测力）
+score_stats = {}
+if 'Score' in recent.columns:
+    score_valid = recent[
+        recent['PnL_Pct'].notna() &
+        recent['Tag'].isin(ALL_CORE_TAGS) &
+        recent['Score'].notna()
+    ].copy()
+    score_valid['Score'] = pd.to_numeric(score_valid['Score'], errors='coerce')
+    score_valid = score_valid.dropna(subset=['Score'])
+    if len(score_valid) >= 5:
+        def score_bucket(s):
+            if s >= 80:
+                return "80-100分(高信心)"
+            elif s >= 60:
+                return "60-79分(中信心)"
+            else:
+                return "60分以下(低信心)"
+        score_valid['Bucket'] = score_valid['Score'].apply(score_bucket)
+        for bucket, grp in score_valid.groupby('Bucket'):
+            if len(grp) >= 2:
+                win_rate = round((grp['PnL_Pct'] > 0).sum() / len(grp) * 100, 1)
+                avg_pnl = round(grp['PnL_Pct'].mean(), 2)
+                score_stats[bucket] = {"胜率": win_rate, "平均盈亏": avg_pnl, "样本数": len(grp)}
+
 print(f"📊 近30天真实胜率: {overall_win_rate}% | 各标签: {stats}")
 if industry_stats:
     print(f"📊 行业胜率分布: {industry_stats}")
+if score_stats:
+    print(f"📊 评分区间胜率分布: {score_stats}")
 
 EVOLVE_THRESHOLD = 60
 if overall_win_rate >= EVOLVE_THRESHOLD:
@@ -95,27 +122,29 @@ client = anthropic.Anthropic(
     base_url=os.environ.get("CLAWSOCKET_BASE_URL")
 )
 
-# 整理亏损样本供 AI 分析
 loss_samples = recent[
     recent['PnL_Pct'].notna() &
-    recent['Tag'].isin(['Core_Double_Dragon', 'Sub_Pioneer']) &
+    recent['Tag'].isin(ALL_CORE_TAGS) &
     (recent['PnL_Pct'] < 0)
 ].copy()
 
 win_samples = recent[
     recent['PnL_Pct'].notna() &
-    recent['Tag'].isin(['Core_Double_Dragon', 'Sub_Pioneer']) &
+    recent['Tag'].isin(ALL_CORE_TAGS) &
     (recent['PnL_Pct'] > 0)
 ].copy()
 
+score_section = f"\n【推荐评分区间胜率分布（用于判断评分体系是否有真实预测力）】：\n{score_stats}\n" if score_stats else "\n【推荐评分区间胜率分布】：暂无足够样本（评分系统刚上线或样本不足5条）\n"
+
 prompt = f"""
 你是一个A股事件驱动型量化策略优化专家。当前系统是【消息+逻辑推演驱动版】，核心逻辑是：
-事件识别 → 产业链推演 → 匹配资金活跃标的 → 技术面仅作风控兜底
+事件识别 → 产业链推演 → 匹配资金活跃标的 → 技术面仅作风控兜底 → 对Top1-5给出1-100推荐评分
 
 【近30天真实持仓表现】：
 整体胜率：{overall_win_rate}%（目标>60%）
 各标签细分：{stats}
 行业胜率分布：{industry_stats}
+{score_section}
 
 【亏损样本（最近{len(loss_samples.tail(10))}条）】：
 {loss_samples.tail(10).to_string()}
@@ -142,12 +171,17 @@ prompt = f"""
    - 默认5%止损是否太紧或太松？
    - 不同行业/标签的止损应该差异化吗？
 
-4. 新闻来源质量：
+4. 评分体系校准问题（重点）：
+   - 如果"60分以下"区间的胜率反而高于"80-100分"区间，说明评分体系存在严重偏差，评分标准需要重新校准
+   - 评分应该更看重哪个维度（事件直接性/新闻共振/资金验证/技术健康度）？
+
+5. 新闻来源质量：
    - 当前新闻源是否能覆盖A股最重要的政策消息？
    - 是否需要补充更多A股专项消息源？
 
 可以调整的内容：
 - prompt 中的事件逻辑推演指令（让 AI 更严格地要求直接受益逻辑）
+- prompt 中的评分标准描述（如果发现评分与实际表现脱节，应调整评分权重的描述方式）
 - 涨跌幅过滤门槛（当日涨跌幅区间限制）
 - 止损比例（DEFAULT_STOP_LOSS_PCT）
 - 持仓周期建议
@@ -159,13 +193,15 @@ prompt = f"""
 - 不得修改模型名称（必须保持 claude-opus-4-8）
 - 不得把系统改回技术指标驱动逻辑（RSI/MACD 阈值过滤）
 - 不得删除"免死金牌"机制（无历史数据的票赋予占位符而不是删除）
+- 不得删除1-100推荐评分机制，且评分提取格式必须严格保持为"评分:[XX]/100"，必须与正则表达式 r'评分\\s*[:：]\\s*\\[?(\\d{{1,3}})\\s*/\\s*100' 保持完全兼容，不得改成其他格式（如"XX分"、"评分XX"等变体），否则后续无法正确提取入库
+- 不得把【核心精选】Top 1-5 的详细分析数量改少（必须维持5只都展开详细分析，除非当天逻辑确实不足5只）
 
 【严格按以下格式输出，不要加任何其他内容】：
 
 ===REPORT_START===
 <div style="background:#e8f5e9; border-left:6px solid #388e3c; padding:20px; border-radius:8px; margin-bottom:20px;">
 <h3 style="color:#1b5e20; margin-top:0;">🔬 胜率诊断（事件驱动视角）</h3>
-<p>(分析是事件逻辑质量问题、资金匹配问题还是止损设置问题，结合亏损样本说明)</p>
+<p>(分析是事件逻辑质量问题、资金匹配问题、止损设置问题还是评分体系校准问题，结合亏损样本和评分区间分布说明)</p>
 </div>
 <div style="background:#e3f2fd; border-left:6px solid #1976d2; padding:20px; border-radius:8px;">
 <h3 style="color:#0d47a1; margin-top:0;">🔧 本次改进内容</h3>
@@ -251,9 +287,6 @@ except SyntaxError as e:
     send_error_mail(report_html, overall_win_rate)
     exit(1)
 
-# ==========================================
-# 语法检查通过，备份并覆盖
-# ==========================================
 try:
     backup_name = f"scan_backup_{get_bj_time().strftime('%Y%m%d')}.py"
     with open(backup_name, "w", encoding="utf-8") as f:
