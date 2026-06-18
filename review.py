@@ -106,6 +106,7 @@ for ticker, group in recent_picks.groupby('Ticker'):
 
     hold_period_str = 'N/A'
     stop_loss = 'N/A'
+    score_str = 'N/A'
     for _, r in group.iterrows():
         if str(r.get('Hold_Period', 'N/A')).strip() not in ['N/A', 'nan', '', '坚决空仓']:
             hold_period_str = r['Hold_Period']
@@ -113,6 +114,10 @@ for ticker, group in recent_picks.groupby('Ticker'):
     for _, r in group.iterrows():
         if str(r.get('Stop_Loss', 'N/A')).strip() not in ['N/A', 'nan', '', '坚决空仓', '绝对规避', '观望']:
             stop_loss = r['Stop_Loss']
+            break
+    for _, r in group.iterrows():
+        if str(r.get('Score', 'N/A')).strip() not in ['N/A', 'nan', '']:
+            score_str = r['Score']
             break
 
     hold_days = parse_hold_days(hold_period_str)
@@ -132,6 +137,7 @@ for ticker, group in recent_picks.groupby('Ticker'):
             "代码": ticker,
             "名称": first_row['Name'],
             "标签": latest_tag,
+            "推荐评分": score_str,
             "持股周期建议": hold_period_str,
             "止损价": stop_loss,
             "首次推荐日": first_row['Date'].strftime('%Y-%m-%d'),
@@ -154,6 +160,7 @@ for ticker, group in recent_picks.groupby('Ticker'):
             "代码": ticker,
             "名称": first_row['Name'],
             "标签": latest_tag,
+            "推荐评分": score_str,
             "持股周期建议": hold_period_str,
             "止损价": stop_loss,
             "首次推荐日": first_row['Date'].strftime('%Y-%m-%d'),
@@ -186,6 +193,7 @@ prompt = f"""
 {expired_list}
 
 字段说明：
+- 推荐评分：选股引擎当初给出的1-100信心分数（N/A表示该批次还未启用评分系统）
 - 首次推荐价：买入成本基准，后续重复推荐不改变此基准
 - 持股周期建议：第一次推荐时固定，不被后续推荐覆盖
 - 止损价：第一次推荐时设定的具体价格止损位
@@ -193,29 +201,31 @@ prompt = f"""
 - 期满日盈亏(%)：持股周期到期那天的真实盈亏（已超期才有，这才是策略真实表现）
 - 系统连续推荐次数：次数越多说明系统持续看好
 
+在风控判断或策略复盘时，请结合推荐评分进行验证：高分票（80分以上）如果出现明显亏损，需要特别指出"高信心预期未兑现"；低分票（60分以下）如果反而盈利良好，也需要指出"评分体系可能过于保守"。这类反差信息对优化评分标准很有价值。
+
 请严格按以下 HTML 骨架输出复盘报告（直出HTML，禁加markdown框，盈利标红，亏损标绿）：
 
 <div style="background: #eceff1; border-left: 6px solid #455a64; padding: 20px; margin-bottom: 25px; border-radius: 8px;">
     <h3 style="margin-top: 0; color: #263238;">⚖️ 盘后总体风控审查</h3>
-    <p>(总结持仓中标的整体盈亏状况，以及已超期标的的策略胜率评估)</p>
+    <p>(总结持仓中标的整体盈亏状况，以及已超期标的的策略胜率评估，特别指出评分与实际表现是否存在明显反差)</p>
 </div>
 
 <h2 style="color: #1565c0; border-bottom: 2px solid #1565c0; padding-bottom: 5px;">📊 持仓中 - 风控纪律核对单</h2>
 <div style="background: #fff; padding: 20px; margin-bottom: 15px; border-radius: 8px; border: 1px solid #e0e0e0; box-shadow: 0 2px 8px rgba(0,0,0,0.05);">
-    <h3 style="margin: 0 0 10px 0;">[首次推荐日] | [股票名称] ([代码]) | 系统连续推荐[N]次 | 还剩[剩余天数]天到期</h3>
+    <h3 style="margin: 0 0 10px 0;">[首次推荐日] | [股票名称] ([代码]) | 评分[推荐评分]/100 | 系统连续推荐[N]次 | 还剩[剩余天数]天到期</h3>
     <p><b>持股周期建议:</b> [持股周期建议] | <b>止损位:</b> [止损价]</p>
     <p><b>买入成本:</b> ¥[首次推荐价] ➔ <b>现价:</b> ¥[现价] | <b>当前盈亏:</b> <span style="font-weight:bold; color:[盈利#d32f2f/亏损#388e3c];">[当前盈亏(%)]%</span></p>
     <p><span style="background: #607d8b; color: #fff; padding: 2px 6px; border-radius: 4px; font-size: 12px;">风控动作指令</span>
-    (判断：现价是否跌破止损位？系统是否仍在持续推荐？给出持有/止损/减仓指令)</p>
+    (判断：现价是否跌破止损位？系统是否仍在持续推荐？当初评分是否与现状吻合？给出持有/止损/减仓指令)</p>
 </div>
 
 <h2 style="color: #37474f; border-bottom: 2px solid #cfd8dc; padding-bottom: 5px; margin-top: 40px;">📁 已超期归档 - 策略复盘评价</h2>
 <div style="background: #f5f5f5; padding: 20px; margin-bottom: 15px; border-radius: 8px; border: 1px solid #e0e0e0;">
-    <h3 style="margin: 0 0 10px 0;">[首次推荐日] | [股票名称] ([代码]) | 期满日:[期满日]</h3>
+    <h3 style="margin: 0 0 10px 0;">[首次推荐日] | [股票名称] ([代码]) | 评分[推荐评分]/100 | 期满日:[期满日]</h3>
     <p><b>持股周期建议:</b> [持股周期建议] | <b>止损位:</b> [止损价]</p>
     <p><b>买入成本:</b> ¥[首次推荐价] → <b>期满日价格:</b> ¥[期满日价格] | <b>策略实际盈亏:</b> <span style="font-weight:bold; color:[盈利#d32f2f/亏损#388e3c];">[期满日盈亏(%)]%</span></p>
     <p><span style="background: #455a64; color: #fff; padding: 2px 6px; border-radius: 4px; font-size: 12px;">策略复盘</span>
-    (评价这次策略是否成功，归因分析盈亏原因，此票不再追踪)</p>
+    (评价这次策略是否成功，归因分析盈亏原因，明确点评评分与实际结果是否吻合，此票不再追踪)</p>
 </div>
 """
 
@@ -232,22 +242,34 @@ with client.messages.stream(
 ai_html = ai_html.replace("```html", "").replace("```", "").strip()
 
 # ==========================================
-# 写入 review_history.csv
+# 写入 review_history.csv（含 Score 列自动迁移）
 # ==========================================
 review_log = "review_history.csv"
-need_header = not os.path.exists(review_log) or os.path.getsize(review_log) == 0
+new_header = "Review_Date,Ticker,Name,Tag,Rec_Date,Rec_Price,Cur_Price,Days_Held,PnL_Pct,Maturity_PnL,Hold_Period,Stop_Loss,Rec_Count,Status,Score\n"
+review_file_exists = os.path.exists(review_log) and os.path.getsize(review_log) > 0
+review_need_header = not review_file_exists
+
+if review_file_exists:
+    with open(review_log, "r", encoding="utf-8") as f:
+        review_lines = f.readlines()
+    if review_lines and "Score" not in review_lines[0]:
+        review_lines[0] = new_header
+        with open(review_log, "w", encoding="utf-8") as f:
+            f.writelines(review_lines)
+        print("⚠️ 检测到旧版review_history.csv缺少Score列，已自动升级表头（历史行Score将显示为空，不影响读取）")
+
 try:
     with open(review_log, "a", encoding="utf-8") as f:
-        if need_header:
-            f.write("Review_Date,Ticker,Name,Tag,Rec_Date,Rec_Price,Cur_Price,Days_Held,PnL_Pct,Maturity_PnL,Hold_Period,Stop_Loss,Rec_Count,Status\n")
+        if review_need_header:
+            f.write(new_header)
         review_date = get_bj_time().strftime('%Y-%m-%d')
 
         for item in active_list:
-            f.write(f"{review_date},{item['代码']},{item['名称']},{item['标签']},{item['首次推荐日']},{item['首次推荐价']},{item['现价']},{item['持仓天数']},{item['当前盈亏(%)']},,{item['持股周期建议']},{item['止损价']},{item['系统连续推荐次数']},持仓中\n")
+            f.write(f"{review_date},{item['代码']},{item['名称']},{item['标签']},{item['首次推荐日']},{item['首次推荐价']},{item['现价']},{item['持仓天数']},{item['当前盈亏(%)']},,{item['持股周期建议']},{item['止损价']},{item['系统连续推荐次数']},持仓中,{item['推荐评分']}\n")
 
         for item in expired_list:
             maturity_pnl = item['期满日盈亏(%)'] if item['期满日盈亏(%)'] != "无数据" else ""
-            f.write(f"{review_date},{item['代码']},{item['名称']},{item['标签']},{item['首次推荐日']},{item['首次推荐价']},{item['期满日价格']},{item['持仓天数']},{maturity_pnl},{maturity_pnl},{item['持股周期建议']},{item['止损价']},{item['系统连续推荐次数']},已超期归档\n")
+            f.write(f"{review_date},{item['代码']},{item['名称']},{item['标签']},{item['首次推荐日']},{item['首次推荐价']},{item['期满日价格']},{item['持仓天数']},{maturity_pnl},{maturity_pnl},{item['持股周期建议']},{item['止损价']},{item['系统连续推荐次数']},已超期归档,{item['推荐评分']}\n")
 
     print("✅ 复盘结果已写入 review_history.csv")
 except Exception as e:
@@ -263,7 +285,6 @@ full_html = f"<!DOCTYPE html><html><head><meta charset='utf-8'><style>{style}</s
 def send_mail():
     acc = os.environ.get("EMAIL_ACCOUNT")
     pwd = os.environ.get("EMAIL_PASSWORD")
-    # 复盘只发给仓库主人，从 OWNER_EMAIL Secret 读取
     owner_email = os.environ.get("OWNER_EMAIL")
     if not acc or not pwd or not owner_email:
         print("⚠️ 邮箱配置缺失（需要 EMAIL_ACCOUNT、EMAIL_PASSWORD、OWNER_EMAIL），跳过发送。")
