@@ -9,6 +9,7 @@ import smtplib
 import urllib.request
 import xml.etree.ElementTree as ET
 import tushare as ts
+import hashlib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 import anthropic
@@ -17,6 +18,45 @@ import time
 BEIJING_TZ = datetime.timezone(datetime.timedelta(hours=8))
 def get_bj_time():
     return datetime.datetime.now(BEIJING_TZ)
+
+# ==========================================
+# 版本标记：检测 scan.py 内容是否变化，记录"当前版本"起始日期
+# 供 evolve.py 做公平评估时过滤数据，避免新旧版本混在一起算胜率
+# ==========================================
+def update_version_marker():
+    version_file = "scan_version.txt"
+    try:
+        with open("scan.py", "rb") as f:
+            current_hash = hashlib.md5(f.read()).hexdigest()
+    except Exception as e:
+        print(f"⚠️ 版本标记读取自身失败，跳过: {e}")
+        return
+
+    old_hash = None
+    if os.path.exists(version_file):
+        try:
+            with open(version_file, "r", encoding="utf-8") as f:
+                content = f.read().strip()
+                if content:
+                    old_hash = content.split(",")[0]
+        except Exception:
+            pass
+
+    if old_hash != current_hash:
+        today_str = get_bj_time().strftime('%Y-%m-%d')
+        with open(version_file, "w", encoding="utf-8") as f:
+            f.write(f"{current_hash},{today_str}")
+        print(f"📌 检测到 scan.py 内容已变化，记录新版本起始日期: {today_str}")
+    else:
+        try:
+            with open(version_file, "r", encoding="utf-8") as f:
+                existing = f.read().strip()
+            version_date = existing.split(",")[1] if "," in existing else "未知"
+            print(f"📌 scan.py 版本未变化，当前版本起始日期: {version_date}")
+        except Exception:
+            pass
+
+update_version_marker()
 
 print(f"当前北京时间: {get_bj_time()}")
 print(f"星期: {get_bj_time().weekday()} (0=周一 6=周日)")
@@ -131,10 +171,6 @@ def get_stock_news(ticker_name, max_items=3):
 
 
 def enrich_pool_with_news(pool_data):
-    """
-    为 Top 100 标的补充个股新闻。
-    使用新浪财经 RSS，按股票名称关键词过滤。
-    """
     print("📰 [阶段3.5] 正在为 Top 100 标的抓取个股新闻...")
 
     all_sina_news = []
@@ -235,7 +271,6 @@ def calc_tech_indicators(full_pool, codes):
                     full_pool[code]["RSI"] = round((100 - (100 / (1 + rs))).iloc[-1], 2)
                     continue
 
-            # 免死金牌
             full_pool[code]["乖离率(%)"] = 0.0
             full_pool[code]["RSI"] = 50.0
             full_pool[code]["MACD趋势"] = "API限流(纯事件驱动)"
@@ -567,9 +602,6 @@ if __name__ == "__main__":
             item['Daily_Pct'] = item.get('pct_chg', 0)
             chosen.append(item)
 
-        # ==========================================
-        # 写入 trade_history.csv（含 Score 列自动迁移）
-        # ==========================================
         log_file = "trade_history.csv"
         new_header = "Date,Ticker,Name,Tag,Industry,Close_Price,Amount,Daily_Pct,Hold_Period,Stop_Loss,Score\n"
         file_exists = os.path.exists(log_file) and os.path.getsize(log_file) > 0
@@ -582,7 +614,7 @@ if __name__ == "__main__":
                 lines[0] = new_header
                 with open(log_file, "w", encoding="utf-8") as f:
                     f.writelines(lines)
-                print("⚠️ 检测到旧版trade_history.csv缺少Score列，已自动升级表头（历史行Score将显示为空，不影响读取）")
+                print("⚠️ 检测到旧版trade_history.csv缺少Score列，已自动升级表头")
 
         with open(log_file, "a", encoding="utf-8") as f:
             if need_header:
