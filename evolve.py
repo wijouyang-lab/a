@@ -8,11 +8,38 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 import anthropic
 
-print("启动 A股 scan.py 自动进化引擎（事件驱动版）...")
+print("启动 A股 scan.py 自动进化引擎（事件驱动版，版本公平评估）...")
 
 BEIJING_TZ = datetime.timezone(datetime.timedelta(hours=8))
 def get_bj_time():
     return datetime.datetime.now(BEIJING_TZ)
+
+
+def get_version_start_date():
+    """
+    读取 scan_version.txt，获取当前 scan.py 版本的生效起始日期。
+    找不到标记文件时保守按"今天"计算——这样在没有可靠版本信息时，
+    evolve.py 会因为找不到"当前版本"产生的已完成交易样本而自动跳过本次进化，
+    不会拿旧版本的数据来断章取义地评判新版本。
+    """
+    version_file = "scan_version.txt"
+    if not os.path.exists(version_file):
+        print("⚠️ 未找到 scan_version.txt，无法确认当前版本起始日期，保守按今天计算。")
+        return get_bj_time().replace(tzinfo=None)
+    try:
+        with open(version_file, "r", encoding="utf-8") as f:
+            content = f.read().strip()
+        if "," in content:
+            date_str = content.split(",")[1]
+            return datetime.datetime.strptime(date_str, '%Y-%m-%d')
+    except Exception as e:
+        print(f"⚠️ 读取版本标记失败: {e}，保守按今天计算。")
+    return get_bj_time().replace(tzinfo=None)
+
+
+version_start_date = get_version_start_date()
+print(f"📌 当前 scan.py 版本生效起始日期: {version_start_date.strftime('%Y-%m-%d')}")
+print("📌 评估方法：只统计【该日期之后首次推荐】且【已到期归档】的交易，持仓中的票不计入胜率")
 
 review_log = "review_history.csv"
 if not os.path.exists(review_log):
@@ -21,65 +48,80 @@ if not os.path.exists(review_log):
 
 try:
     df = pd.read_csv(review_log, on_bad_lines='skip')
-    df['Review_Date'] = pd.to_datetime(df['Review_Date'])
-    cutoff = get_bj_time() - datetime.timedelta(days=30)
-    recent = df[df['Review_Date'] >= cutoff.replace(tzinfo=None)].copy()
-    if len(recent) < 10:
-        print(f"⚠️ 近30天复盘样本只有 {len(recent)} 条，不足10条，跳过进化。")
-        exit(0)
+    df['Rec_Date'] = pd.to_datetime(df['Rec_Date'])
 except Exception as e:
     print(f"⚠️ 复盘账本读取失败: {e}")
     exit(1)
 
-# 兼容历史标签名（Core_Double_Dragon/Sub_Pioneer）和新版统一标签（Core_Dragon）
+# ==========================================
+# 第一层过滤：只看"当前版本"产生的推荐（按首次推荐日期，不是复盘日期）
+# 这样不会拿旧版本scan.py选出的票来评判新版本的好坏
+# ==========================================
+current_version_picks = df[df['Rec_Date'] >= version_start_date].copy()
+
+if current_version_picks.empty:
+    print("⚠️ 当前版本下还没有任何推荐记录（可能刚切换版本不久），跳过进化。")
+    exit(0)
+
+distinct_tickers = current_version_picks['Ticker'].nunique()
+print(f"📊 当前版本下共有 {distinct_tickers} 只不同标的产生过推荐记录")
+
+# ==========================================
+# 第二层过滤：只用"已超期归档"（真正走完一轮）的数据算胜率
+# 持仓中的票只统计数量，不计入胜率，避免拿浮动盈亏断章取义地评判
+# ==========================================
 ALL_CORE_TAGS = ['Core_Double_Dragon', 'Sub_Pioneer', 'Core_Dragon']
 
-overall_win_rate = 0
-if 'PnL_Pct' in recent.columns:
-    recent['PnL_Pct'] = pd.to_numeric(recent['PnL_Pct'], errors='coerce')
-    valid = recent[
-        recent['PnL_Pct'].notna() &
-        recent['Tag'].isin(ALL_CORE_TAGS)
-    ].copy()
-    if len(valid) > 0:
-        overall_win_rate = round((valid['PnL_Pct'] > 0).sum() / len(valid) * 100, 1)
+if 'Status' not in current_version_picks.columns:
+    print("⚠️ review_history.csv 缺少 Status 列，无法区分持仓中/已到期，跳过进化。")
+    exit(0)
+
+matured = current_version_picks[
+    (current_version_picks['Status'] == '已超期归档') &
+    current_version_picks['Tag'].isin(ALL_CORE_TAGS)
+].copy()
+matured['PnL_Pct'] = pd.to_numeric(matured['PnL_Pct'], errors='coerce')
+matured = matured.dropna(subset=['PnL_Pct'])
+
+still_active = current_version_picks[
+    (current_version_picks['Status'] == '持仓中') &
+    current_version_picks['Tag'].isin(ALL_CORE_TAGS)
+].copy()
+still_active_tickers = still_active['Ticker'].nunique()
+
+print(f"📊 已到期归档（计入胜率）: {len(matured)} 条 | 仍持仓中（不计入，仅作参考）: {still_active_tickers} 只标的")
+
+MIN_MATURED_SAMPLES = 10
+if len(matured) < MIN_MATURED_SAMPLES:
+    print(f"⚠️ 当前版本下已完成交易（已超期归档）样本只有 {len(matured)} 条，不足 {MIN_MATURED_SAMPLES} 条。")
+    print("⚠️ 可能是版本刚切换不久，多数持仓还在进行中（持有周期未到），暂不评判，跳过本次进化。")
+    exit(0)
+
+overall_win_rate = round((matured['PnL_Pct'] > 0).sum() / len(matured) * 100, 1)
 
 stats = {}
 for tag in ALL_CORE_TAGS:
-    group = recent[recent['Tag'] == tag].copy()
-    group['PnL_Pct'] = pd.to_numeric(group['PnL_Pct'], errors='coerce')
-    valid_group = group.dropna(subset=['PnL_Pct'])
-    if len(valid_group) > 0:
-        win = (valid_group['PnL_Pct'] > 0).sum()
+    group = matured[matured['Tag'] == tag]
+    if len(group) > 0:
+        win = (group['PnL_Pct'] > 0).sum()
         stats[tag] = {
-            "总数": len(valid_group),
-            "胜率": round(win / len(valid_group) * 100, 1),
-            "平均盈亏": round(valid_group['PnL_Pct'].mean(), 2),
-            "平均持仓天数": round(pd.to_numeric(valid_group['Days_Held'], errors='coerce').mean(), 1)
+            "总数": len(group),
+            "胜率": round(win / len(group) * 100, 1),
+            "平均盈亏": round(group['PnL_Pct'].mean(), 2),
+            "平均持仓天数": round(pd.to_numeric(group['Days_Held'], errors='coerce').mean(), 1)
         }
 
-# 按行业统计
 industry_stats = {}
-if 'Name' in recent.columns:
-    core_valid = recent[
-        recent['PnL_Pct'].notna() &
-        recent['Tag'].isin(ALL_CORE_TAGS)
-    ].copy()
-    if 'Industry' in recent.columns:
-        for industry, grp in core_valid.groupby('Industry'):
-            if len(grp) >= 2:
-                win_rate = round((grp['PnL_Pct'] > 0).sum() / len(grp) * 100, 1)
-                avg_pnl = round(grp['PnL_Pct'].mean(), 2)
-                industry_stats[industry] = {"胜率": win_rate, "平均盈亏": avg_pnl, "样本数": len(grp)}
+if 'Industry' in matured.columns:
+    for industry, grp in matured.groupby('Industry'):
+        if len(grp) >= 2:
+            win_rate = round((grp['PnL_Pct'] > 0).sum() / len(grp) * 100, 1)
+            avg_pnl = round(grp['PnL_Pct'].mean(), 2)
+            industry_stats[industry] = {"胜率": win_rate, "平均盈亏": avg_pnl, "样本数": len(grp)}
 
-# 按推荐评分分桶统计（验证评分是否真的有预测力）
 score_stats = {}
-if 'Score' in recent.columns:
-    score_valid = recent[
-        recent['PnL_Pct'].notna() &
-        recent['Tag'].isin(ALL_CORE_TAGS) &
-        recent['Score'].notna()
-    ].copy()
+if 'Score' in matured.columns:
+    score_valid = matured.copy()
     score_valid['Score'] = pd.to_numeric(score_valid['Score'], errors='coerce')
     score_valid = score_valid.dropna(subset=['Score'])
     if len(score_valid) >= 5:
@@ -97,7 +139,7 @@ if 'Score' in recent.columns:
                 avg_pnl = round(grp['PnL_Pct'].mean(), 2)
                 score_stats[bucket] = {"胜率": win_rate, "平均盈亏": avg_pnl, "样本数": len(grp)}
 
-print(f"📊 近30天真实胜率: {overall_win_rate}% | 各标签: {stats}")
+print(f"📊 当前版本真实胜率（仅已到期归档）: {overall_win_rate}% | 各标签: {stats}")
 if industry_stats:
     print(f"📊 行业胜率分布: {industry_stats}")
 if score_stats:
@@ -105,7 +147,7 @@ if score_stats:
 
 EVOLVE_THRESHOLD = 60
 if overall_win_rate >= EVOLVE_THRESHOLD:
-    print(f"✅ 胜率 {overall_win_rate}% 达标，本周无需进化。")
+    print(f"✅ 胜率 {overall_win_rate}% 达标，本次无需进化。")
     exit(0)
 
 print(f"⚠️ 胜率 {overall_win_rate}% 低于 {EVOLVE_THRESHOLD}%，触发进化引擎...")
@@ -122,34 +164,29 @@ client = anthropic.Anthropic(
     base_url=os.environ.get("CLAWSOCKET_BASE_URL")
 )
 
-loss_samples = recent[
-    recent['PnL_Pct'].notna() &
-    recent['Tag'].isin(ALL_CORE_TAGS) &
-    (recent['PnL_Pct'] < 0)
-].copy()
+loss_samples = matured[matured['PnL_Pct'] < 0].copy()
+win_samples = matured[matured['PnL_Pct'] > 0].copy()
 
-win_samples = recent[
-    recent['PnL_Pct'].notna() &
-    recent['Tag'].isin(ALL_CORE_TAGS) &
-    (recent['PnL_Pct'] > 0)
-].copy()
-
-score_section = f"\n【推荐评分区间胜率分布（用于判断评分体系是否有真实预测力）】：\n{score_stats}\n" if score_stats else "\n【推荐评分区间胜率分布】：暂无足够样本（评分系统刚上线或样本不足5条）\n"
+score_section = f"\n【推荐评分区间胜率分布（用于判断评分体系是否有真实预测力）】：\n{score_stats}\n" if score_stats else "\n【推荐评分区间胜率分布】：暂无足够样本\n"
 
 prompt = f"""
 你是一个A股事件驱动型量化策略优化专家。当前系统是【消息+逻辑推演驱动版】，核心逻辑是：
 事件识别 → 产业链推演 → 匹配资金活跃标的 → 技术面仅作风控兜底 → 对Top1-5给出1-100推荐评分
 
-【近30天真实持仓表现】：
-整体胜率：{overall_win_rate}%（目标>60%）
+【重要评估说明】：以下数据严格只包含本版本scan.py（自{version_start_date.strftime('%Y-%m-%d')}起生效）产生的、且已经持有到期满（已超期归档，真实结果已知）的交易，不包含仍在持仓中尚未到期的票，也不包含旧版本的历史数据。这样才能公平评判当前这一版策略的真实表现。
+
+当前版本下还有 {still_active_tickers} 只标的仍在持仓中，尚未到期，暂不计入本次评估，等它们到期归档后会自然纳入未来的评估。
+
+【当前版本真实持仓表现（仅已到期归档样本）】：
+整体胜率：{overall_win_rate}%（目标>60%，样本数：{len(matured)}）
 各标签细分：{stats}
 行业胜率分布：{industry_stats}
 {score_section}
 
-【亏损样本（最近{len(loss_samples.tail(10))}条）】：
+【亏损样本（最近{len(loss_samples.tail(10))}条，均为已到期归档的真实结果）】：
 {loss_samples.tail(10).to_string()}
 
-【盈利样本（最近{len(win_samples.tail(10))}条）】：
+【盈利样本（最近{len(win_samples.tail(10))}条，均为已到期归档的真实结果）】：
 {win_samples.tail(10).to_string()}
 
 【当前 scan.py 代码】：
@@ -193,14 +230,15 @@ prompt = f"""
 - 不得修改模型名称（必须保持 claude-opus-4-8）
 - 不得把系统改回技术指标驱动逻辑（RSI/MACD 阈值过滤）
 - 不得删除"免死金牌"机制（无历史数据的票赋予占位符而不是删除）
-- 不得删除1-100推荐评分机制，且评分提取格式必须严格保持为"评分:[XX]/100"，必须与正则表达式 r'评分\\s*[:：]\\s*\\[?(\\d{{1,3}})\\s*/\\s*100' 保持完全兼容，不得改成其他格式（如"XX分"、"评分XX"等变体），否则后续无法正确提取入库
+- 不得删除1-100推荐评分机制，且评分提取格式必须严格保持为"评分:[XX]/100"，必须与正则表达式 r'评分\\s*[:：]\\s*\\[?(\\d{{1,3}})\\s*/\\s*100' 保持完全兼容
+- 不得删除scan.py顶部的版本标记机制（update_version_marker函数），这是evolve.py公平评估的基础设施
 - 不得把【核心精选】Top 1-5 的详细分析数量改少（必须维持5只都展开详细分析，除非当天逻辑确实不足5只）
 
 【严格按以下格式输出，不要加任何其他内容】：
 
 ===REPORT_START===
 <div style="background:#e8f5e9; border-left:6px solid #388e3c; padding:20px; border-radius:8px; margin-bottom:20px;">
-<h3 style="color:#1b5e20; margin-top:0;">🔬 胜率诊断（事件驱动视角）</h3>
+<h3 style="color:#1b5e20; margin-top:0;">🔬 胜率诊断（事件驱动视角，仅基于本版本已到期数据）</h3>
 <p>(分析是事件逻辑质量问题、资金匹配问题、止损设置问题还是评分体系校准问题，结合亏损样本和评分区间分布说明)</p>
 </div>
 <div style="background:#e3f2fd; border-left:6px solid #1976d2; padding:20px; border-radius:8px;">
@@ -245,9 +283,6 @@ except Exception as e:
     print(f"⚠️ 解析失败: {e}")
     exit(1)
 
-# ==========================================
-# 语法检查：生成的代码必须通过才能覆盖
-# ==========================================
 try:
     ast.parse(new_code)
     print("✅ 语法检查通过，准备覆盖 scan.py")
@@ -295,7 +330,7 @@ try:
     with open("scan.py", "w", encoding="utf-8") as f:
         f.write(f"# 自动进化版本 | 时间: {get_bj_time().strftime('%Y-%m-%d %H:%M')} | 触发胜率: {overall_win_rate}%\n\n")
         f.write(new_code)
-    print("✅ scan.py 已自动更新！")
+    print("✅ scan.py 已自动更新！下次运行时会自动检测内容变化并重新标记版本起始日期。")
 except Exception as e:
     print(f"❌ 文件写入失败: {e}")
     exit(1)
@@ -312,13 +347,14 @@ def send_evolve_mail(report_html, win_rate, backup_name):
         <h3 style="color:#e65100; margin-top:0;">已自动覆盖 scan.py</h3>
         <p>旧版本已备份为 <b>{backup_name}</b>，可在 GitHub 仓库找到。</p>
         <p>如果发现新版本有问题，把备份文件内容复制回 scan.py 即可回滚。</p>
+        <p>注意：下次 scan.py 运行时会自动检测到内容变化，重新记录版本起始日期，本次改动之前的数据将不再计入未来的胜率评估。</p>
     </div>
     """
     style = "<style>body{font-family:sans-serif;background:#f4f6f9;color:#333;padding:20px;line-height:1.6}.container{max-width:900px;margin:0 auto;background:#fff;padding:30px;border-radius:10px;}</style>"
     full_html = f"""<!DOCTYPE html><html><head><meta charset='utf-8'>{style}</head>
     <body><div class='container'>
     <h1 style='color:#d32f2f;text-align:center;'>A股 scan.py 已自动进化（事件驱动版）</h1>
-    <p style='text-align:center;color:#666;'>近30天真实胜率 <b style='color:#d32f2f;'>{win_rate}%</b>，系统已自动优化</p>
+    <p style='text-align:center;color:#666;'>本版本真实胜率（仅已到期归档样本） <b style='color:#d32f2f;'>{win_rate}%</b>，系统已自动优化</p>
     {notice}
     <hr>
     <h2>本次改进报告</h2>
