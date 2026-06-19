@@ -90,8 +90,27 @@ def get_price_on_date(ticker, target_date_str):
     return float(valid.iloc[-1]['close'])
 
 
+# ==========================================
+# 读取已有 review_history.csv，建立"已归档"去重集合
+# 避免同一笔交易的最终结果被反复记录（之前的bug：
+# 一只票到期归档后，第二天会被再次判定为"已超期"并再写一条）
+# ==========================================
+already_archived = set()
+review_log_path = "review_history.csv"
+if os.path.exists(review_log_path) and os.path.getsize(review_log_path) > 0:
+    try:
+        existing_review = pd.read_csv(review_log_path, on_bad_lines='skip')
+        if {'Status', 'Ticker', 'Rec_Date'}.issubset(existing_review.columns):
+            archived_rows = existing_review[existing_review['Status'] == '已超期归档']
+            already_archived = set(zip(archived_rows['Ticker'].astype(str), archived_rows['Rec_Date'].astype(str)))
+            print(f"📌 已读取历史归档记录，共 {len(already_archived)} 笔交易此前已完成归档，本次将跳过重复记录")
+    except Exception as e:
+        print(f"⚠️ 读取历史归档记录失败，将不做去重: {e}")
+
+
 active_list = []
 expired_list = []
+skipped_duplicate = 0
 
 for ticker, group in recent_picks.groupby('Ticker'):
     group = group.sort_values('Date')
@@ -126,10 +145,16 @@ for ticker, group in recent_picks.groupby('Ticker'):
         continue
 
     rec_price = float(first_row['Close_Price'])
+    rec_date_str = first_row['Date'].strftime('%Y-%m-%d')
     maturity_date_dt = first_row['Date'] + datetime.timedelta(days=hold_days)
     maturity_date = maturity_date_dt.strftime('%Y-%m-%d')
 
     if maturity_date_dt.replace(tzinfo=None) <= get_bj_time().replace(tzinfo=None):
+        # 已到期：先检查是否已经归档过，避免重复记录
+        if (str(ticker), rec_date_str) in already_archived:
+            skipped_duplicate += 1
+            continue
+
         maturity_price = get_price_on_date(ticker, maturity_date)
         maturity_pnl = round(((maturity_price - rec_price) / rec_price) * 100, 2) if maturity_price else None
 
@@ -140,7 +165,7 @@ for ticker, group in recent_picks.groupby('Ticker'):
             "推荐评分": score_str,
             "持股周期建议": hold_period_str,
             "止损价": stop_loss,
-            "首次推荐日": first_row['Date'].strftime('%Y-%m-%d'),
+            "首次推荐日": rec_date_str,
             "首次推荐价": rec_price,
             "期满日": maturity_date,
             "期满日价格": maturity_price if maturity_price else "无数据",
@@ -163,7 +188,7 @@ for ticker, group in recent_picks.groupby('Ticker'):
             "推荐评分": score_str,
             "持股周期建议": hold_period_str,
             "止损价": stop_loss,
-            "首次推荐日": first_row['Date'].strftime('%Y-%m-%d'),
+            "首次推荐日": rec_date_str,
             "首次推荐价": rec_price,
             "现价": cur_price,
             "持仓天数": days_held,
@@ -172,7 +197,10 @@ for ticker, group in recent_picks.groupby('Ticker'):
             "系统连续推荐次数": len(group),
         })
 
-print(f"✅ 持仓中: {len(active_list)} 只 | 已超期(本次归档): {len(expired_list)} 只")
+if skipped_duplicate > 0:
+    print(f"📌 跳过 {skipped_duplicate} 只已归档过的到期交易，避免重复计入统计")
+
+print(f"✅ 持仓中: {len(active_list)} 只 | 已超期(本次新归档): {len(expired_list)} 只")
 
 if not active_list and not expired_list:
     print("⚠️ 无需复盘的标的，退出。")
@@ -189,7 +217,7 @@ prompt = f"""
 【持仓中（周期内，需要给出风控指令）】：
 {active_list}
 
-【已超期（本次归档，只做策略复盘评价，不需要风控指令）】：
+【已超期（本次新归档，只做策略复盘评价，不需要风控指令）】：
 {expired_list}
 
 字段说明：
@@ -201,13 +229,13 @@ prompt = f"""
 - 期满日盈亏(%)：持股周期到期那天的真实盈亏（已超期才有，这才是策略真实表现）
 - 系统连续推荐次数：次数越多说明系统持续看好
 
-在风控判断或策略复盘时，请结合推荐评分进行验证：高分票（80分以上）如果出现明显亏损，需要特别指出"高信心预期未兑现"；低分票（60分以下）如果反而盈利良好，也需要指出"评分体系可能过于保守"。这类反差信息对优化评分标准很有价值。
+在风控判断或策略复盘时，请结合推荐评分进行验证：高分票（80分以上）如果出现明显亏损，需要特别指出"高信心预期未兑现"；低分票（60分以下）如果反而盈利良好，也需要指出"评分体系可能过于保守"。
 
 请严格按以下 HTML 骨架输出复盘报告（直出HTML，禁加markdown框，盈利标红，亏损标绿）：
 
 <div style="background: #eceff1; border-left: 6px solid #455a64; padding: 20px; margin-bottom: 25px; border-radius: 8px;">
     <h3 style="margin-top: 0; color: #263238;">⚖️ 盘后总体风控审查</h3>
-    <p>(总结持仓中标的整体盈亏状况，以及已超期标的的策略胜率评估，特别指出评分与实际表现是否存在明显反差)</p>
+    <p>(总结持仓中标的整体盈亏状况，以及本次新归档标的的策略胜率评估，特别指出评分与实际表现是否存在明显反差)</p>
 </div>
 
 <h2 style="color: #1565c0; border-bottom: 2px solid #1565c0; padding-bottom: 5px;">📊 持仓中 - 风控纪律核对单</h2>
@@ -241,9 +269,6 @@ with client.messages.stream(
 
 ai_html = ai_html.replace("```html", "").replace("```", "").strip()
 
-# ==========================================
-# 写入 review_history.csv（含 Score 列自动迁移）
-# ==========================================
 review_log = "review_history.csv"
 new_header = "Review_Date,Ticker,Name,Tag,Rec_Date,Rec_Price,Cur_Price,Days_Held,PnL_Pct,Maturity_PnL,Hold_Period,Stop_Loss,Rec_Count,Status,Score\n"
 review_file_exists = os.path.exists(review_log) and os.path.getsize(review_log) > 0
@@ -256,7 +281,7 @@ if review_file_exists:
         review_lines[0] = new_header
         with open(review_log, "w", encoding="utf-8") as f:
             f.writelines(review_lines)
-        print("⚠️ 检测到旧版review_history.csv缺少Score列，已自动升级表头（历史行Score将显示为空，不影响读取）")
+        print("⚠️ 检测到旧版review_history.csv缺少Score列，已自动升级表头")
 
 try:
     with open(review_log, "a", encoding="utf-8") as f:
@@ -275,9 +300,6 @@ try:
 except Exception as e:
     print(f"⚠️ 复盘写入失败: {e}")
 
-# ==========================================
-# 发送邮件（只发给仓库主人，读取 OWNER_EMAIL Secret）
-# ==========================================
 style = "body{font-family:sans-serif; background:#f4f6f9; padding:20px; color:#333; line-height:1.6} .container{max-width:900px; margin:0 auto; background:#fff; padding:30px; border-radius:10px; box-shadow:0 4px 15px rgba(0,0,0,0.05)}"
 full_html = f"<!DOCTYPE html><html><head><meta charset='utf-8'><style>{style}</style></head><body><div class='container'><h1 style='color:#37474f; text-align:center;'>Alpha 雷达 A股盘后复盘</h1>{ai_html}</div></body></html>"
 
