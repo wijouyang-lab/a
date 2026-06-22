@@ -84,17 +84,25 @@ pro = ts.pro_api()
 # 1. 获取交易额 Top 300
 # ==========================================
 def get_top_300_pool():
-    trade_date = (get_bj_time() - datetime.timedelta(days=1)).strftime('%Y%m%d')
-    print(f"🔍 [阶段1] 正在拉取 {trade_date} 的A股全市场数据，圈定 Top 300 主力资金池...")
+    print(f"🔍 [阶段1] 正在拉取最近交易日的A股全市场数据，圈定 Top 300 主力资金池...")
+    df_daily = None
+    trade_date = None
+    
+    # 动态回退机制：最多往前找7天，完美兼容周末和长假
+    for i in range(1, 8):
+        try_date = (get_bj_time() - datetime.timedelta(days=i)).strftime('%Y%m%d')
+        df_try = pro.daily(trade_date=try_date)
+        if df_try is not None and not df_try.empty:
+            df_daily = df_try
+            trade_date = try_date
+            print(f"   ✅ 找到最近交易日数据: {try_date}")
+            break
+        else:
+            print(f"   {try_date} 无数据（非交易日），继续往前找...")
 
-    df_daily = pro.daily(trade_date=trade_date)
-    if df_daily is None or df_daily.empty:
-        trade_date = (get_bj_time() - datetime.timedelta(days=2)).strftime('%Y%m%d')
-        print(f"   昨日数据为空，尝试 {trade_date}...")
-        df_daily = pro.daily(trade_date=trade_date)
-        if df_daily is None or df_daily.empty:
-            print("🚨 数据拉取失败，返回空池。")
-            return {}, []
+    if df_daily is None:
+        print("🚨 连续7天都没有拉取到数据，返回空池。")
+        return {}, [], None
 
     basic = pro.stock_basic(exchange='', list_status='L', fields='ts_code,name,industry')
     name_map = dict(zip(basic['ts_code'], basic['name']))
@@ -115,8 +123,8 @@ def get_top_300_pool():
             "pct_chg": row.get('pct_chg', 0),
         }
 
-    print(f"✅ 成功圈定 {len(full_pool)} 只核心活跃标的。")
-    return full_pool, codes
+    print(f"✅ 成功圈定 {len(full_pool)} 只核心活跃标的（数据日期: {trade_date}）。")
+    return full_pool, codes, trade_date
 
 
 # ==========================================
@@ -159,7 +167,7 @@ def get_free_macro_news():
 
 
 # ==========================================
-# 3. 个股新闻抓取（保留原有逻辑，未改动）
+# 3. 个股新闻抓取
 # ==========================================
 def get_stock_news(ticker_name, max_items=3):
     headlines = []
@@ -221,10 +229,9 @@ def enrich_pool_with_news(pool_data):
 
 
 # ==========================================
-# 4. 定向计算技术指标（分批抓取 + 免死金牌，未改动）
+# 4. 定向计算技术指标（分批抓取 + 免死金牌）
 # ==========================================
-def calc_tech_indicators(full_pool, codes):
-    trade_date = (get_bj_time() - datetime.timedelta(days=1)).strftime('%Y%m%d')
+def calc_tech_indicators(full_pool, codes, trade_date):
     print("⚙️ [阶段3] 正在回头定向拉取 Top 300 的历史K线，分批次绕过 API 限制...")
 
     start_hist = (get_bj_time() - datetime.timedelta(days=120)).strftime('%Y%m%d')
@@ -289,7 +296,7 @@ def calc_tech_indicators(full_pool, codes):
 
 
 # ==========================================
-# 5. Claude 事件逻辑推演选股（Top1-5详细分析 + 1-100评分）
+# 5. Claude 事件逻辑推演选股
 # ==========================================
 def generate_ai_report(pool_data, macro_news_text):
     print("🧠 [阶段4] 召唤 AI 大脑（事件→产业链→个股新闻三重交叉验证，Top5详细分析）...")
@@ -545,11 +552,11 @@ def send_emails(html_content):
 
 
 if __name__ == "__main__":
-    full_pool, codes = get_top_300_pool()
+    full_pool, codes, trade_date = get_top_300_pool()
 
     if full_pool:
         macro_news = get_free_macro_news()
-        final_pool = calc_tech_indicators(full_pool, codes)
+        final_pool = calc_tech_indicators(full_pool, codes, trade_date)
 
         if len(final_pool) < 10:
             print("🚨 触发安全熔断：清洗后有效标的不足10只，终止 AI 调用。")
