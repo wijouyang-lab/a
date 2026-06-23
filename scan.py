@@ -21,7 +21,6 @@ def get_bj_time():
 
 # ==========================================
 # 版本标记：检测 scan.py 内容是否变化，记录"当前版本"起始日期
-# 供 evolve.py 做公平评估时过滤数据，避免新旧版本混在一起算胜率
 # ==========================================
 def update_version_marker():
     version_file = "scan_version.txt"
@@ -87,8 +86,7 @@ def get_top_300_pool():
     print(f"🔍 [阶段1] 正在拉取最近交易日的A股全市场数据，圈定 Top 300 主力资金池...")
     df_daily = None
     trade_date = None
-    
-    # 动态回退机制：最多往前找7天，完美兼容周末和长假
+
     for i in range(1, 8):
         try_date = (get_bj_time() - datetime.timedelta(days=i)).strftime('%Y%m%d')
         df_try = pro.daily(trade_date=try_date)
@@ -355,6 +353,8 @@ def generate_ai_report(pool_data, macro_news_text):
 → 间接受益：六氟化钨（芯片制造原料）出口企业
 → 在池子中寻找钨矿、钨加工、六氟化钨相关企业
 
+注意：在"今日核心事件与完整逻辑链"这部分概述时，尽量用行业或板块描述（如"有色金属板块"、"稀土钨钼相关标的"），避免逐一点名太多具体公司全称，把具体公司名称留给下面【核心精选】各自的详细卡片里说明，防止同一公司名称在全文重复出现造成混淆。
+
 ━━━━━━━━━━━━━━━━━━━━━━
 第二步：个股新闻交叉验证（关键步骤）
 ━━━━━━━━━━━━━━━━━━━━━━
@@ -396,17 +396,18 @@ def generate_ai_report(pool_data, macro_news_text):
 1. 【核心精选】Top 1-5 每只都必须按完整模板逐项写满，不能因为排名靠后而简化，5只的详细程度必须一致。
 2. 每只推荐必须写完整逻辑链 + 个股新闻验证结论 + 评分理由，三者缺一不可。
 3. 同一只股票绝对不能重复出现。
-4. 风控底线格式：周期:[X-Y天] | 止损:[XX.XX元]（止损必须是具体价格加"元"）。
+4. 风控底线格式：周期:[X-Y天] | 止损:[XX.XX元]（止损必须是具体价格加"元"，必须是合理的、贴近该股当前收盘价的价格，禁止凭空写出与现价严重不符的数字）。
 5. 评分格式必须严格为：评分:[XX]/100（XX是1-100的整数，必须用这个精确格式，不要写成"XX分"或"XX/100分"等变体）。
 6. 如果今日新闻中找不到足够强的事件逻辑，宁可少选（哪怕只有3只进入核心精选），不要凑数推荐到5只。
-7. 严格按以下HTML骨架输出，不加markdown外框：
+7. 严格按以下HTML骨架输出，不加markdown外框。
+8. 【极其重要】直接输出HTML代码，第一个字符必须是 < 符号，绝对不要输出任何思考过程、英文说明、分析草稿或前言，不要用任何自然语言开场，直接从HTML标签开始。
 
 <div class="header-card">
     <h2>🌍 今日事件逻辑推演中心</h2>
     <p><b>执行时间：</b>{today_str} 盘前</p>
     <div style="background:#fff3e0;border-left:4px solid #ff9800;padding:15px;margin-top:10px;border-radius:4px;">
         <b>📋 今日核心事件与完整逻辑链：</b>
-        <p><b>事件1：</b>[事件标题] → [完整推演：为什么这个事件利好/利空哪个产业链，受益逻辑是什么，预计持续多久]</p>
+        <p><b>事件1：</b>[事件标题] → [完整推演：为什么这个事件利好/利空哪个产业链，受益逻辑是什么，预计持续多久，尽量用板块/行业描述，避免逐一点名太多具体公司]</p>
         <p><b>事件2：</b>[事件标题] → [完整推演]</p>
         <p><b>受损预警：</b>[哪些行业/标的因今日事件受损，需回避，说明传导机制]</p>
     </div>
@@ -422,7 +423,7 @@ def generate_ai_report(pool_data, macro_news_text):
         <p><span class="tag bg-blue">💰 资金验证：</span>今日交易额位于巨量核心池，涨跌[X]%，[分析资金行为：是主力吸筹、机构建仓还是散户追涨]</p>
         <p><span class="tag bg-gray">📈 技术风控：</span>乖离率[X]%，RSI[X]，MACD[走强/走弱]，[给出技术面综合判断：当前位置是否安全，有无极度超买风险]</p>
         <p><span class="tag bg-teal">⭐ 推荐评分：</span>评分:[XX]/100 — [一句话说明评分理由：逻辑链是否直接、新闻是否强力佐证、资金是否充分验证]</p>
-        <p><span class="tag bg-orange">⚠️ 风控底线：</span>周期:[5-12天] | 止损:[XX.XX元] | [说明止损价设定依据：基于哪个支撑位或均线]</p>
+        <p><span class="tag bg-orange">⚠️ 风控底线：</span>周期:[5-12天] | 止损:[XX.XX元] | [说明止损价设定依据：基于哪个支撑位或均线，止损价必须贴近该股当前收盘价]</p>
     </div>
 
     <div class="card core-card">
@@ -496,8 +497,16 @@ def generate_ai_report(pool_data, macro_news_text):
         for text in stream.text_stream:
             ai_html += text
 
+    ai_html = ai_html.replace("```html", "").replace("```", "").strip()
+
+    # 防止模型在正式HTML前输出英文思考草稿，截取从第一个<div开始的内容
+    html_start = ai_html.find("<div")
+    if html_start > 0:
+        print(f"⚠️ 检测到AI输出前置了 {html_start} 字符的非HTML内容，已自动截断丢弃")
+        ai_html = ai_html[html_start:]
+
     print("✅ AI 事件逻辑推演报告生成完毕")
-    return ai_html.replace("```html", "").replace("```", "").strip()
+    return ai_html
 
 
 def build_email(ai_html):
@@ -551,6 +560,42 @@ def send_emails(html_content):
         print(f"🚨 邮件发送失败: {e}")
 
 
+def locate_stock_section(clean_html, ticker_code, name):
+    """
+    精确定位某只股票在报告全文中真正属于它自己的那个区块的起始位置。
+    优先用"(股票代码)"作为锚点——代码几乎不会在宏观叙述的流畅文字里被提及，
+    只会出现在每只股票自己的卡片标题里，比用股票名称搜索更可靠，
+    避免宏观段落里提到的公司名误抓到别的股票的止损/评分数据。
+    """
+    bare_code = ticker_code.split('.')[0] if '.' in ticker_code else ticker_code
+
+    idx = clean_html.find(f"({ticker_code})")
+    if idx != -1:
+        return idx
+
+    idx = clean_html.find(f"({bare_code})")
+    if idx != -1:
+        return idx
+
+    # 兜底：用名称搜索，但优先选择出现在"核心精选"/"观察池"/"逻辑受损"标题附近的位置，
+    # 而不是第一次出现的位置（可能只是宏观叙述里随口提到）
+    name_positions = []
+    start = 0
+    while True:
+        pos = clean_html.find(name, start)
+        if pos == -1:
+            break
+        name_positions.append(pos)
+        start = pos + 1
+
+    for pos in name_positions:
+        nearby = clean_html[max(0, pos - 60):pos + 60]
+        if "核心精选" in nearby or "观察池" in nearby or "逻辑受损" in nearby or "新闻预警" in nearby:
+            return pos
+
+    return name_positions[0] if name_positions else -1
+
+
 if __name__ == "__main__":
     full_pool, codes, trade_date = get_top_300_pool()
 
@@ -572,15 +617,17 @@ if __name__ == "__main__":
         clean_html = re.sub(r'\s+', ' ', clean_html)
 
         for item in final_pool:
-            ticker_str = str(item['Name'])
-            idx = clean_html.find(ticker_str)
+            ticker_code = str(item['Ticker'])
+            name = str(item['Name'])
+
+            idx = locate_stock_section(clean_html, ticker_code, name)
             if idx == -1:
                 continue
 
-            chunk = clean_html[idx:idx+800]
-            tag = None
-            context = clean_html[max(0, idx-300):idx] + chunk[:200]
+            chunk = clean_html[idx:idx + 1500]
+            context = clean_html[max(0, idx - 300):idx] + chunk[:200]
 
+            tag = None
             if "核心精选" in context:
                 tag = "Core_Dragon"
             elif "观察池" in context:
@@ -598,7 +645,19 @@ if __name__ == "__main__":
             else:
                 hold_period = period_match.group(1).strip() if period_match else "5-12天"
                 sl_match = re.search(r'止损\s*[:：]\s*\[?(\d{1,5}\.\d{1,2}元)', chunk)
-                stop_loss = sl_match.group(1).strip() if sl_match else f"{round(item['Close'] * (1 + DEFAULT_STOP_LOSS_PCT / 100), 2)}元"
+                stop_loss_raw = sl_match.group(1).strip() if sl_match else None
+
+                # 二次校验：止损价不能离现价太远（超过±30%视为数据异常，回退到默认计算值）
+                if stop_loss_raw:
+                    try:
+                        sl_value = float(re.sub(r'[^\d.]', '', stop_loss_raw))
+                        if abs(sl_value - item['Close']) / item['Close'] > 0.30:
+                            print(f"⚠️ {item['Name']} 止损价 {stop_loss_raw} 与现价 {item['Close']} 偏离过大，疑似数据错位，改用默认止损")
+                            stop_loss_raw = None
+                    except (ValueError, ZeroDivisionError):
+                        stop_loss_raw = None
+
+                stop_loss = stop_loss_raw if stop_loss_raw else f"{round(item['Close'] * (1 + DEFAULT_STOP_LOSS_PCT / 100), 2)}元"
                 score_match = re.search(r'评分\s*[:：]\s*\[?(\d{1,3})\s*/\s*100', chunk)
                 score = score_match.group(1).strip() if score_match else "N/A"
 
