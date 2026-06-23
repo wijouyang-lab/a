@@ -90,11 +90,6 @@ def get_price_on_date(ticker, target_date_str):
     return float(valid.iloc[-1]['close'])
 
 
-# ==========================================
-# 读取已有 review_history.csv，建立"已归档"去重集合
-# 避免同一笔交易的最终结果被反复记录（之前的bug：
-# 一只票到期归档后，第二天会被再次判定为"已超期"并再写一条）
-# ==========================================
 already_archived = set()
 review_log_path = "review_history.csv"
 if os.path.exists(review_log_path) and os.path.getsize(review_log_path) > 0:
@@ -150,7 +145,6 @@ for ticker, group in recent_picks.groupby('Ticker'):
     maturity_date = maturity_date_dt.strftime('%Y-%m-%d')
 
     if maturity_date_dt.replace(tzinfo=None) <= get_bj_time().replace(tzinfo=None):
-        # 已到期：先检查是否已经归档过，避免重复记录
         if (str(ticker), rec_date_str) in already_archived:
             skipped_duplicate += 1
             continue
@@ -229,7 +223,7 @@ prompt = f"""
 - 期满日盈亏(%)：持股周期到期那天的真实盈亏（已超期才有，这才是策略真实表现）
 - 系统连续推荐次数：次数越多说明系统持续看好
 
-在风控判断或策略复盘时，请结合推荐评分进行验证：高分票（80分以上）如果出现明显亏损，需要特别指出"高信心预期未兑现"；低分票（60分以下）如果反而盈利良好，也需要指出"评分体系可能过于保守"。
+在风控判断或策略复盘时，请结合推荐评分进行验证：高分票（80分以上）如果出现明显亏损，需要特别指出"高信心预期未兑现"；低分票（60分以下）如果反而盈利良好，也需要指出"评分体系可能过于保守"。如果某只票的止损价数值看起来明显不合理（比如止损价远高于现价的数倍，或离现价过远），请在该票的指令里直接点明"止损价数据异常，建议以现价乖离风控代替"，不要装作没看见硬套公式分析。
 
 请严格按以下 HTML 骨架输出复盘报告（直出HTML，禁加markdown框，盈利标红，亏损标绿）：
 
@@ -255,6 +249,8 @@ prompt = f"""
     <p><span style="background: #455a64; color: #fff; padding: 2px 6px; border-radius: 4px; font-size: 12px;">策略复盘</span>
     (评价这次策略是否成功，归因分析盈亏原因，明确点评评分与实际结果是否吻合，此票不再追踪)</p>
 </div>
+
+【极其重要】直接输出HTML代码，第一个字符必须是 < 符号，绝对不要输出任何思考过程、英文说明、分析草稿或前言，不要用任何自然语言开场，直接从HTML标签开始。
 """
 
 ai_html = ""
@@ -268,6 +264,12 @@ with client.messages.stream(
         ai_html += text
 
 ai_html = ai_html.replace("```html", "").replace("```", "").strip()
+
+# 防止模型在正式HTML前输出英文思考草稿，截取从第一个<div开始的内容
+html_start = ai_html.find("<div")
+if html_start > 0:
+    print(f"⚠️ 检测到AI输出前置了 {html_start} 字符的非HTML内容，已自动截断丢弃")
+    ai_html = ai_html[html_start:]
 
 review_log = "review_history.csv"
 new_header = "Review_Date,Ticker,Name,Tag,Rec_Date,Rec_Price,Cur_Price,Days_Held,PnL_Pct,Maturity_PnL,Hold_Period,Stop_Loss,Rec_Count,Status,Score\n"
