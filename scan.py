@@ -20,7 +20,7 @@ def get_bj_time():
     return datetime.datetime.now(BEIJING_TZ)
 
 # ==========================================
-# 版本标记：检测 scan.py 内容是否变化，记录"当前版本"起始日期
+# 版本标记
 # ==========================================
 def update_version_marker():
     version_file = "scan_version.txt"
@@ -77,6 +77,172 @@ DEFAULT_STOP_LOSS_PCT = -5.0
 
 ts.set_token(os.environ.get("TUSHARE_TOKEN"))
 pro = ts.pro_api()
+
+
+# ==========================================
+# 0. 扫描前：读取持仓 + 消息面 → AI 判断哪些应该清仓
+# ==========================================
+def pre_scan_portfolio_review(macro_news_text):
+    """
+    在正式选股之前，先读取 trade_history.csv 里的当前持仓，
+    结合今日消息面，让 AI 判断哪些股票因为突发消息应该立即清仓。
+    返回需要删除的 ticker 列表，并从两个 CSV 里删除对应记录。
+    """
+    log_file = "trade_history.csv"
+    review_log = "review_history.csv"
+
+    if not os.path.exists(log_file):
+        print("📋 [阶段0] trade_history.csv 不存在，跳过持仓审查。")
+        return []
+
+    try:
+        df = pd.read_csv(log_file)
+        df['Date'] = pd.to_datetime(df['Date'])
+        cutoff = get_bj_time() - datetime.timedelta(days=30)
+        recent = df[df['Date'] >= cutoff.replace(tzinfo=None)].copy()
+
+        # 只看还在持仓窗口内的 Core 类票（观望的不需要审查）
+        active_tags = ['Core_Double_Dragon', 'Sub_Pioneer', 'Core_Dragon']
+        holdings = recent[recent['Tag'].isin(active_tags)].copy()
+
+        if holdings.empty:
+            print("📋 [阶段0] 当前无有效持仓，跳过持仓审查。")
+            return []
+
+        # 每只股只取最新一条
+        holdings = holdings.sort_values('Date', ascending=False).drop_duplicates(subset='Ticker', keep='first')
+        print(f"📋 [阶段0] 发现 {len(holdings)} 只持仓，正在结合今日消息面进行突发风险审查...")
+
+    except Exception as e:
+        print(f"⚠️ [阶段0] 持仓读取失败: {e}")
+        return []
+
+    holdings_info = []
+    for _, row in holdings.iterrows():
+        holdings_info.append({
+            "代码": row['Ticker'],
+            "名称": row.get('Name', row['Ticker']),
+            "行业": row.get('Industry', '未知'),
+            "买入价": row.get('Close_Price', 'N/A'),
+            "持股周期": row.get('Hold_Period', 'N/A'),
+            "止损价": row.get('Stop_Loss', 'N/A'),
+            "推荐日期": str(row['Date'])[:10],
+        })
+
+    client = anthropic.Anthropic(
+        api_key=os.environ.get("CLAWSOCKET_API_KEY"),
+        base_url=os.environ.get("CLAWSOCKET_BASE_URL")
+    )
+
+    review_prompt = f"""
+你是顶级A股风控总监，负责每日盘前的持仓突发风险审查。
+
+【今日全球宏观与A股消息面】：
+{macro_news_text}
+
+【当前持仓列表】：
+{json.dumps(holdings_info, ensure_ascii=False)}
+
+【你的任务】：
+逐一审查每只持仓股票，判断今日消息面是否对该股票产生了严重的负面冲击，需要立即清仓止损。
+
+判断标准（满足任意一条即建议清仓）：
+1. 今日新闻中有该公司或其所在行业的直接负面消息（监管重罚、业绩暴雷预警、核心客户流失、行业政策重大逆转）
+2. 宏观事件导致该行业的产业链逻辑根本性反转（如之前买的是石油股，今日美伊和解导致油价暴跌）
+3. 地缘或政策事件导致该公司的核心业务受到直接冲击
+
+判断标准（不应清仓的情况）：
+- 大盘整体回调但个股逻辑未变
+- 消息属于行业利空但该公司不在直接受影响的产业链节点
+- 消息模糊、影响程度不明确
+
+【输出格式】：
+严格输出一个 JSON 数组，每个元素包含：
+- ticker: 股票代码（如 000001.SZ）
+- name: 股票名称
+- action: "清仓" 或 "持有"
+- reason: 一句话说明理由
+
+只输出 JSON，不要任何其他文字，格式示例：
+[
+  {{"ticker": "000001.SZ", "name": "平安银行", "action": "持有", "reason": "今日消息面无直接负面影响，金融板块逻辑未变"}},
+  {{"ticker": "600519.SH", "name": "贵州茅台", "action": "清仓", "reason": "消费税政策重大调整，白酒行业逻辑根本性反转"}}
+]
+"""
+
+    try:
+        response = client.messages.create(
+            model=TARGET_MODEL,
+            max_tokens=2000,
+            temperature=0.1,
+            messages=[{"role": "user", "content": review_prompt}]
+        )
+        raw = response.content[0].text.strip()
+
+        # 提取 JSON
+        json_match = re.search(r'\[.*\]', raw, re.DOTALL)
+        if not json_match:
+            print("⚠️ [阶段0] AI 返回格式异常，跳过持仓审查。")
+            return []
+
+        results = json.loads(json_match.group())
+
+    except Exception as e:
+        print(f"⚠️ [阶段0] 持仓审查 AI 调用失败: {e}")
+        return []
+
+    # 找出需要清仓的票
+    to_remove = []
+    review_lines = []
+    for item in results:
+        if item.get('action') == '清仓':
+            to_remove.append(item['ticker'])
+            print(f"🚨 [阶段0] 突发清仓预警: {item['name']} ({item['ticker']}) — {item['reason']}")
+            review_lines.append(f"  ❌ 清仓: {item['name']} ({item['ticker']}) — {item['reason']}")
+        else:
+            print(f"✅ [阶段0] 持有确认: {item['name']} ({item['ticker']}) — {item['reason']}")
+
+    if not to_remove:
+        print("✅ [阶段0] 所有持仓经消息面审查均无需清仓，继续正常扫描。")
+        return []
+
+    # 从 trade_history.csv 删除对应记录
+    try:
+        df_orig = pd.read_csv(log_file)
+        before = len(df_orig)
+        df_cleaned = df_orig[~df_orig['Ticker'].isin(to_remove)]
+        df_cleaned.to_csv(log_file, index=False)
+        print(f"🗑️ [阶段0] 已从 trade_history.csv 删除 {before - len(df_cleaned)} 条记录（{', '.join(to_remove)}）")
+    except Exception as e:
+        print(f"⚠️ [阶段0] trade_history.csv 删除失败: {e}")
+
+    # 从 review_history.csv 删除对应记录
+    if os.path.exists(review_log):
+        try:
+            df_review = pd.read_csv(review_log, on_bad_lines='skip')
+            before_r = len(df_review)
+            if 'Ticker' in df_review.columns:
+                df_review_cleaned = df_review[~df_review['Ticker'].isin(to_remove)]
+                df_review_cleaned.to_csv(review_log, index=False)
+                print(f"🗑️ [阶段0] 已从 review_history.csv 删除 {before_r - len(df_review_cleaned)} 条记录")
+        except Exception as e:
+            print(f"⚠️ [阶段0] review_history.csv 删除失败: {e}")
+
+    # 保存清仓记录到单独文件，方便追溯
+    try:
+        forced_exit_log = "forced_exit_log.csv"
+        log_exists = os.path.exists(forced_exit_log)
+        with open(forced_exit_log, "a", encoding="utf-8") as f:
+            if not log_exists:
+                f.write("Date,Ticker,Name,Reason\n")
+            for item in results:
+                if item.get('action') == '清仓':
+                    f.write(f"{get_bj_time().strftime('%Y-%m-%d')},{item['ticker']},{item['name']},{item['reason']}\n")
+        print(f"📝 [阶段0] 清仓记录已保存至 forced_exit_log.csv")
+    except Exception as e:
+        print(f"⚠️ 清仓记录保存失败: {e}")
+
+    return to_remove
 
 
 # ==========================================
@@ -165,14 +331,78 @@ def get_free_macro_news():
 
 
 # ==========================================
+# 2.5 昨日美股板块表现（用于推论A股跟随效应）
+# ==========================================
+def get_us_sector_performance():
+    """
+    抓取昨日美股主要板块ETF的涨跌幅，
+    用于推论今日A股哪些板块可能受美股情绪带动而上涨或下跌。
+    """
+    print("🇺🇸 [阶段2.5] 正在抓取昨日美股板块表现...")
+
+    # 主要板块ETF及对应的A股联动逻辑说明
+    sector_map = {
+        "XLK": "科技板块（半导体/软件/硬件）→ A股科技/半导体/AI板块",
+        "SOXX": "费城半导体指数 → A股半导体/芯片设计/封测板块",
+        "XLE": "能源板块（石油/天然气）→ A股石油/煤炭/新能源板块",
+        "XLF": "金融板块（银行/保险/券商）→ A股银行/保险/券商板块",
+        "XLV": "医疗健康板块 → A股医药/创新药/医疗器械板块",
+        "XLY": "非必需消费（零售/汽车）→ A股消费/汽车板块",
+        "XLI": "工业板块（航空/防务/制造）→ A股军工/制造/机器人板块",
+        "XLB": "材料板块（矿业/化工）→ A股有色金属/化工板块",
+        "ARKK": "创新科技（AI/基因/自动驾驶）→ A股AI/创新药/新能源汽车板块",
+    }
+
+    results = []
+    try:
+        # 用 Yahoo Finance RSS 或直接抓取昨日收盘数据
+        # 这里用 stooq.com 的免费 CSV 接口，无需 API key
+        import urllib.request
+        yesterday = (get_bj_time() - datetime.timedelta(days=1)).strftime('%Y-%m-%d')
+        # 两天前，确保拿到上一个交易日
+        two_days_ago = (get_bj_time() - datetime.timedelta(days=3)).strftime('%Y-%m-%d')
+
+        for ticker, description in sector_map.items():
+            try:
+                url = f"https://stooq.com/q/d/l/?s={ticker.lower()}.us&d1={two_days_ago.replace('-','')}&d2={yesterday.replace('-','')}&i=d"
+                req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+                with urllib.request.urlopen(req, timeout=8) as resp:
+                    content = resp.read().decode('utf-8')
+
+                lines = [l.strip() for l in content.strip().split('\n') if l.strip()]
+                if len(lines) >= 2:
+                    # 取最后一行（最新交易日）
+                    last_line = lines[-1].split(',')
+                    prev_line = lines[-2].split(',') if len(lines) >= 3 else None
+
+                    if len(last_line) >= 5:
+                        close_price = float(last_line[4])
+                        if prev_line and len(prev_line) >= 5:
+                            prev_close = float(prev_line[4])
+                            pct_chg = round((close_price - prev_close) / prev_close * 100, 2)
+                            sign = "📈" if pct_chg > 0 else "📉"
+                            results.append(f"{sign} {ticker}: {pct_chg:+.2f}% — {description}")
+                        else:
+                            results.append(f"➖ {ticker}: 数据不足 — {description}")
+                time.sleep(0.3)
+            except Exception:
+                results.append(f"❓ {ticker}: 抓取失败 — {description}")
+
+        if results:
+            print(f"✅ 美股板块数据获取完毕，共 {len(results)} 个板块。")
+            return "\n".join(results)
+
+    except Exception as e:
+        print(f"⚠️ 美股板块数据抓取失败: {e}")
+
+    return "暂无美股板块数据，请基于宏观新闻推演A股跟随效应。"
+
+
+# ==========================================
 # 3. 个股新闻抓取
 # ==========================================
 def get_stock_news(ticker_name, max_items=3):
     headlines = []
-    try:
-        pass
-    except Exception:
-        pass
     return headlines
 
 
@@ -296,7 +526,7 @@ def calc_tech_indicators(full_pool, codes, trade_date):
 # ==========================================
 # 5. Claude 事件逻辑推演选股
 # ==========================================
-def generate_ai_report(pool_data, macro_news_text):
+def generate_ai_report(pool_data, macro_news_text, us_sector_text, removed_tickers):
     print("🧠 [阶段4] 召唤 AI 大脑（事件→产业链→个股新闻三重交叉验证，Top5详细分析）...")
     client = anthropic.Anthropic(
         api_key=os.environ.get("CLAWSOCKET_API_KEY"),
@@ -321,13 +551,27 @@ def generate_ai_report(pool_data, macro_news_text):
             stock_info["个股新闻"] = individual_news
         compact_pool.append(stock_info)
 
+    # 已被强制清仓的股票说明
+    removed_notice = ""
+    if removed_tickers:
+        removed_notice = f"""
+⚠️ 【今日盘前强制清仓通知】：
+以下股票因今日突发消息已被系统从持仓中移除，今日选股时绝对不能再次推荐这些票：
+{', '.join(removed_tickers)}
+"""
+
     prompt = f'''
 你是顶级A股事件驱动型游资操盘手，擅长从宏观事件推演产业链受益逻辑，并结合个股新闻做三重交叉验证。
 
 今天是{today_str}。
 
+{removed_notice}
+
 【今日全球宏观与A股消息面】：
 {macro_news_text}
+
+【昨日美股各板块涨跌（用于推论A股今日跟随效应）】：
+{us_sector_text}
 
 【今日A股交易额 Top 100（含个股最新新闻）】：
 {json.dumps(compact_pool, ensure_ascii=False)}
@@ -342,6 +586,15 @@ def generate_ai_report(pool_data, macro_news_text):
 【你的核心工作流程】：
 
 ━━━━━━━━━━━━━━━━━━━━━━
+第零步：昨日美股板块表现 → A股跟随效应推演
+━━━━━━━━━━━━━━━━━━━━━━
+分析昨日美股各板块涨跌情况，推演今日A股的跟随逻辑：
+- 哪些美股板块昨日大涨，对应的A股板块今日可能受情绪带动上涨？
+- 哪些美股板块昨日大跌，对应的A股板块今日可能受拖累下跌？
+- 注意：A股跟随美股的程度取决于板块相关性和当前A股自身的政策逻辑，不是简单复制
+- 将此分析结论写入报告的"昨日美股板块传导分析"区块
+
+━━━━━━━━━━━━━━━━━━━━━━
 第一步：宏观事件识别与产业链推演
 ━━━━━━━━━━━━━━━━━━━━━━
 仔细阅读上方所有宏观新闻，识别出今日最重要的2-3个事件。
@@ -353,7 +606,7 @@ def generate_ai_report(pool_data, macro_news_text):
 → 间接受益：六氟化钨（芯片制造原料）出口企业
 → 在池子中寻找钨矿、钨加工、六氟化钨相关企业
 
-注意：在"今日核心事件与完整逻辑链"这部分概述时，尽量用行业或板块描述（如"有色金属板块"、"稀土钨钼相关标的"），避免逐一点名太多具体公司全称，把具体公司名称留给下面【核心精选】各自的详细卡片里说明，防止同一公司名称在全文重复出现造成混淆。
+注意：在"今日核心事件与完整逻辑链"这部分概述时，尽量用行业或板块描述，避免逐一点名太多具体公司全称，把具体公司名称留给下面各自的详细卡片里说明。
 
 ━━━━━━━━━━━━━━━━━━━━━━
 第二步：个股新闻交叉验证（关键步骤）
@@ -361,17 +614,15 @@ def generate_ai_report(pool_data, macro_news_text):
 对每只候选标的，必须检查其个股新闻字段：
 
 ✅ 加分情形（优先推荐）：
-- 个股新闻与宏观主线高度吻合（如宏观是"半导体政策"，个股新闻也提到该公司获得订单/政策支持）
+- 个股新闻与宏观主线高度吻合
 - 个股新闻显示公司有最新业绩预喜、重大合同、股权激励
-- 个股新闻显示主力资金连续流入、机构调研
 
 ⚠️ 中性情形（正常分析）：
-- 暂无个股新闻（纯靠宏观逻辑推演）：需在报告中注明"无最新个股消息，纯逻辑推演"
+- 暂无个股新闻：需注明"无最新个股消息，纯逻辑推演"
 
 ❌ 减分/排除情形（必须说明）：
 - 个股新闻显示负面消息：监管调查、业绩预亏、大股东减持、核心高管离职
 - 即使宏观逻辑再好，有以上负面新闻的票必须降级到观察池或受损组
-- 个股新闻与宏观主线矛盾（如宏观利好AI，但该AI股个股新闻显示订单取消）
 
 ━━━━━━━━━━━━━━━━━━━━━━
 第三步：技术面风控兜底
@@ -380,34 +631,40 @@ def generate_ai_report(pool_data, macro_news_text):
 其他技术状况不影响选股，但用于设定合理止损位。
 
 ━━━━━━━━━━━━━━━━━━━━━━
-第四步：推荐评分（1-100分，核心要求）
+第四步：推荐评分（1-100分）
 ━━━━━━━━━━━━━━━━━━━━━━
-对每一只进入【核心精选】（Top 1-5）的标的，必须给出一个1-100的综合评分，评分依据：
+对每一只进入【核心精选】（Top 1-5）的标的，必须给出一个1-100的综合评分：
 - 事件逻辑链是否完整、直接（直接受益方通常80分以上，三四手受益方应低于60分）
-- 个股新闻是否强力佐证（有正面新闻共振+10~15分，有负面新闻应直接降到观察池甚至不评分）
-- 资金验证是否充分（巨量+明显异动应加分，温和放量应正常评分）
-- 技术面是否健康（极度超买应扣分，正常区间不扣分）
-评分必须客观区分质量差异，禁止5只全部给相近分数（如全部85分左右），必须体现你对不同标的确信程度的真实差异。
+- 个股新闻是否强力佐证（有正面新闻共振+10~15分）
+- 美股跟随效应是否对该板块有利（美股同板块昨日大涨且A股逻辑未透支+5~10分）
+- 技术面是否健康（极度超买应扣分）
+评分必须客观区分质量差异，禁止5只全部给相近分数。
 
 ━━━━━━━━━━━━━━━━━━━━━━
 第五步：输出详细报告
 ━━━━━━━━━━━━━━━━━━━━━━
 【硬性纪律】：
-1. 【核心精选】Top 1-5 每只都必须按完整模板逐项写满，不能因为排名靠后而简化，5只的详细程度必须一致。
+1. 【核心精选】Top 1-5 每只都必须按完整模板逐项写满。
 2. 每只推荐必须写完整逻辑链 + 个股新闻验证结论 + 评分理由，三者缺一不可。
 3. 同一只股票绝对不能重复出现。
-4. 风控底线格式：周期:[X-Y天] | 止损:[XX.XX元]（止损必须是具体价格加"元"，必须是合理的、贴近该股当前收盘价的价格，禁止凭空写出与现价严重不符的数字）。
-5. 评分格式必须严格为：评分:[XX]/100（XX是1-100的整数，必须用这个精确格式，不要写成"XX分"或"XX/100分"等变体）。
-6. 如果今日新闻中找不到足够强的事件逻辑，宁可少选（哪怕只有3只进入核心精选），不要凑数推荐到5只。
+4. 风控底线格式：周期:[X-Y天] | 止损:[XX.XX元]（止损必须贴近该股当前收盘价）。
+5. 评分格式必须严格为：评分:[XX]/100。
+6. 如果今日新闻中找不到足够强的事件逻辑，宁可少选，不要凑数推荐。
 7. 严格按以下HTML骨架输出，不加markdown外框。
-8. 【极其重要】直接输出HTML代码，第一个字符必须是 < 符号，绝对不要输出任何思考过程、英文说明、分析草稿或前言，不要用任何自然语言开场，直接从HTML标签开始。
+8. 【极其重要】第一个字符必须是 < 符号，绝对不要输出任何思考过程或前言。
 
 <div class="header-card">
     <h2>🌍 今日事件逻辑推演中心</h2>
     <p><b>执行时间：</b>{today_str} 盘前</p>
+
+    <div style="background:#e8f5e9;border-left:4px solid #388e3c;padding:15px;margin-top:10px;border-radius:4px;">
+        <b>🇺🇸 昨日美股板块传导分析：</b>
+        <p>[分析昨日美股各板块涨跌，明确指出哪些A股板块今日可能受益跟随上涨，哪些可能受拖累，以及跟随逻辑是否成立的判断依据]</p>
+    </div>
+
     <div style="background:#fff3e0;border-left:4px solid #ff9800;padding:15px;margin-top:10px;border-radius:4px;">
         <b>📋 今日核心事件与完整逻辑链：</b>
-        <p><b>事件1：</b>[事件标题] → [完整推演：为什么这个事件利好/利空哪个产业链，受益逻辑是什么，预计持续多久，尽量用板块/行业描述，避免逐一点名太多具体公司]</p>
+        <p><b>事件1：</b>[事件标题] → [完整推演：为什么这个事件利好/利空哪个产业链，受益逻辑是什么，预计持续多久，尽量用板块/行业描述]</p>
         <p><b>事件2：</b>[事件标题] → [完整推演]</p>
         <p><b>受损预警：</b>[哪些行业/标的因今日事件受损，需回避，说明传导机制]</p>
     </div>
@@ -419,16 +676,18 @@ def generate_ai_report(pool_data, macro_news_text):
     <div class="card core-card">
         <h3>[核心精选] 1. [名称] ([代码]) | [行业]</h3>
         <p><span class="tag bg-red">🔗 宏观事件逻辑链：</span>[具体事件] → [产业链传导机制，2-3句话说清楚] → [该企业为什么是直接受益方，说明公司在产业链中的具体位置和核心竞争力]</p>
+        <p><span class="tag bg-green">🇺🇸 美股传导加持：</span>[说明昨日美股同板块涨跌情况，是否对该股今日形成正面情绪传导，或者该逻辑与美股无关]</p>
         <p><span class="tag bg-purple">📰 个股新闻验证：</span>[列出该股相关个股新闻标题，说明是否与宏观主线形成共振；若无新闻则注明"暂无最新个股消息，纯宏观逻辑推演"]</p>
         <p><span class="tag bg-blue">💰 资金验证：</span>今日交易额位于巨量核心池，涨跌[X]%，[分析资金行为：是主力吸筹、机构建仓还是散户追涨]</p>
-        <p><span class="tag bg-gray">📈 技术风控：</span>乖离率[X]%，RSI[X]，MACD[走强/走弱]，[给出技术面综合判断：当前位置是否安全，有无极度超买风险]</p>
-        <p><span class="tag bg-teal">⭐ 推荐评分：</span>评分:[XX]/100 — [一句话说明评分理由：逻辑链是否直接、新闻是否强力佐证、资金是否充分验证]</p>
-        <p><span class="tag bg-orange">⚠️ 风控底线：</span>周期:[5-12天] | 止损:[XX.XX元] | [说明止损价设定依据：基于哪个支撑位或均线，止损价必须贴近该股当前收盘价]</p>
+        <p><span class="tag bg-gray">📈 技术风控：</span>乖离率[X]%，RSI[X]，MACD[走强/走弱]，[给出技术面综合判断]</p>
+        <p><span class="tag bg-teal">⭐ 推荐评分：</span>评分:[XX]/100 — [一句话说明评分理由：逻辑链是否直接、新闻是否强力佐证、美股传导是否有利、技术是否健康]</p>
+        <p><span class="tag bg-orange">⚠️ 风控底线：</span>周期:[5-12天] | 止损:[XX.XX元] | [说明止损价设定依据]</p>
     </div>
 
     <div class="card core-card">
         <h3>[核心精选] 2. [名称] ([代码]) | [行业]</h3>
         <p><span class="tag bg-red">🔗 宏观事件逻辑链：</span>(同等详细程度)</p>
+        <p><span class="tag bg-green">🇺🇸 美股传导加持：</span>(...)</p>
         <p><span class="tag bg-purple">📰 个股新闻验证：</span>(...)</p>
         <p><span class="tag bg-blue">💰 资金验证：</span>(...)</p>
         <p><span class="tag bg-gray">📈 技术风控：</span>(...)</p>
@@ -439,6 +698,7 @@ def generate_ai_report(pool_data, macro_news_text):
     <div class="card core-card">
         <h3>[核心精选] 3. [名称] ([代码]) | [行业]</h3>
         <p><span class="tag bg-red">🔗 宏观事件逻辑链：</span>(同等详细程度)</p>
+        <p><span class="tag bg-green">🇺🇸 美股传导加持：</span>(...)</p>
         <p><span class="tag bg-purple">📰 个股新闻验证：</span>(...)</p>
         <p><span class="tag bg-blue">💰 资金验证：</span>(...)</p>
         <p><span class="tag bg-gray">📈 技术风控：</span>(...)</p>
@@ -449,6 +709,7 @@ def generate_ai_report(pool_data, macro_news_text):
     <div class="card core-card">
         <h3>[核心精选] 4. [名称] ([代码]) | [行业]</h3>
         <p><span class="tag bg-red">🔗 宏观事件逻辑链：</span>(同等详细程度)</p>
+        <p><span class="tag bg-green">🇺🇸 美股传导加持：</span>(...)</p>
         <p><span class="tag bg-purple">📰 个股新闻验证：</span>(...)</p>
         <p><span class="tag bg-blue">💰 资金验证：</span>(...)</p>
         <p><span class="tag bg-gray">📈 技术风控：</span>(...)</p>
@@ -459,6 +720,7 @@ def generate_ai_report(pool_data, macro_news_text):
     <div class="card core-card">
         <h3>[核心精选] 5. [名称] ([代码]) | [行业]</h3>
         <p><span class="tag bg-red">🔗 宏观事件逻辑链：</span>(同等详细程度)</p>
+        <p><span class="tag bg-green">🇺🇸 美股传导加持：</span>(...)</p>
         <p><span class="tag bg-purple">📰 个股新闻验证：</span>(...)</p>
         <p><span class="tag bg-blue">💰 资金验证：</span>(...)</p>
         <p><span class="tag bg-gray">📈 技术风控：</span>(...)</p>
@@ -499,7 +761,6 @@ def generate_ai_report(pool_data, macro_news_text):
 
     ai_html = ai_html.replace("```html", "").replace("```", "").strip()
 
-    # 防止模型在正式HTML前输出英文思考草稿，截取从第一个<div开始的内容
     html_start = ai_html.find("<div")
     if html_start > 0:
         print(f"⚠️ 检测到AI输出前置了 {html_start} 字符的非HTML内容，已自动截断丢弃")
@@ -526,7 +787,7 @@ def build_email(ai_html):
         .bg-purple{background:#6a1b9a}
         .bg-orange{background:#e64a19}
         .bg-gray{background:#607d8b}
-        .bg-green{background:#37474f}
+        .bg-green{background:#2e7d32}
         .bg-teal{background:#00897b}
         .bear-text{color:#d32f2f;font-weight:bold}
         .market-section{margin-bottom:30px}
@@ -561,12 +822,6 @@ def send_emails(html_content):
 
 
 def locate_stock_section(clean_html, ticker_code, name):
-    """
-    精确定位某只股票在报告全文中真正属于它自己的那个区块的起始位置。
-    优先用"(股票代码)"作为锚点——代码几乎不会在宏观叙述的流畅文字里被提及，
-    只会出现在每只股票自己的卡片标题里，比用股票名称搜索更可靠，
-    避免宏观段落里提到的公司名误抓到别的股票的止损/评分数据。
-    """
     bare_code = ticker_code.split('.')[0] if '.' in ticker_code else ticker_code
 
     idx = clean_html.find(f"({ticker_code})")
@@ -577,8 +832,6 @@ def locate_stock_section(clean_html, ticker_code, name):
     if idx != -1:
         return idx
 
-    # 兜底：用名称搜索，但优先选择出现在"核心精选"/"观察池"/"逻辑受损"标题附近的位置，
-    # 而不是第一次出现的位置（可能只是宏观叙述里随口提到）
     name_positions = []
     start = 0
     while True:
@@ -597,10 +850,17 @@ def locate_stock_section(clean_html, ticker_code, name):
 
 
 if __name__ == "__main__":
+    # 阶段0：先抓新闻，然后审查持仓
+    macro_news = get_free_macro_news()
+    removed_tickers = pre_scan_portfolio_review(macro_news)
+
+    # 阶段2.5：获取昨日美股板块数据
+    us_sector_text = get_us_sector_performance()
+
+    # 阶段1：拉取今日A股数据
     full_pool, codes, trade_date = get_top_300_pool()
 
     if full_pool:
-        macro_news = get_free_macro_news()
         final_pool = calc_tech_indicators(full_pool, codes, trade_date)
 
         if len(final_pool) < 10:
@@ -609,7 +869,8 @@ if __name__ == "__main__":
 
         final_pool = enrich_pool_with_news(final_pool)
 
-        ai_html = generate_ai_report(final_pool, macro_news)
+        # 传入已删除的股票列表和美股板块数据
+        ai_html = generate_ai_report(final_pool, macro_news, us_sector_text, removed_tickers)
         full_html = build_email(ai_html)
 
         chosen = []
@@ -647,12 +908,11 @@ if __name__ == "__main__":
                 sl_match = re.search(r'止损\s*[:：]\s*\[?(\d{1,5}\.\d{1,2}元)', chunk)
                 stop_loss_raw = sl_match.group(1).strip() if sl_match else None
 
-                # 二次校验：止损价不能离现价太远（超过±30%视为数据异常，回退到默认计算值）
                 if stop_loss_raw:
                     try:
                         sl_value = float(re.sub(r'[^\d.]', '', stop_loss_raw))
                         if abs(sl_value - item['Close']) / item['Close'] > 0.30:
-                            print(f"⚠️ {item['Name']} 止损价 {stop_loss_raw} 与现价 {item['Close']} 偏离过大，疑似数据错位，改用默认止损")
+                            print(f"⚠️ {item['Name']} 止损价 {stop_loss_raw} 与现价 {item['Close']} 偏离过大，改用默认止损")
                             stop_loss_raw = None
                     except (ValueError, ZeroDivisionError):
                         stop_loss_raw = None
