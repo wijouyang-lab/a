@@ -96,9 +96,9 @@ if os.path.exists(review_log_path) and os.path.getsize(review_log_path) > 0:
     try:
         existing_review = pd.read_csv(review_log_path, on_bad_lines='skip')
         if {'Status', 'Ticker', 'Rec_Date'}.issubset(existing_review.columns):
-            archived_rows = existing_review[existing_review['Status'] == '已超期归档']
+            archived_rows = existing_review[existing_review['Status'].isin(['已超期归档', '突发清仓暂停'])]
             already_archived = set(zip(archived_rows['Ticker'].astype(str), archived_rows['Rec_Date'].astype(str)))
-            print(f"📌 已读取历史归档记录，共 {len(already_archived)} 笔交易此前已完成归档，本次将跳过重复记录")
+            print(f"📌 已读取历史归档记录，共 {len(already_archived)} 笔交易此前已处理，本次将跳过重复计算")
     except Exception as e:
         print(f"⚠️ 读取历史归档记录失败，将不做去重: {e}")
 
@@ -114,8 +114,10 @@ for ticker, group in recent_picks.groupby('Ticker'):
     days_held = (get_bj_time().replace(tzinfo=None) - first_row['Date']).days
 
     latest_tag = str(latest_row.get('Tag', '')).strip()
-    if latest_tag == 'Trap_Warning':
-        print(f"跳过 Trap_Warning: {ticker}")
+    
+    # 关键修改：如果最新标签为 Trap_Warning 或者 被阶段0强清强制暂停的 Forced_Exit，直接跳过/暂停追踪
+    if latest_tag in ['Trap_Warning', 'Forced_Exit']:
+        print(f"⏸️ 暂停追踪标的（处于风险预警或突发强清强制隔离期）: {ticker}")
         continue
 
     hold_period_str = 'N/A'
@@ -205,7 +207,7 @@ client = anthropic.Anthropic(
     base_url=os.environ.get("CLAWSOCKET_BASE_URL")
 )
 
-prompt = f"""
+prompt = f'''
 你是顶级量化风控总监。以下是今日需要复盘的 A 股标的数据：
 
 【持仓中（周期内，需要给出风控指令）】：
@@ -214,16 +216,7 @@ prompt = f"""
 【已超期（本次新归档，只做策略复盘评价，不需要风控指令）】：
 {expired_list}
 
-字段说明：
-- 推荐评分：选股引擎当初给出的1-100信心分数（N/A表示该批次还未启用评分系统）
-- 首次推荐价：买入成本基准，后续重复推荐不改变此基准
-- 持股周期建议：第一次推荐时固定，不被后续推荐覆盖
-- 止损价：第一次推荐时设定的具体价格止损位
-- 剩余天数：距离期满还有多少天（持仓中才有）
-- 期满日盈亏(%)：持股周期到期那天的真实盈亏（已超期才有，这才是策略真实表现）
-- 系统连续推荐次数：次数越多说明系统持续看好
-
-在风控判断或策略复盘时，请结合推荐评分进行验证：高分票（80分以上）如果出现明显亏损，需要特别指出"高信心预期未兑现"；低分票（60分以下）如果反而盈利良好，也需要指出"评分体系可能过于保守"。如果某只票的止损价数值看起来明显不合理（比如止损价远高于现价的数倍，或离现价过远），请在该票的指令里直接点明"止损价数据异常，建议以现价乖离风控代替"，不要装作没看见硬套公式分析。
+在风控判断或策略复盘时，请结合推荐评分进行验证：高分票（80分以上）如果出现明显亏损，需要特别指出"高信心预期未兑现"；低分票（60分以下）如果反而盈利良好，也需要指出"评分体系可能过于保守"。
 
 请严格按以下 HTML 骨架输出复盘报告（直出HTML，禁加markdown框，盈利标红，亏损标绿）：
 
@@ -238,7 +231,7 @@ prompt = f"""
     <p><b>持股周期建议:</b> [持股周期建议] | <b>止损位:</b> [止损价]</p>
     <p><b>买入成本:</b> ¥[首次推荐价] ➔ <b>现价:</b> ¥[现价] | <b>当前盈亏:</b> <span style="font-weight:bold; color:[盈利#d32f2f/亏损#388e3c];">[当前盈亏(%)]%</span></p>
     <p><span style="background: #607d8b; color: #fff; padding: 2px 6px; border-radius: 4px; font-size: 12px;">风控动作指令</span>
-    (判断：现价是否跌破止损位？系统是否仍在持续推荐？当初评分是否与现状吻合？给出持有/止损/减仓指令)</p>
+    (判断：现价是否跌破止损位？给出持有/止损/减仓指令)</p>
 </div>
 
 <h2 style="color: #37474f; border-bottom: 2px solid #cfd8dc; padding-bottom: 5px; margin-top: 40px;">📁 已超期归档 - 策略复盘评价</h2>
@@ -247,11 +240,11 @@ prompt = f"""
     <p><b>持股周期建议:</b> [持股周期建议] | <b>止损位:</b> [止损价]</p>
     <p><b>买入成本:</b> ¥[首次推荐价] → <b>期满日价格:</b> ¥[期满日价格] | <b>策略实际盈亏:</b> <span style="font-weight:bold; color:[盈利#d32f2f/亏损#388e3c];">[期满日盈亏(%)]%</span></p>
     <p><span style="background: #455a64; color: #fff; padding: 2px 6px; border-radius: 4px; font-size: 12px;">策略复盘</span>
-    (评价这次策略是否成功，归因分析盈亏原因，明确点评评分与实际结果是否吻合，此票不再追踪)</p>
+    (评价这次策略是否成功，归因分析盈亏原因)</p>
 </div>
 
-【极其重要】直接输出HTML代码，第一个字符必须是 < 符号，绝对不要输出任何思考过程、英文说明、分析草稿或前言，不要用任何自然语言开场，直接从HTML标签开始。
-"""
+【极其重要】直接输出HTML代码，第一个字符必须是 < 符号，绝对不要输出任何思考过程。
+'''
 
 ai_html = ""
 with client.messages.stream(
@@ -265,7 +258,6 @@ with client.messages.stream(
 
 ai_html = ai_html.replace("```html", "").replace("```", "").strip()
 
-# 防止模型在正式HTML前输出英文思考草稿，截取从第一个<div开始的内容
 html_start = ai_html.find("<div")
 if html_start > 0:
     print(f"⚠️ 检测到AI输出前置了 {html_start} 字符的非HTML内容，已自动截断丢弃")
@@ -283,7 +275,7 @@ if review_file_exists:
         review_lines[0] = new_header
         with open(review_log, "w", encoding="utf-8") as f:
             f.writelines(review_lines)
-        print("⚠️ 检测到旧版review_history.csv缺少Score列，已自动升级表头")
+        print("⚠️ 表头已自动升级")
 
 try:
     with open(review_log, "a", encoding="utf-8") as f:
@@ -292,7 +284,7 @@ try:
         review_date = get_bj_time().strftime('%Y-%m-%d')
 
         for item in active_list:
-            f.write(f"{review_date},{item['代码']},{item['名称']},{item['标签']},{item['首次推荐日']},{item['首次推荐价']},{item['现价']},{item['持仓天数']},{item['当前盈亏(%)']},,{item['持股周期建议']},{item['止损价']},{item['系统连续推荐次数']},持仓中,{item['推荐评分']}\n")
+            f.write(f"{review_date},{item['代码']},{item['名称']},{item['标签']},{item['首次推荐日']},{item['首次推荐价']},{item['现价']},{item['持仓天数']},{item['当前盈亏(%)']}, Jaeger,{item['持股周期建议']},{item['止损价']},{item['系统连续推荐次数']},持仓中,{item['推荐评分']}\n")
 
         for item in expired_list:
             maturity_pnl = item['期满日盈亏(%)'] if item['期满日盈亏(%)'] != "无数据" else ""
@@ -311,7 +303,7 @@ def send_mail():
     pwd = os.environ.get("EMAIL_PASSWORD")
     owner_email = os.environ.get("OWNER_EMAIL")
     if not acc or not pwd or not owner_email:
-        print("⚠️ 邮箱配置缺失（需要 EMAIL_ACCOUNT、EMAIL_PASSWORD、OWNER_EMAIL），跳过发送。")
+        print("⚠️ 邮箱配置缺失，跳过发送。")
         return
 
     msg = MIMEMultipart()
@@ -323,7 +315,7 @@ def send_mail():
         with smtplib.SMTP_SSL("smtp.gmail.com", 465) as s:
             s.login(acc, pwd)
             s.sendmail(acc, [owner_email], msg.as_string())
-            print(f"✅ 复盘报告已私密发送至仓库主人！")
+            print(f"✅ 复盘报告已发送！")
     except Exception as e:
         print(f"❌ 发送失败: {e}")
 
