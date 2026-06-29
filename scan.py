@@ -823,10 +823,38 @@ def generate_ai_report(pool_data, macro_news_text, macro_data_text, us_sector_te
         print(f"⚠️ 检测到AI输出前置了 {html_start} 字符的非HTML内容，已自动截断丢弃")
         ai_html = ai_html[html_start:]
 
+    # ── 将阶段0强制清仓的标的以醒目卡片注入报告最顶部 ──
+    if removed_tickers:
+        # 尝试从 forced_exit_log.csv 取原因，找不到就只显示代码
+        reason_map = {}
+        try:
+            import csv
+            if os.path.exists("forced_exit_log.csv"):
+                with open("forced_exit_log.csv", "r", encoding="utf-8") as f:
+                    for row in csv.DictReader(f):
+                        if row.get("Ticker") in removed_tickers:
+                            reason_map[row["Ticker"]] = row.get("Reason", "")
+        except Exception:
+            pass
+
+        items_html = ""
+        for t in removed_tickers:
+            reason_text = reason_map.get(t, "突发宏观/消息面利空，风控强平")
+            items_html += f"<li><b>{t}</b> — {reason_text}</li>"
+
+        forced_exit_card = f"""
+<div style="background:#fff3e0; border-left:6px solid #e65100; padding:20px; margin-bottom:25px; border-radius:8px;">
+    <h3 style="margin:0 0 12px 0; color:#bf360c;">🚨 今日盘前风控强制清仓标的（已暂停追踪，买卖价已归档）</h3>
+    <ul style="margin:0; padding-left:20px; line-height:2;">
+        {items_html}
+    </ul>
+    <p style="margin:12px 0 0 0; font-size:13px; color:#6d4c41;">以上标的已在盘前风控审查中被强制剔除，今日报告及后续扫描均不再追踪，历史买入价与卖出价已录入复盘账本供胜率统计。</p>
+</div>
+"""
+        ai_html = forced_exit_card + ai_html
+
     print("✅ AI 事件逻辑推演报告生成完毕")
     return ai_html
-
-
 def build_email(ai_html):
     style = """
     <style>
