@@ -118,7 +118,9 @@ if os.path.exists(review_log_path) and os.path.getsize(review_log_path) > 0:
     try:
         existing_review = pd.read_csv(review_log_path, on_bad_lines='skip')
         if {'Status', 'Ticker', 'Rec_Date'}.issubset(existing_review.columns):
-            archived_rows = existing_review[existing_review['Status'].isin(['已超期归档', '突发清仓暂停'])]
+            archived_rows = existing_review[existing_review['Status'].isin(
+                ['已超期归档', '突发清仓暂停', '止损触发清仓', '周期到期清仓']
+            )]
             already_archived = set(zip(archived_rows['Ticker'].astype(str), archived_rows['Rec_Date'].astype(str)))
             print(f"📌 已读取历史归档记录，共 {len(already_archived)} 笔交易此前已处理，本次将跳过重复计算")
     except Exception as e:
@@ -137,9 +139,11 @@ for ticker, group in recent_picks.groupby('Ticker'):
 
     latest_tag = str(latest_row.get('Tag', '')).strip()
     
-    # 关键修改：如果最新标签为 Trap_Warning 或者 被阶段0强清强制暂停的 Forced_Exit，直接跳过/暂停追踪
-    if latest_tag in ['Trap_Warning', 'Forced_Exit']:
-        print(f"⏸️ 暂停追踪标的（处于风险预警或突发强清强制隔离期）: {ticker}")
+    # 关键修改：如果最新标签为 Trap_Warning / Forced_Exit（盘前AI强清）/
+    # Stop_Loss_Hit / Period_Matured（盘中scan.py已检测到止损触发或持有到期并归档），
+    # 说明这只票今天已经被 scan.py 处理过并出过卖出信号了，直接跳过，避免在 review_history.csv 里重复记一笔。
+    if latest_tag in ['Trap_Warning', 'Forced_Exit', 'Stop_Loss_Hit', 'Period_Matured']:
+        print(f"⏸️ 暂停追踪标的（已被盘前/盘中风控处理，处于风险预警或强清/止损/到期隔离期）: {ticker}")
         continue
 
     hold_period_str = 'N/A'
