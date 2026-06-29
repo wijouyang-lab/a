@@ -40,6 +40,28 @@ except Exception as e:
     print(f"⚠️ 账本读取失败: {e}")
     import sys; sys.exit(1)
 
+# ── 新版本标记过滤：Hold_Period / Stop_Loss / Score 三字段缺一不可 ──
+# 旧版本记录缺少这三个字段（或值为空/N/A），视为无效行，直接剔除，不纳入复盘与胜率计算。
+_INVALID = {'', 'n/a', 'nan', 'none'}
+_required_cols = ['Hold_Period', 'Stop_Loss', 'Score']
+for _col in _required_cols:
+    if _col not in recent_picks.columns:
+        recent_picks[_col] = ''
+
+_valid_mask = (
+    recent_picks['Hold_Period'].astype(str).str.strip().str.lower().map(lambda v: v not in _INVALID) &
+    recent_picks['Stop_Loss'].astype(str).str.strip().str.lower().map(lambda v: v not in _INVALID) &
+    recent_picks['Score'].astype(str).str.strip().str.lower().map(lambda v: v not in _INVALID)
+)
+_dropped = (~_valid_mask).sum()
+if _dropped > 0:
+    print(f"🗂️ 三字段过滤：剔除 {_dropped} 条旧版本/不完整记录（Hold_Period/Stop_Loss/Score 任意缺失），不纳入复盘。")
+recent_picks = recent_picks[_valid_mask].copy()
+
+if recent_picks.empty:
+    print("⚠️ 过滤后无有效新版本记录，跳过复盘。")
+    import sys; sys.exit(0)
+
 import tushare as ts
 import re
 ts.set_token(os.environ.get("TUSHARE_TOKEN"))
