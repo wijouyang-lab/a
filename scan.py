@@ -73,8 +73,7 @@ if bj_hour < 6 or bj_hour >= 15:
 print("时间检查通过，开始扫描...")
 
 # 恢复双引擎架构：报告核心推演使用 Pro 模型，排雷审查使用 Flash 模型
-TARGET_MODEL_PRO = 'gemini-1.5-pro'
-TARGET_MODEL_FLASH = 'gemini-1.5-flash'
+TARGET_MODEL = 'claude-opus-4-8'
 DEFAULT_STOP_LOSS_PCT = -5.0
 
 ts.set_token(os.environ.get("TUSHARE_TOKEN"))
