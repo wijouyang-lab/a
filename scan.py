@@ -111,6 +111,26 @@ def pre_scan_portfolio_review(macro_news_text, macro_data_text):
             print("📋 [阶段0] 当前无有效持仓，跳过持仓审查。")
             return []
 
+        # ── 新版本标记过滤：Hold_Period / Stop_Loss / Score 三字段缺一不可 ──
+        # 旧版本记录缺少这三个字段，视为无效持仓，不纳入风控审查。
+        _INVALID_P0 = {'', 'n/a', 'nan', 'none'}
+        for _col in ['Hold_Period', 'Stop_Loss', 'Score']:
+            if _col not in holdings.columns:
+                holdings[_col] = ''
+        _valid_mask_p0 = (
+            holdings['Hold_Period'].astype(str).str.strip().str.lower().map(lambda v: v not in _INVALID_P0) &
+            holdings['Stop_Loss'].astype(str).str.strip().str.lower().map(lambda v: v not in _INVALID_P0) &
+            holdings['Score'].astype(str).str.strip().str.lower().map(lambda v: v not in _INVALID_P0)
+        )
+        _dropped_p0 = (~_valid_mask_p0).sum()
+        if _dropped_p0 > 0:
+            print(f"📋 [阶段0] 三字段过滤：剔除 {_dropped_p0} 条旧版本/不完整持仓记录，不纳入风控审查。")
+        holdings = holdings[_valid_mask_p0].copy()
+
+        if holdings.empty:
+            print("📋 [阶段0] 过滤后无有效新版本持仓，跳过持仓审查。")
+            return []
+
         # 每只股只取最新一条
         holdings = holdings.sort_values('Date', ascending=False).drop_duplicates(subset='Ticker', keep='first')
         print(f"📋 [阶段0] 发现 {len(holdings)} 只持仓，正在结合宏观大宗指标与突发消息进行风险审查...")
