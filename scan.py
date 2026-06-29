@@ -173,7 +173,7 @@ def pre_scan_portfolio_review(macro_news_text, macro_data_text):
     try:
         # 使用 Flash 引擎进行日常算力节约版排雷
         response = client.messages.create(
-            model=TARGET_MODEL_FLASH,
+            model=TARGET_MODEL,
             max_tokens=1000, 
             temperature=0.1,
             messages=[{"role": "user", "content": review_prompt}]
@@ -788,7 +788,7 @@ def generate_ai_report(pool_data, macro_news_text, macro_data_text, us_sector_te
     ai_html = ""
     # 使用 Pro 引擎负责高强度的核心推演
     with client.messages.stream(
-        model=TARGET_MODEL_PRO,
+        model=TARGET_MODEL,
         max_tokens=8000,
         temperature=0.3,
         messages=[{"role": "user", "content": prompt}]
