@@ -72,7 +72,9 @@ if bj_hour < 6 or bj_hour >= 15:
 
 print("时间检查通过，开始扫描...")
 
-TARGET_MODEL = 'claude-opus-4-8'
+# 恢复双引擎架构：报告核心推演使用 Pro 模型，排雷审查使用 Flash 模型
+TARGET_MODEL_PRO = 'gemini-1.5-pro'
+TARGET_MODEL_FLASH = 'gemini-1.5-flash'
 DEFAULT_STOP_LOSS_PCT = -5.0
 
 ts.set_token(os.environ.get("TUSHARE_TOKEN"))
@@ -139,26 +141,21 @@ def pre_scan_portfolio_review(macro_news_text, macro_data_text):
 你是顶级A股风控总监，负责每日盘前的持仓突发风险与宏观环境审查。
 
 【今日全球宏观与A股消息面】：
-{macro_news_text}
+{macro_news_text[:1000]} # 节约算力：截取核心新闻
 
-【今日国际宏观大宗指标（美债、金、银、铜、油）】：
+【今日国际宏观大宗指标】：
 {macro_data_text}
 
 【当前持仓列表】：
 {json.dumps(holdings_info, ensure_ascii=False)}
 
 【你的任务】：
-逐一审查每只持仓股票，判断今日消息面、全球宏观数据（如美联储情绪、国债收益率飙升、重要经济指标如PCE爆表导致的美股指数下跌等）以及大宗商品价格异动，是否对该股票产生了严重的负面冲击，从而需要立即强制清仓。
-在评估时，你必须判断外部市场的下跌是“短暂的市场波动/噪音”还是“由于底层宏观要素改变引发的趋势扭转（Trend Reversal）”，如果是趋势改变，应表现出更高的避险意志。
+审查每只持仓股票，判断今日消息面、全球宏观数据以及大宗商品价格异动，是否对该股票产生了严重的负面冲击，从而需要立即强制清仓。
 
 判断标准（满足任意一条即建议清仓）：
 1. 今日新闻中有该公司或其所在行业的直接突发重大负面消息
-2. 宏观事件或大宗商品（金银铜油）剧烈震荡导致该行业的产业链逻辑根本性反转（例如国际大宗铜铝暴跌导致矿业股周期提前见顶）
-3. 美债收益率持续狂飙或重要宏观数据（如PCE/CPI）导致全球资金流向根本扭转，影响整体A股高位核心板块的估值底层逻辑
-
-判断标准（不应清仓的情况）：
-- 大盘整体微调但个股事件和行业基本面逻辑完全未变
-- 外部大跌经你判断仅是短暂的情绪宣泄，不影响主线核心逻辑
+2. 宏观事件或大宗商品剧烈震荡导致该行业的产业链逻辑根本性反转
+3. 美债收益率持续狂飙或重要宏观数据导致全球资金流向根本扭转，影响整体A股高位核心板块的估值底层逻辑
 
 【输出格式】：
 严格输出一个 JSON 数组，每个元素包含：
@@ -169,15 +166,16 @@ def pre_scan_portfolio_review(macro_news_text, macro_data_text):
 
 只输出 JSON，不要任何其他文字，格式示例：
 [
-  {{"ticker": "000001.SZ", "name": "平安银行", "action": "持有", "reason": "全球宏观波动对国内金融板块影响有限，流动性逻辑未变"}},
-  {{"ticker": "600519.SH", "name": "贵州茅台", "action": "清仓", "reason": "PCE数据引发全球趋势逆转风险，外资权重板块面临系统性流出压力"}}
+  {{"ticker": "000001.SZ", "name": "平安银行", "action": "持有", "reason": "流动性逻辑未变"}},
+  {{"ticker": "600519.SH", "name": "贵州茅台", "action": "清仓", "reason": "PCE数据引发全球趋势逆转风险"}}
 ]
 """
 
     try:
+        # 使用 Flash 引擎进行日常算力节约版排雷
         response = client.messages.create(
-            model=TARGET_MODEL,
-            max_tokens=2000,
+            model=TARGET_MODEL_FLASH,
+            max_tokens=1000, 
             temperature=0.1,
             messages=[{"role": "user", "content": review_prompt}]
         )
@@ -212,7 +210,7 @@ def pre_scan_portfolio_review(macro_news_text, macro_data_text):
     if df_today_prices is not None and not df_today_prices.empty:
         price_map = dict(zip(df_today_prices['ts_code'], df_today_prices['close']))
 
-    # 保留数据并修正 Tag，不直接删除 (在 trade_history 标记 'Forced_Exit' 以实现暂停追踪)
+    # 保留数据并修正 Tag
     try:
         df_orig = pd.read_csv(log_file)
         for ticker in to_remove:
@@ -222,7 +220,7 @@ def pre_scan_portfolio_review(macro_news_text, macro_data_text):
     except Exception as e:
         print(f"⚠️ [阶段0] trade_history.csv 标签状态更新失败: {e}")
 
-    # 将买入价与卖出价格结算并保留写入 review_history.csv，将其状态变更为“突发清仓暂停”
+    # 写入 review_history.csv
     try:
         if os.path.exists(review_log):
             df_review = pd.read_csv(review_log, on_bad_lines='skip')
@@ -262,7 +260,6 @@ def pre_scan_portfolio_review(macro_news_text, macro_data_text):
     except Exception as e:
         print(f"⚠️ [阶段0] review_history.csv 风险归档失败: {e}")
 
-    # 同时保留原有的独立对账日志
     try:
         forced_exit_log = "forced_exit_log.csv"
         log_exists = os.path.exists(forced_exit_log)
@@ -595,7 +592,7 @@ def calc_tech_indicators(full_pool, codes, trade_date):
 
 
 # ==========================================
-# 5. Claude 事件与全球宏观逻辑推演选股
+# 5. AI 事件与全球宏观逻辑推演选股
 # ==========================================
 def generate_ai_report(pool_data, macro_news_text, macro_data_text, us_sector_text, removed_tickers):
     print("🧠 [阶段4] 召唤 AI 大脑（宏观大宗与三重交叉验证，Top5详细分析）...")
@@ -790,8 +787,9 @@ def generate_ai_report(pool_data, macro_news_text, macro_data_text, us_sector_te
 '''
 
     ai_html = ""
+    # 使用 Pro 引擎负责高强度的核心推演
     with client.messages.stream(
-        model=TARGET_MODEL,
+        model=TARGET_MODEL_PRO,
         max_tokens=8000,
         temperature=0.3,
         messages=[{"role": "user", "content": prompt}]
