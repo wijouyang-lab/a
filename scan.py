@@ -982,14 +982,36 @@ if __name__ == "__main__":
                     f.writelines(lines)
                 print("⚠️ 检测到旧版trade_history.csv缺少Score列，已自动升级表头")
 
+        # ── 写账前过滤：剔除已被标记为 Forced_Exit / Trap_Warning 的 ticker ──
+        # 只查 trade_history.csv 本身，不依赖阶段0返回值，确保跨进程重启也能正确过滤。
+        # 原有历史行（含买入价、卖出价）保持不动，供 review.py / evolve.py 计算胜率。
+        frozen_tickers: set = set()
+        FROZEN_TAGS = {'Forced_Exit', 'Trap_Warning'}
+        if file_exists:
+            try:
+                df_hist_check = pd.read_csv(log_file, on_bad_lines='skip')
+                if 'Tag' in df_hist_check.columns and 'Ticker' in df_hist_check.columns:
+                    frozen_tickers = set(
+                        df_hist_check.loc[df_hist_check['Tag'].isin(FROZEN_TAGS), 'Ticker'].astype(str)
+                    )
+                    if frozen_tickers:
+                        print(f"🔒 写账过滤：检测到 {len(frozen_tickers)} 只冻结标的 {frozen_tickers}，本次不追加新行（历史买卖价保留）")
+            except Exception as e:
+                print(f"⚠️ 写账过滤读取 trade_history.csv 失败，不执行过滤: {e}")
+
+        chosen_to_write = [i for i in chosen if str(i['Ticker']) not in frozen_tickers]
+        skipped_frozen = len(chosen) - len(chosen_to_write)
+        if skipped_frozen > 0:
+            print(f"⏭️ 已跳过 {skipped_frozen} 只冻结标的，不写入新追踪记录。")
+
         with open(log_file, "a", encoding="utf-8") as f:
             if need_header:
                 f.write(new_header)
             ts_date = get_bj_time().strftime('%Y-%m-%d')
-            for i in chosen:
+            for i in chosen_to_write:
                 f.write(f"{ts_date},{i['Ticker']},{i['Name']},{i['Tag']},{i.get('Industry','未知')},{i['Close']},{i['Amount']},{i['Daily_Pct']},{i['Hold_Period']},{i['Stop_Loss']},{i.get('Score','N/A')}\n")
 
-        print(f"✅ 共安全记账 {len(chosen)} 条核心数据。")
+        print(f"✅ 共安全记账 {len(chosen_to_write)} 条核心数据（冻结过滤后）。")
         with open("report.html", "w", encoding="utf-8") as f:
             f.write(full_html)
         send_emails(full_html)
