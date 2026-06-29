@@ -65,13 +65,20 @@ print(f"📊 当前版本下共有 {distinct_tickers} 只不同标的产生过�
 # 第二层过滤：只用"已超期归档"的数据算胜率
 # ==========================================
 ALL_CORE_TAGS = ['Core_Double_Dragon', 'Sub_Pioneer', 'Core_Dragon']
+# 已完成交易的三种状态：
+#   已超期归档   —— review.py 盘后按理论到期日价格回溯计算（旧逻辑，作为兜底）
+#   止损触发清仓 —— scan.py 阶段0b 盘中检测到现价跌破止损位，按现价计算（新）
+#   周期到期清仓 —— scan.py 阶段0b 盘中检测到已达到/超过建议持股周期，按现价计算（新）
+# 这三种都是"持仓已经平仓、结果已知"的真实交易，理应一起计入胜率，
+# 而不是只用 review.py 那一种盘后回溯方式。
+MATURED_STATUSES = ['已超期归档', '止损触发清仓', '周期到期清仓']
 
 if 'Status' not in current_version_picks.columns:
     print("⚠️ review_history.csv 缺少 Status 列，无法区分持仓中/已到期，跳过进化。")
     exit(0)
 
 matured = current_version_picks[
-    (current_version_picks['Status'] == '已超期归档') &
+    (current_version_picks['Status'].isin(MATURED_STATUSES)) &
     current_version_picks['Tag'].isin(ALL_CORE_TAGS)
 ].copy()
 matured['PnL_Pct'] = pd.to_numeric(matured['PnL_Pct'], errors='coerce')
@@ -130,9 +137,19 @@ if 'Score' in matured.columns:
                 avg_pnl = round(grp['PnL_Pct'].mean(), 2)
                 score_stats[bucket] = {"胜率": win_rate, "平均盈亏": avg_pnl, "样本数": len(grp)}
 
+# 按退出方式拆分胜率：用于判断"止损位是否设太紧/太松"、"建议持股周期是否合理"
+exit_reason_stats = {}
+if 'Status' in matured.columns:
+    for status, grp in matured.groupby('Status'):
+        if len(grp) >= 2:
+            win_rate = round((grp['PnL_Pct'] > 0).sum() / len(grp) * 100, 1)
+            avg_pnl = round(grp['PnL_Pct'].mean(), 2)
+            exit_reason_stats[status] = {"胜率": win_rate, "平均盈亏": avg_pnl, "样本数": len(grp)}
+
 print(f"📊 当前版本真实胜率（仅已到期归档）: {overall_win_rate}% | 各标签: {stats}")
 if industry_stats: print(f"📊 行业胜率分布: {industry_stats}")
 if score_stats: print(f"📊 评分区间胜率分布: {score_stats}")
+if exit_reason_stats: print(f"📊 退出方式胜率分布（止损触发/周期到期/自然到期）: {exit_reason_stats}")
 
 EVOLVE_THRESHOLD = 60
 if overall_win_rate >= EVOLVE_THRESHOLD:
@@ -157,6 +174,7 @@ loss_samples = matured[matured['PnL_Pct'] < 0].copy()
 win_samples = matured[matured['PnL_Pct'] > 0].copy()
 
 score_section = f"\n【推荐评分区间胜率分布（用于判断评分体系是否有真实预测力）】：\n{score_stats}\n" if score_stats else "\n【推荐评分区间胜率分布】：暂无足够样本\n"
+exit_reason_section = f"\n【退出方式胜率分布（区分止损触发清仓 / 周期到期清仓 / 已超期归档，用于判断止损比例与建议持股周期是否合理）】：\n{exit_reason_stats}\n" if exit_reason_stats else "\n【退出方式胜率分布】：暂无足够样本\n"
 
 prompt = f"""
 你是一个A股事件驱动与宏观量化结合的策略优化专家。当前系统是【事件+宏观大宗数据双重驱动版】，核心逻辑是：
@@ -168,7 +186,7 @@ prompt = f"""
 整体胜率：{overall_win_rate}%（目标>60%，样本数：{len(matured)}）
 各标签细分：{stats}
 行业胜率分布：{industry_stats}
-{score_section}
+{score_section}{exit_reason_section}
 
 【亏损样本（最近{len(loss_samples.tail(10))}条）】：
 {loss_samples.tail(10).to_string()}
@@ -207,7 +225,10 @@ prompt = f"""
 - 不得删除"免死金牌"机制（无历史数据的票赋予占位符而不是删除）
 - 不得删除1-100推荐评分机制及提取正则逻辑 `r'评分\\s*[:：]\\s*\\[?(\\d{{1,3}})\\s*/\\s*100'`
 - 不得删除 scan.py 顶部的版本标记机制（update_version_marker）
-- 不得删除阶段0的持仓强制清仓逻辑（pre_scan_portfolio_review）
+- 不得删除阶段0a的持仓强制清仓逻辑（pre_scan_portfolio_review）
+- 不得删除阶段0b的规则驱动卖出信号检测逻辑（check_rule_based_sell_signals，止损触发与持有到期判断，不依赖AI的纯数值判断）
+- 不得删除统一卖出信号卡片渲染逻辑（build_sell_signal_card）及其在邮件最顶部的插入位置
+- 不得删除或缩小 FROZEN_TAGS 集合（{{'Forced_Exit', 'Trap_Warning', 'Stop_Loss_Hit', 'Period_Matured'}}），这是防止已平仓标的被重复写入追踪的关键过滤器
 
 【严格按以下格式输出，不要加任何其他内容】：
 
