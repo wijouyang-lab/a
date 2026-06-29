@@ -85,19 +85,76 @@ pro = ts.pro_api()
 # ==========================================
 def get_latest_price_map():
     """
-    统一拉取当前可用的最新收盘价表，供阶段0a（AI宏观审查）与阶段0b（规则止损/到期检测）共用，
-    避免对 tushare 接口重复请求。
-    注意：scan.py 在交易时段内（6-15点）运行，今日daily数据通常盘后才结算，
-    若今日数据为空会自动回退使用昨日收盘价作为"现价"近似——这是已有的既定行为，
-    意味着止损判断在盘中可能略有滞后（按昨日收盘价口径），但到期判断（按自然日计算）不受影响。
+    统一拉取持仓股票的最新可用价格，供阶段0a/0b共用。
+    优先级：
+      1. ts.get_realtime_quotes()  —— 盘中实时行情，9:30-15:00 内有效，拿到的是最新成交价
+      2. pro.daily(今日)           —— 盘后收盘价，盘中通常为空
+      3. pro.daily(昨日)           —— 最终兜底，至少保证有一个参考价
+
+    盘中运行时强烈依赖方案1，方案2/3仅作兜底，避免全部回退到买入价导致盈亏=0的问题。
     """
-    trade_date_latest = get_bj_time().strftime('%Y%m%d')
-    df_prices = pro.daily(trade_date=trade_date_latest)
-    if df_prices is None or df_prices.empty:
+    # 先从 trade_history.csv 读出所有需要定价的 ticker
+    holding_tickers = []
+    try:
+        log_file = "trade_history.csv"
+        if os.path.exists(log_file):
+            df_h = pd.read_csv(log_file)
+            active_tags = {'Core_Double_Dragon', 'Sub_Pioneer', 'Core_Dragon'}
+            active = df_h[df_h['Tag'].isin(active_tags)]
+            holding_tickers = active['Ticker'].dropna().unique().tolist()
+    except Exception:
+        pass
+
+    price_map = {}
+
+    # ── 方案1：实时行情（盘中首选）──
+    if holding_tickers:
+        try:
+            # ts_code 格式: 000001.SZ → tushare realtime 需要去掉后缀变成 "000001" 再加市场前缀
+            # ts.get_realtime_quotes 接受不带后缀的代码列表
+            bare_codes = [t.split('.')[0] for t in holding_tickers]
+            df_rt = ts.get_realtime_quotes(bare_codes)
+            if df_rt is not None and not df_rt.empty and 'price' in df_rt.columns:
+                # 重建 ts_code（需要判断交易所后缀）
+                exchange_map = {t.split('.')[0]: t for t in holding_tickers}
+                for _, row in df_rt.iterrows():
+                    code = str(row.get('code', ''))
+                    ts_code = exchange_map.get(code)
+                    try:
+                        price = float(row['price'])
+                        if ts_code and price > 0:
+                            price_map[ts_code] = price
+                    except (ValueError, TypeError):
+                        pass
+                if price_map:
+                    print(f"✅ 实时行情拉取成功，覆盖 {len(price_map)} 只持仓现价（盘中实时口径）")
+                    return price_map
+        except Exception as e:
+            print(f"⚠️ 实时行情接口失败，回退收盘价: {e}")
+
+    # ── 方案2：今日 daily 收盘价（盘后有效）──
+    try:
+        trade_date_latest = get_bj_time().strftime('%Y%m%d')
+        df_prices = pro.daily(trade_date=trade_date_latest)
+        if df_prices is not None and not df_prices.empty:
+            price_map = dict(zip(df_prices['ts_code'], df_prices['close']))
+            print(f"✅ 今日收盘价拉取成功，共 {len(price_map)} 只（盘后口径）")
+            return price_map
+    except Exception as e:
+        print(f"⚠️ 今日 daily 失败: {e}")
+
+    # ── 方案3：昨日 daily 收盘价（最终兜底）──
+    try:
         yesterday_str = (get_bj_time() - datetime.timedelta(days=1)).strftime('%Y%m%d')
         df_prices = pro.daily(trade_date=yesterday_str)
-    if df_prices is not None and not df_prices.empty:
-        return dict(zip(df_prices['ts_code'], df_prices['close']))
+        if df_prices is not None and not df_prices.empty:
+            price_map = dict(zip(df_prices['ts_code'], df_prices['close']))
+            print(f"⚠️ 使用昨日收盘价兜底，共 {len(price_map)} 只（止损判断可能轻微滞后一日）")
+            return price_map
+    except Exception as e:
+        print(f"⚠️ 昨日 daily 也失败: {e}")
+
+    print("🚨 价格拉取全部失败，price_map 为空，止损判断将使用买入价（盈亏=0），请检查 tushare token 与网络。")
     return {}
 
 
