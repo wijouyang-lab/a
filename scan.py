@@ -618,9 +618,90 @@ def build_sell_signal_card(macro_removed_tickers, rule_sell_signals):
 
 
 # ==========================================
-# 1. 获取交易额 Top 300
+# 2.6  美股板块大跌 → A股联动封禁清单（规则驱动，不依赖AI判断）
 # ==========================================
-def get_top_300_pool():
+
+# ETF → 对应A股板块中文标签映射（供封禁通知和后续过滤使用）
+US_SECTOR_TO_ASHARE = {
+    "SOXX": ["半导体", "芯片", "封测", "晶圆", "半导体材料", "半导体设备"],
+    "XLK":  ["科技", "AI算力", "光模块", "CPO", "云计算", "数据中心"],
+    "XLE":  ["石油", "煤炭", "天然气", "能源"],
+    "XLF":  ["银行", "保险", "券商", "金融"],
+    "XLV":  ["医药", "创新药", "医疗器械", "CXO"],
+    "XLY":  ["消费", "汽车", "零售", "白酒"],
+    "XLI":  ["军工", "航空", "制造", "机器人"],
+    "XLB":  ["有色金属", "化工", "矿业"],
+    "ARKK": ["AI", "基因", "新能源汽车", "自动驾驶"],
+}
+
+# 封禁阈值：美股板块单日跌幅超过此值，对应A股板块今日进入封禁名单
+EMBARGO_THRESHOLD_PCT = -1.5   # -1.5% 触发预警；-3% 触发强封
+
+def parse_sector_embargo(us_sector_text):
+    """
+    解析 get_us_sector_performance() 的输出，找出跌幅超过阈值的ETF，
+    生成两部分输出：
+      1. embargo_sectors: list[str] —— 今日A股被封禁的板块关键词列表
+         （注入AI prompt中作为硬性禁止推荐的依据）
+      2. embargo_text: str —— 格式化的封禁通知文本，直接插入AI prompt醒目位置
+
+    设计原则：跌幅越大封禁力度越强，SOXX是最重要的信号，单独列出；
+    不试图让AI自行"综合判断"，而是把已经判断好的结论作为约束传入。
+    """
+    if not us_sector_text or "暂无" in us_sector_text:
+        return [], ""
+
+    embargo_sectors = []
+    embargo_lines = []
+
+    for line in us_sector_text.strip().split('\n'):
+        line = line.strip()
+        if not line or '📉' not in line:
+            continue
+        try:
+            # 格式: 📉 SOXX: -3.45% — 费城半导体指数 → A股半导体...
+            parts = line.replace('📉', '').strip().split(':')
+            etf = parts[0].strip()
+            pct_str = parts[1].strip().split('%')[0].strip()
+            pct = float(pct_str)
+        except Exception:
+            continue
+
+        if pct >= EMBARGO_THRESHOLD_PCT:  # 没超阈值（是正数或跌幅较小），跳过
+            continue
+
+        a_share_labels = US_SECTOR_TO_ASHARE.get(etf, [])
+        if not a_share_labels:
+            continue
+
+        embargo_sectors.extend(a_share_labels)
+
+        strength = "⛔ 强封（跌幅≥3%，A股高度联动）" if pct <= -3.0 else "🚫 预警封禁（跌幅≥1.5%，情绪联动）"
+        embargo_lines.append(
+            f"  {strength} {etf} 昨日 {pct:+.2f}% → 今日禁止推荐A股相关板块：{'、'.join(a_share_labels)}"
+        )
+
+    if not embargo_lines:
+        return [], ""
+
+    embargo_sectors = list(dict.fromkeys(embargo_sectors))  # 去重，保持顺序
+    embargo_text = f"""
+🚨【美股板块联动封禁名单 —— 硬性纪律，不可违反】：
+根据昨夜美股板块涨跌数据，以下A股板块今日进入联动封禁区：
+
+{chr(10).join(embargo_lines)}
+
+【执行要求——无例外】：
+1. 以上封禁板块内的任何个股，今日一律不得进入【核心精选】Top 1-5，即使该个股今日技术面信号强烈、个股新闻利好、宏观逻辑通顺，也绝对禁止推荐。
+2. "A股有独立逻辑"不构成例外理由——联动封禁的核心不是基本面，是情绪传导：美股半导体大跌后，A股半导体在盘前开盘初期必然承压，追入是错误的。
+3. 如确实需要提及这些板块，只能出现在【受损预警】区，明确注明"受美股联动压制，今日回避"。
+4. 今日精选方向应聚焦于：美股昨日涨幅为正的板块对应的A股方向 + 与美股相关性低的本土催化标的（政策催化、事件驱动、低位反转）。
+封禁板块关键词列表（只要股票所属行业/板块包含以下任一关键词，即触发封禁）：[{', '.join(embargo_sectors)}]
+"""
+    print(f"🚫 [阶段2.6] 美股联动封禁触发：{len(embargo_lines)} 个板块受限，封禁关键词: {embargo_sectors}")
+    return embargo_sectors, embargo_text
+
+
     print(f"🔍 [阶段1] 正在拉取最近交易日的A股全市场数据，圈定 Top 300 主力资金池...")
     df_daily = None
     trade_date = None
@@ -936,7 +1017,7 @@ def calc_tech_indicators(full_pool, codes, trade_date):
 # ==========================================
 # 5. AI 事件与全球宏观逻辑推演选股
 # ==========================================
-def generate_ai_report(pool_data, macro_news_text, macro_data_text, us_sector_text, removed_tickers):
+def generate_ai_report(pool_data, macro_news_text, macro_data_text, us_sector_text, removed_tickers, embargo_text=""):
     print("🧠 [阶段4] 召唤 AI 大脑（宏观大宗与三重交叉验证，Top5详细分析）...")
     client = anthropic.Anthropic(
         api_key=os.environ.get("CLAWSOCKET_API_KEY"),
@@ -984,6 +1065,8 @@ def generate_ai_report(pool_data, macro_news_text, macro_data_text, us_sector_te
 
 【昨日美股各板块涨跌】：
 {us_sector_text}
+
+{embargo_text}
 
 【今日A股交易额 Top 100（含个股最新新闻）】：
 {json.dumps(compact_pool, ensure_ascii=False)}
@@ -1255,6 +1338,9 @@ if __name__ == "__main__":
     # 阶段2.5：获取昨日美股板块数据
     us_sector_text = get_us_sector_performance()
 
+    # 阶段2.6：解析美股板块大跌，生成A股联动封禁清单（硬性规则，不依赖AI判断）
+    _embargo_sectors, embargo_text = parse_sector_embargo(us_sector_text)
+
     # 阶段1：拉取今日A股核心资金池
     full_pool, codes, trade_date = get_top_300_pool()
 
@@ -1268,7 +1354,7 @@ if __name__ == "__main__":
         final_pool = enrich_pool_with_news(final_pool)
 
         # AI 推演
-        ai_html = generate_ai_report(final_pool, macro_news, macro_data_text, us_sector_text, removed_tickers)
+        ai_html = generate_ai_report(final_pool, macro_news, macro_data_text, us_sector_text, removed_tickers, embargo_text)
         # 把"今日卖出信号"卡片插在邮件最顶部，第一眼就能看到当天该处理的持仓
         ai_html = sell_signal_card_html + ai_html
         full_html = build_email(ai_html)
