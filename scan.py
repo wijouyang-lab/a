@@ -702,6 +702,10 @@ def parse_sector_embargo(us_sector_text):
     return embargo_sectors, embargo_text
 
 
+# ==========================================
+# 1. 获取交易额 Top 300
+# ==========================================
+def get_top_300_pool():
     print(f"🔍 [阶段1] 正在拉取最近交易日的A股全市场数据，圈定 Top 300 主力资金池...")
     df_daily = None
     trade_date = None
