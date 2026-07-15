@@ -320,8 +320,17 @@ try:
 except Exception as e:
     print(f"⚠️ 复盘写入失败: {e}")
 
-style = "body{font-family:sans-serif; background:#f4f6f9; padding:20px; color:#333; line-height:1.6} .container{max-width:900px; margin:0 auto; background:#fff; padding:30px; border-radius:10px; box-shadow:0 4px 15px rgba(0,0,0,0.05)}"
-full_html = f"<!DOCTYPE html><html><head><meta charset='utf-8'><style>{style}</style></head><body><div class='container'><h1 style='color:#37474f; text-align:center;'>Alpha 雷达 A股盘后复盘</h1>{ai_html}</div></body></html>"
+full_html = f"""<!DOCTYPE html><html><head><meta charset='utf-8'>
+<style>
+    body {{ font-family: sans-serif; background: #f4f6f8; padding: 20px; }}
+    .card {{ background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }}
+</style></head>
+<body>
+    <div class='card'>
+        <h2 style='color: #2c3e50;'>📊 A股盘后复盘报告</h2>
+        {ai_html}
+    </div>
+</body></html>"""
 
 
 def send_mail():
