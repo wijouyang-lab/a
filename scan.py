@@ -982,46 +982,240 @@ def calc_tech_indicators(full_pool, codes, trade_date):
             if not df_hist.empty and code in df_hist['ts_code'].values:
                 stock_data = df_hist[df_hist['ts_code'] == code].copy().sort_values('trade_date')
                 if len(stock_data) >= 30:
-                    close_px = stock_data['close']
-                    ma20 = close_px.rolling(window=20).mean().iloc[-1]
+                    close_px  = stock_data['close'].values.astype(float)
+                    high_px   = stock_data['high'].values.astype(float)
+                    low_px    = stock_data['low'].values.astype(float)
+                    open_px   = stock_data['open'].values.astype(float)
+                    vol_arr   = stock_data['vol'].values.astype(float)
+
+                    # ── 乖离率 ──
+                    ma20 = pd.Series(close_px).rolling(20).mean().iloc[-1]
                     current_close = full_pool[code]["Close"]
                     full_pool[code]["乖离率(%)"] = round(((current_close - ma20) / ma20) * 100, 2)
 
-                    exp1 = close_px.ewm(span=12, adjust=False).mean()
-                    exp2 = close_px.ewm(span=26, adjust=False).mean()
+                    # ── MACD ──
+                    s_close = pd.Series(close_px)
+                    exp1 = s_close.ewm(span=12, adjust=False).mean()
+                    exp2 = s_close.ewm(span=26, adjust=False).mean()
                     macd_line = exp1 - exp2
                     signal_line = macd_line.ewm(span=9, adjust=False).mean()
                     macd_hist = (macd_line - signal_line) * 2
-                    full_pool[code]["MACD趋势"] = "走强" if macd_hist.iloc[-1] > macd_hist.iloc[-2] else "走弱"
+                    h_last, h_prev, h_prev2 = (macd_hist.iloc[-1], macd_hist.iloc[-2], macd_hist.iloc[-3])
+                    full_pool[code]["MACD趋势"] = "走强" if h_last > h_prev else "走弱"
+                    full_pool[code]["MACD_HIST_LAST"] = round(float(h_last), 4)
+                    full_pool[code]["MACD_HIST_PREV"] = round(float(h_prev), 4)
+                    # 绿柱缩短：柱值为负且正在收敛（今天的负值绝对值 < 昨天）
+                    full_pool[code]["MACD绿柱缩短"] = bool(h_last < 0 and h_last > h_prev and h_prev < h_prev2)
 
-                    delta = close_px.diff()
+                    # ── RSI ──
+                    delta = s_close.diff()
                     gain = delta.clip(lower=0).ewm(com=13, adjust=False).mean()
                     loss = (-1 * delta.clip(upper=0)).ewm(com=13, adjust=False).mean()
-                    rs = gain / loss
-                    full_pool[code]["RSI"] = round((100 - (100 / (1 + rs))).iloc[-1], 2)
+                    rs = gain / (loss + 1e-9)
+                    full_pool[code]["RSI"] = round(float((100 - 100 / (1 + rs)).iloc[-1]), 2)
+
+                    # ── KDJ（手动迭代，规避 pandas_ta 版本差异）──
+                    n_kdj = 9
+                    K, D = 50.0, 50.0
+                    j_series = []
+                    for i_k in range(len(close_px)):
+                        if i_k < n_kdj - 1:
+                            j_series.append(3 * K - 2 * D)
+                            continue
+                        h_n = max(high_px[i_k - n_kdj + 1: i_k + 1])
+                        l_n = min(low_px[i_k - n_kdj + 1: i_k + 1])
+                        rsv = (close_px[i_k] - l_n) / (h_n - l_n + 1e-9) * 100
+                        K = 2 / 3 * K + 1 / 3 * rsv
+                        D = 2 / 3 * D + 1 / 3 * K
+                        j_series.append(3 * K - 2 * D)
+                    j_last, j_prev, j_prev2 = j_series[-1], j_series[-2], j_series[-3]
+                    full_pool[code]["KDJ_J"] = round(float(j_last), 2)
+                    # J从低位（<50）回头向上：今天>昨天，昨天<=前天（谷底确认）
+                    full_pool[code]["KDJ_J回升"] = bool(j_last < 80 and j_last > j_prev and j_prev <= j_prev2)
+                    full_pool[code]["KDJ_J超卖"] = bool(j_prev2 < 20)   # 回升前处于超卖区
+
+                    # ── 量能放大 ──
+                    if len(vol_arr) >= 6:
+                        avg5 = float(pd.Series(vol_arr[:-1]).tail(5).mean())
+                        vol_today = float(vol_arr[-1])
+                        full_pool[code]["量能放大"] = bool(avg5 > 0 and vol_today >= avg5 * 1.3)
+                        full_pool[code]["量比"] = round(vol_today / (avg5 + 1e-9), 2)
+                    else:
+                        full_pool[code]["量能放大"] = False
+                        full_pool[code]["量比"] = 1.0
+
+                    # ── 看涨K线形态 ──
+                    patterns = []
+                    if len(open_px) >= 3:
+                        o, c, o1, c1 = open_px[-1], close_px[-1], open_px[-2], close_px[-2]
+                        body = abs(c - o)
+                        total_range = high_px[-1] - low_px[-1] + 1e-9
+                        lower_shadow = min(o, c) - low_px[-1]
+                        upper_shadow = high_px[-1] - max(o, c)
+
+                        # 看涨吞没：昨跌今涨，今日实体完全覆盖昨日实体
+                        if c1 < o1 and c > o and o <= c1 and c >= o1:
+                            patterns.append("看涨吞没")
+                        # 锤子线：实体小，下影长（≥实体2倍），上影短，出现在下跌后
+                        if body / total_range < 0.35 and lower_shadow >= 2 * body and upper_shadow <= body * 0.5:
+                            patterns.append("锤子线")
+                        # 刺穿线：昨跌今涨，今开低于昨收，今收超过昨实体中点
+                        mid_prev = (o1 + c1) / 2
+                        if c1 < o1 and c > o and o < c1 and c > mid_prev and c < o1:
+                            patterns.append("刺穿线")
+                        # 启明星（3日形态）
+                        if len(open_px) >= 3:
+                            o2, c2 = open_px[-3], close_px[-3]
+                            body2 = abs(c2 - o2)
+                            body1 = abs(c1 - o1)
+                            if (c2 < o2 and body2 > total_range * 0.3      # 第1日大阴
+                                    and body1 < body2 * 0.4                 # 第2日小实体（星）
+                                    and c > o and c > (o2 + c2) / 2):       # 第3日大阳收过第1日中点
+                                patterns.append("启明星")
+
+                    full_pool[code]["看涨形态"] = patterns
                     continue
 
-            full_pool[code]["乖离率(%)"] = 0.0
-            full_pool[code]["RSI"] = 50.0
-            full_pool[code]["MACD趋势"] = "API限流(纯事件驱动)"
+            # 数据不足兜底
+            for fld, dflt in [("乖离率(%)", 0.0), ("RSI", 50.0), ("MACD趋势", "API限流"),
+                               ("MACD绿柱缩短", False), ("KDJ_J", 50.0), ("KDJ_J回升", False),
+                               ("KDJ_J超卖", False), ("量能放大", False), ("量比", 1.0),
+                               ("看涨形态", [])]:
+                full_pool[code].setdefault(fld, dflt)
 
     except Exception as e:
         print(f"🚨 指标全局处理受限: {e}，启用全量兜底。")
         for code in full_pool:
-            if "RSI" not in full_pool[code]:
-                full_pool[code]["乖离率(%)"] = 0.0
-                full_pool[code]["RSI"] = 50.0
-                full_pool[code]["MACD趋势"] = "API崩溃保护"
+            for fld, dflt in [("乖离率(%)", 0.0), ("RSI", 50.0), ("MACD趋势", "API崩溃保护"),
+                               ("MACD绿柱缩短", False), ("KDJ_J", 50.0), ("KDJ_J回升", False),
+                               ("KDJ_J超卖", False), ("量能放大", False), ("量比", 1.0),
+                               ("看涨形态", [])]:
+                full_pool[code].setdefault(fld, dflt)
 
     final_pool = sorted(list(full_pool.values()), key=lambda x: x.get("Amount", 0), reverse=True)
     print(f"✅ 技术指标模块执行完毕，最终保全 {len(final_pool)} 只核心标的。")
     return final_pool
 
 
+
+# ==========================================
+# 3.5 技术形态筛选 —— Top100客观评分（0-40分）
+# ==========================================
+def screen_technical_setups(final_pool):
+    """
+    对资金池前100只股票做客观的技术形态评分（满分40分）。
+    这个分数是纯规则计算的，不依赖AI，直接注入AI的候选池数据里，
+    让AI在评总分时能够把技术面的40分和消息面的60分区分开来。
+
+    评分明细（共40分）：
+      MACD绿柱缩短（柱值<0且向0收敛，连续两日）  0-10分
+        · 绿柱连续≥2日缩短且前期曾有≥3日绿柱：10分（趋势性底部转折）
+        · 绿柱出现缩短但仅1日：6分
+      KDJ的J值从低位回升                         0-10分
+        · 超卖区（J<20）回头：10分
+        · 低位（20≤J<50）回头：7分
+        · 中位（50≤J<80）且回升：4分
+      量能放大（量比≥1.3，今日成交量>5日均量30%）  0-10分
+        · 量比≥2.0（缩量后放量明显）：10分
+        · 量比1.3-2.0：7分
+      看涨K线形态                                  0-10分
+        · 看涨吞没（最强信号）：10分
+        · 启明星：9分
+        · 刺穿线：7分
+        · 锤子线：6分
+        · 多个形态叠加：取最高分再+2（上限10）
+    """
+    top100 = final_pool[:100]
+    sector_groups = {}  # 板块 -> [股票列表]
+
+    for stock in top100:
+        # ── 计算技术评分 ──
+        tech_score = 0
+        tech_reasons = []
+
+        # 1. MACD绿柱缩短
+        if stock.get("MACD绿柱缩短"):
+            h_last = stock.get("MACD_HIST_LAST", 0)
+            h_prev = stock.get("MACD_HIST_PREV", 0)
+            if h_last < 0 and h_prev < h_last - abs(h_last) * 0.05:   # 缩短幅度>5%
+                tech_score += 10
+                tech_reasons.append("MACD绿柱持续缩短(+10)")
+            else:
+                tech_score += 6
+                tech_reasons.append("MACD绿柱初现缩短(+6)")
+        elif stock.get("MACD趋势") == "走强" and stock.get("MACD_HIST_LAST", 0) > 0:
+            tech_score += 3
+            tech_reasons.append("MACD红柱走强(+3)")
+
+        # 2. KDJ J值回升
+        j_val = stock.get("KDJ_J", 50)
+        j_rising = stock.get("KDJ_J回升", False)
+        j_oversold = stock.get("KDJ_J超卖", False)
+        if j_rising:
+            if j_oversold or j_val < 20:
+                tech_score += 10
+                tech_reasons.append(f"KDJ超卖回头J={j_val:.0f}(+10)")
+            elif j_val < 50:
+                tech_score += 7
+                tech_reasons.append(f"KDJ低位回升J={j_val:.0f}(+7)")
+            else:
+                tech_score += 4
+                tech_reasons.append(f"KDJ中位回升J={j_val:.0f}(+4)")
+
+        # 3. 量能放大
+        vol_ratio = stock.get("量比", 1.0)
+        if stock.get("量能放大"):
+            if vol_ratio >= 2.0:
+                tech_score += 10
+                tech_reasons.append(f"量比{vol_ratio:.1f}倍放量(+10)")
+            else:
+                tech_score += 7
+                tech_reasons.append(f"量比{vol_ratio:.1f}倍温和放量(+7)")
+
+        # 4. 看涨K线形态
+        patterns = stock.get("看涨形态", [])
+        if patterns:
+            pattern_scores = {"看涨吞没": 10, "启明星": 9, "刺穿线": 7, "锤子线": 6}
+            base = max(pattern_scores.get(p, 5) for p in patterns)
+            if len(patterns) > 1:
+                base = min(base + 2, 10)   # 多形态叠加最高10分
+            tech_score += base
+            tech_reasons.append(f"{'&'.join(patterns)}形态(+{base})")
+
+        tech_score = min(tech_score, 40)   # 上限40分
+        stock["技术评分"] = tech_score
+        stock["技术信号"] = tech_reasons
+
+        # ── 板块归类 ──
+        industry = stock.get("Industry", "其他")
+        sector_groups.setdefault(industry, []).append({
+            "名称": stock["Name"],
+            "代码": stock["Ticker"],
+            "技术评分": tech_score,
+            "技术信号": tech_reasons,
+        })
+
+    # 只保留有技术信号（技术评分>0）的板块归类，方便AI看
+    sector_summary = {
+        sector: sorted(stocks, key=lambda x: x["技术评分"], reverse=True)
+        for sector, stocks in sector_groups.items()
+        if any(s["技术评分"] > 0 for s in stocks)
+    }
+
+    # 技术评分 Top10 打印
+    top_tech = sorted(top100, key=lambda x: x.get("技术评分", 0), reverse=True)[:10]
+    print(f"📊 [阶段3.5] 技术形态筛选完毕 | Top10技术评分：")
+    for s in top_tech:
+        if s.get("技术评分", 0) > 0:
+            print(f"   {s['Name']}({s['Ticker']}) 技术{s['技术评分']}分 | {' + '.join(s.get('技术信号', []))}")
+
+    return sector_summary
+
+
 # ==========================================
 # 5. AI 事件与全球宏观逻辑推演选股
 # ==========================================
-def generate_ai_report(pool_data, macro_news_text, macro_data_text, us_sector_text, removed_tickers, embargo_text=""):
+def generate_ai_report(pool_data, macro_news_text, macro_data_text, us_sector_text, removed_tickers, embargo_text="", sector_tech_data=None):
     print("🧠 [阶段4] 召唤 AI 大脑（宏观大宗与三重交叉验证，Top5详细分析）...")
     client = anthropic.Anthropic(
         api_key=os.environ.get("CLAWSOCKET_API_KEY"),
@@ -1040,11 +1234,27 @@ def generate_ai_report(pool_data, macro_news_text, macro_data_text, us_sector_te
             "乖离率(%)": d.get("乖离率(%)", "N/A"),
             "RSI": d.get("RSI", "N/A"),
             "MACD": d.get("MACD趋势", "N/A"),
+            "技术评分(满分40)": d.get("技术评分", 0),   # 客观计算，AI不得修改此分
+            "技术信号": d.get("技术信号", []),           # 触发了哪些技术指标
+            "KDJ_J": d.get("KDJ_J", "N/A"),
+            "量比": d.get("量比", "N/A"),
+            "看涨形态": d.get("看涨形态", []),
         }
         individual_news = d.get('个股新闻', [])
         if individual_news:
             stock_info["个股新闻"] = individual_news
         compact_pool.append(stock_info)
+
+    # 技术板块归类数据（板块级别的技术共振信号）
+    tech_sector_block = ""
+    if sector_tech_data:
+        tech_sector_lines = []
+        for sector, stocks in sorted(sector_tech_data.items(), key=lambda x: max(s["技术评分"] for s in x[1]), reverse=True)[:8]:
+            top_in_sector = [f"{s['名称']}({s['代码']})技术{s['技术评分']}分" for s in stocks[:3] if s["技术评分"] > 0]
+            if top_in_sector:
+                tech_sector_lines.append(f"  {sector}: {' / '.join(top_in_sector)}")
+        if tech_sector_lines:
+            tech_sector_block = "【今日技术形态板块共振归类（技术评分>0的标的按板块汇总）】：\n" + "\n".join(tech_sector_lines)
 
     removed_notice = ""
     if removed_tickers:
@@ -1072,7 +1282,9 @@ def generate_ai_report(pool_data, macro_news_text, macro_data_text, us_sector_te
 
 {embargo_text}
 
-【今日A股交易额 Top 100（含个股最新新闻）】：
+{tech_sector_block}
+
+【今日A股交易额 Top 100（含技术评分+个股最新新闻）】：
 {json.dumps(compact_pool, ensure_ascii=False)}
 
 【你的核心工作流程】：
@@ -1100,16 +1312,32 @@ def generate_ai_report(pool_data, macro_news_text, macro_data_text, us_sector_te
 ❌ 减分/排除情形（必须说明）：有负面新闻的票必须强行剥离出精选池。
 
 ━━━━━━━━━━━━━━━━━━━━━━
-第三步：技术面风控兜底
+第三步：技术形态验证（双向作用）
 ━━━━━━━━━━━━━━━━━━━━━━
-乖离率>20% 且 RSI>85 视为技术极度透支，列入受损避险组。
+每只候选标的的数据中已附带「技术评分(满分40)」和「技术信号」，这是由代码客观计算的，你不得修改这些数值。
+你的任务是判断技术信号与宏观/消息面逻辑是否共振：
+  ✅ 共振加成：技术底部信号 + 消息面利好 + 资金入场量能 → 三重共振，提高消息面评分
+  ⚠️ 背离警告：技术面打分高但乖离率>20%且RSI>85（极度透支），此类必须列入受损避险组，不进精选
+  ❌ 技术零分且无消息面逻辑：降低优先级，仅列入观察池
 
 ━━━━━━━━━━━━━━━━━━━━━━
-第四步：推荐评分（1-100分）
+第四步：双维度综合评分（1-100分）
 ━━━━━━━━━━━━━━━━━━━━━━
-对每一只进入【核心精选】（Top 1-5）的标的，必须给出一个1-100的综合评分：
-- 评分格式必须严格为：评分:[XX]/100。
-- 评分应结合宏观大宗趋势符合度、个股新闻直接度、资金池额度进行权衡，拉开各标的分数区间。
+【评分权重体系】（总分100分，两个维度独立计算后相加）：
+
+■ 技术面（40分，代码已计算，直接读取「技术评分(满分40)」字段即可）：
+  · MACD绿柱缩短信号      0-10分（绿柱收敛→底部转折迹象）
+  · KDJ的J值从低位回升    0-10分（超卖回头得满分）
+  · 量能放大（量比≥1.3）  0-10分（量价配合确认方向）
+  · 看涨K线形态            0-10分（吞没/启明星/锤子等）
+
+■ 消息面（60分，由你评估）：
+  · 宏观事件直接度           0-25分（主线催化事件的板块直接受益程度）
+  · 个股新闻共振度           0-25分（有正面公告=满分；无消息但逻辑通顺=15分；负面消息=-10分）
+  · 资金热度与行业景气度      0-10分（成交额排名 + 行业当前景气周期）
+
+评分格式必须严格为：评分:[XX]/100
+示例：一只技术评分28分的股票，消息面你给45分，总分写 评分:[73]/100
 
 ━━━━━━━━━━━━━━━━━━━━━━
 第五步：输出详细报告
@@ -1355,10 +1583,13 @@ if __name__ == "__main__":
             print("🚨 触发安全熔断：清洗后有效标的不足10只，终止 AI 调用。")
             import sys; sys.exit(0)
 
+        # 阶段3.5：对Top100做技术形态筛选与板块归类（40分客观评分）
+        sector_tech_data = screen_technical_setups(final_pool)
+
         final_pool = enrich_pool_with_news(final_pool)
 
         # AI 推演
-        ai_html = generate_ai_report(final_pool, macro_news, macro_data_text, us_sector_text, removed_tickers, embargo_text)
+        ai_html = generate_ai_report(final_pool, macro_news, macro_data_text, us_sector_text, removed_tickers, embargo_text, sector_tech_data)
         # 把"今日卖出信号"卡片插在邮件最顶部，第一眼就能看到当天该处理的持仓
         ai_html = sell_signal_card_html + ai_html
         full_html = build_email(ai_html)
