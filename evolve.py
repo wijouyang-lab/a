@@ -30,6 +30,7 @@ import re
 # ── 配置 ──
 EVOLVE_MODEL   = "claude-opus-4-8"
 HISTORY_FILE   = "trade_history.csv"
+REVIEW_FILE    = "review_history.csv"   # A股卖出价写在这里，不在trade_history.csv
 EVOLVE_LOG     = "strategy_evolution.json"
 EVOLVED_RULES  = "evolved_rules.json"   # scan.py 会读取这个文件
 
@@ -40,7 +41,7 @@ MIN_CLOSED = 8
 CLOSED_TAGS  = {"Stop_Loss_Hit", "Period_Matured", "Forced_Exit", "Dropped"}
 ACTIVE_TAGS  = {"Core_Double_Dragon", "Core_Dragon", "Sub_Pioneer"}
 PRICE_COL    = "Close_Price"   # 买入价列名
-EXIT_COL     = "Exit_Price"    # 卖出价列名（可能为"N/A"）
+EXIT_COL     = "Exit_Price"    # trade_history.csv里可能为N/A，会从review_history.csv补充
 SCORE_COL    = "Score"
 INDUSTRY_COL = "Industry"
 
@@ -58,12 +59,11 @@ def safe_float(val, default=None):
 
 def calculate_metrics(df: pd.DataFrame) -> dict | None:
     """
-    从账本计算多维度绩效指标，涵盖：
-    - 总体胜率 / 平均盈亏
-    - 按行业板块拆分
-    - 按 AI 推荐评分区间拆分（评分是否真的能预测收益）
-    - 已到期 vs 止损 vs 强清 的结果对比
-    - 还在持仓中的浮动盈亏（参考用，不计入胜率）
+    从账本计算多维度绩效指标。
+
+    A股的卖出价（Cur_Price）写在 review_history.csv，不在 trade_history.csv。
+    这里先尝试从 review_history.csv 建立 Ticker→卖出价 的映射，
+    再回填到平仓记录里。
     """
     if df.empty:
         return None
@@ -72,109 +72,142 @@ def calculate_metrics(df: pd.DataFrame) -> dict | None:
     active = df[df["Tag"].isin(ACTIVE_TAGS)].copy()
 
     if len(closed) < MIN_CLOSED:
-        print(f"⚠️ 已平仓记录仅 {len(closed)} 条，不足 {MIN_CLOSED} 条，暂缓进化以避免过拟合。")
+        print(f"⚠️ 已平仓记录仅 {len(closed)} 条，不足 {MIN_CLOSED} 条，暂缓进化。")
         return None
 
-    # 安全计算每笔 P&L%
+    # ── 从 review_history.csv 补充卖出价 ──
+    # review_history.csv 字段：Ticker, Rec_Price(买入), Cur_Price(卖出), PnL_Pct 等
+    review_exit_map = {}   # Ticker → (sell_price, pnl_pct)
+    if os.path.exists(REVIEW_FILE):
+        try:
+            df_rv = pd.read_csv(REVIEW_FILE, keep_default_na=False)
+            # 每只 ticker 取最新一条（按 Review_Date 排序）
+            if "Review_Date" in df_rv.columns:
+                df_rv["Review_Date"] = pd.to_datetime(df_rv["Review_Date"], errors="coerce")
+                df_rv = df_rv.sort_values("Review_Date", ascending=False)
+            for _, r in df_rv.drop_duplicates(subset="Ticker", keep="first").iterrows():
+                ticker = str(r.get("Ticker", "")).strip()
+                cur    = safe_float(r.get("Cur_Price"))
+                pnl    = safe_float(r.get("PnL_Pct"), default=None)
+                if ticker and cur is not None:
+                    review_exit_map[ticker] = (cur, pnl)
+            print(f"📋 从 review_history.csv 补充了 {len(review_exit_map)} 只标的的卖出价")
+        except Exception as e:
+            print(f"⚠️ 读取 review_history.csv 失败: {e}")
+
     rows = []
     for _, row in closed.iterrows():
         buy = safe_float(row.get(PRICE_COL))
-        sell = safe_float(row.get(EXIT_COL))
-        if buy is None or sell is None:
+        if buy is None:
             continue
-        pnl_pct = round((sell - buy) / buy * 100, 2)
+
+        ticker = str(row.get("Ticker", "")).strip()
+
+        # 优先用 review_history.csv 的价格，次用 trade_history.csv 的 Exit_Price
+        sell = None
+        pnl_pct_direct = None
+        if ticker in review_exit_map:
+            sell, pnl_pct_direct = review_exit_map[ticker]
+        if sell is None:
+            sell = safe_float(row.get(EXIT_COL))
+        if sell is None:
+            # 如果有 PnL_Pct 字段可以反推卖出价
+            pnl_str = safe_float(row.get("PnL_Pct", row.get("Maturity_PnL")))
+            if pnl_str is not None and buy is not None:
+                sell = round(buy * (1 + pnl_str / 100), 2)
+        if sell is None:
+            continue
+
+        pnl_pct = pnl_pct_direct if pnl_pct_direct is not None else round((sell - buy) / buy * 100, 2)
+
         rows.append({
-            "ticker":   str(row.get("Ticker", "")),
+            "ticker":   ticker,
             "name":     str(row.get("Name", "")),
             "industry": str(row.get(INDUSTRY_COL, "未知")),
             "tag":      str(row.get("Tag", "")),
             "score":    safe_float(row.get(SCORE_COL), default=50),
-            "pnl_pct":  pnl_pct,
-            "buy":      buy,
-            "sell":     sell,
+            "pnl_pct":  float(pnl_pct),
+            "buy":      float(buy),
+            "sell":     float(sell),
             "hold_period": str(row.get("Hold_Period", "")),
         })
 
     if not rows:
-        print("⚠️ 平仓记录均无有效买入/卖出价，无法计算绩效。")
+        print("⚠️ 平仓记录均无有效买入/卖出价（trade_history.csv 和 review_history.csv 都没有）。")
+        print("   提示：请确认 review_history.csv 中有 Ticker / Cur_Price 列。")
         return None
 
     df_c = pd.DataFrame(rows)
-    wins = (df_c["pnl_pct"] > 0).sum()
-    total = len(df_c)
-    overall_wr = round(wins / total * 100, 1)
-    avg_pnl    = round(df_c["pnl_pct"].mean(), 2)
-    best_trade = df_c.loc[df_c["pnl_pct"].idxmax()]
-    worst_trade= df_c.loc[df_c["pnl_pct"].idxmin()]
+    wins    = (df_c["pnl_pct"] > 0).sum()
+    total   = len(df_c)
+    wr      = round(float(wins / total * 100), 1)
+    avg_pnl = round(float(df_c["pnl_pct"].mean()), 2)
+    best    = df_c.loc[df_c["pnl_pct"].idxmax()]
+    worst   = df_c.loc[df_c["pnl_pct"].idxmin()]
 
-    # ── 按板块拆分 ──
-    sector_stats = {}
-    for sector, grp in df_c.groupby("industry"):
-        if len(grp) < 2:
-            continue
-        wr = round((grp["pnl_pct"] > 0).sum() / len(grp) * 100, 1)
-        avg = round(grp["pnl_pct"].mean(), 2)
-        sector_stats[sector] = {"样本数": len(grp), "胜率": wr, "平均盈亏%": avg}
+    def _stats(grp):
+        return {
+            "样本数":    int(len(grp)),
+            "胜率":      round(float((grp["pnl_pct"] > 0).sum() / len(grp) * 100), 1),
+            "平均盈亏%": round(float(grp["pnl_pct"].mean()), 2),
+        }
+
+    # 按板块
+    sector_stats = {
+        sec: _stats(g)
+        for sec, g in df_c.groupby("industry")
+        if len(g) >= 2
+    }
     sector_stats = dict(sorted(sector_stats.items(), key=lambda x: x[1]["胜率"], reverse=True))
 
-    # ── 按评分区间拆分（验证评分体系是否有预测力）──
+    # 按评分区间
     def score_bucket(s):
-        if s is None:    return "未知"
-        if s >= 80:      return "80-100(高信心)"
-        elif s >= 65:    return "65-79(中信心)"
-        elif s >= 50:    return "50-64(低信心)"
-        else:            return "<50(勉强入选)"
+        if s is None:  return "未知"
+        if s >= 80:    return "80-100(高信心)"
+        elif s >= 65:  return "65-79(中信心)"
+        elif s >= 50:  return "50-64(低信心)"
+        else:          return "<50(勉强入选)"
 
     df_c["score_bucket"] = df_c["score"].apply(score_bucket)
-    score_stats = {}
-    for bk, grp in df_c.groupby("score_bucket"):
-        if len(grp) < 2:
-            continue
-        wr = round((grp["pnl_pct"] > 0).sum() / len(grp) * 100, 1)
-        avg = round(grp["pnl_pct"].mean(), 2)
-        score_stats[bk] = {"样本数": len(grp), "胜率": wr, "平均盈亏%": avg}
+    score_stats = {bk: _stats(g) for bk, g in df_c.groupby("score_bucket") if len(g) >= 2}
 
-    # ── 按退出方式拆分（止损多 = 止损位设太紧？到期多 = 周期设太短？）──
-    exit_stats = {}
+    # 按退出方式
     tag_map = {"Stop_Loss_Hit": "止损触发", "Period_Matured": "持有到期",
                "Forced_Exit": "突发强清", "Dropped": "主动斩仓"}
-    for tag, grp in df_c.groupby("tag"):
-        if len(grp) < 1:
-            continue
-        label = tag_map.get(tag, tag)
-        wr = round((grp["pnl_pct"] > 0).sum() / len(grp) * 100, 1)
-        avg = round(grp["pnl_pct"].mean(), 2)
-        exit_stats[label] = {"次数": len(grp), "胜率": wr, "平均盈亏%": avg}
+    exit_stats = {
+        tag_map.get(tag, tag): _stats(g)
+        for tag, g in df_c.groupby("tag")
+        if len(g) >= 1
+    }
 
-    # ── 当前持仓浮动（参考用）──
-    active_summary = []
-    for _, row in active.iterrows():
-        active_summary.append(f"{row.get('Name','')}({row.get('Ticker','')}) 评分{row.get(SCORE_COL,'-')}")
-
-    # ── 读取上一轮进化结果（若有）──
+    # 上一轮规则
     prev_rules = []
     if os.path.exists(EVOLVE_LOG):
         try:
             with open(EVOLVE_LOG, "r", encoding="utf-8") as f:
                 history = json.load(f)
                 if history:
-                    last = history[-1]
-                    prev_rules = last.get("applied_rules", [])
+                    prev_rules = history[-1].get("applied_rules", [])
         except Exception:
             pass
 
+    active_summary = [
+        f"{r.get('Name','')}({r.get('Ticker','')}) 评分{r.get(SCORE_COL,'-')}"
+        for _, r in active.iterrows()
+    ][:10]
+
     return {
-        "total_closed":   total,
-        "overall_win_rate": overall_wr,
-        "avg_pnl_pct":    avg_pnl,
-        "best_trade":     f"{best_trade['name']}({best_trade['ticker']}) +{best_trade['pnl_pct']}%",
-        "worst_trade":    f"{worst_trade['name']}({worst_trade['ticker']}) {worst_trade['pnl_pct']}%",
-        "sector_stats":   sector_stats,
-        "score_stats":    score_stats,
-        "exit_stats":     exit_stats,
-        "active_count":   len(active),
-        "active_summary": active_summary[:10],
-        "prev_rules":     prev_rules,
+        "total_closed":    total,
+        "overall_win_rate": wr,
+        "avg_pnl_pct":     avg_pnl,
+        "best_trade":      f"{best['name']}({best['ticker']}) +{best['pnl_pct']}%",
+        "worst_trade":     f"{worst['name']}({worst['ticker']}) {worst['pnl_pct']}%",
+        "sector_stats":    sector_stats,
+        "score_stats":     score_stats,
+        "exit_stats":      exit_stats,
+        "active_count":    len(active),
+        "active_summary":  active_summary,
+        "prev_rules":      prev_rules,
     }
 
 
@@ -257,7 +290,12 @@ def evolve_strategy(metrics: dict):
             temperature=0.3,
             messages=[{"role": "user", "content": prompt}],
         )
-        text = response.content[0].text.strip()
+        # claude-opus-4-8 可能返回 ThinkingBlock（内部推理），需要过滤出 TextBlock
+        text_block = next((b for b in response.content if hasattr(b, "text")), None)
+        if text_block is None:
+            print("❌ AI 未返回文本内容（只有 ThinkingBlock）")
+            return
+        text = text_block.text.strip()
         start = text.find("{")
         end   = text.rfind("}") + 1
         if start == -1 or end == 0:
