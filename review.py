@@ -40,22 +40,28 @@ except Exception as e:
     print(f"⚠️ 账本读取失败: {e}")
     import sys; sys.exit(1)
 
-# ── 新版本标记过滤：Hold_Period / Stop_Loss / Score 三字段缺一不可 ──
+# ── 版本过滤：只用 Score 区分新旧版本记录，Stop_Loss/Hold_Period 不再强制要求 ──
+# 设计原则：review.py 的职责是"追踪当前持仓"，不是"统计胜率"（那是 evolve.py 的职责）。
+# 今日新推荐如果 Stop_Loss=N/A（AI未给出或解析失败），仍应被纳入追踪，
+# 否则会出现"scan 推荐了但 review 没追踪"的断层。
+# 真正需要过滤的是：Score 也为空的彻底旧格式记录（它们连评分都没有，是初始测试数据）。
 _INVALID = {'', 'n/a', 'nan', 'none'}
-_required_cols = ['Hold_Period', 'Stop_Loss', 'Score']
-for _col in _required_cols:
+for _col in ['Hold_Period', 'Stop_Loss', 'Score']:
     if _col not in recent_picks.columns:
         recent_picks[_col] = ''
 
-_valid_mask = (
-    recent_picks['Hold_Period'].astype(str).str.strip().str.lower().map(lambda v: v not in _INVALID) &
-    recent_picks['Stop_Loss'].astype(str).str.strip().str.lower().map(lambda v: v not in _INVALID) &
-    recent_picks['Score'].astype(str).str.strip().str.lower().map(lambda v: v not in _INVALID)
-)
-_dropped = (~_valid_mask).sum()
+# 只要 Score 有效就纳入复盘（Hold_Period/Stop_Loss 可以是 N/A）
+_score_valid = recent_picks['Score'].astype(str).str.strip().str.lower().map(lambda v: v not in _INVALID)
+_dropped = (~_score_valid).sum()
 if _dropped > 0:
-    print(f"🗂️ 三字段过滤：剔除 {_dropped} 条旧版本/不完整记录（Hold_Period/Stop_Loss/Score 任意缺失），不纳入复盘。")
-recent_picks = recent_picks[_valid_mask].copy()
+    print(f"🗂️ 版本过滤：剔除 {_dropped} 条无评分的旧版本记录，不纳入复盘。")
+recent_picks = recent_picks[_score_valid].copy()
+
+# Stop_Loss=N/A 的记录打印一下提示，但继续追踪（不剔除）
+_no_stoploss = recent_picks['Stop_Loss'].astype(str).str.strip().str.lower().isin(_INVALID)
+if _no_stoploss.sum() > 0:
+    tickers_no_sl = recent_picks.loc[_no_stoploss, 'Ticker'].tolist()
+    print(f"⚠️ 以下 {_no_stoploss.sum()} 条记录 Stop_Loss=N/A，将继续追踪但无法做止损价核查：{tickers_no_sl[:10]}")
 
 if recent_picks.empty:
     print("⚠️ 过滤后无有效新版本记录，跳过复盘。")
@@ -160,7 +166,27 @@ for ticker, group in recent_picks.groupby('Ticker'):
 
     hold_days = parse_hold_days(hold_period_str)
     if hold_days is None:
-        print(f"跳过无持仓周期: {ticker}")
+        # Hold_Period=N/A 时：不跳过，继续追踪，标记为"持仓中，周期待定"
+        # 解决今日新推荐 Stop_Loss/Hold_Period=N/A 时完全消失在复盘里的问题
+        print(f"⚠️ {ticker} Hold_Period=N/A，仅追踪持仓状态，不做到期判断")
+        rec_price = float(first_row['Close_Price'])
+        rec_date_str = first_row['Date'].strftime('%Y-%m-%d')
+        cur_price = get_price_on_date(ticker, get_bj_time().strftime('%Y-%m-%d')) or rec_price
+        pnl = round((cur_price - rec_price) / rec_price * 100, 2) if rec_price > 0 else 0
+        active_list.append({
+            "ticker": ticker,
+            "name": first_row.get('Name', ticker),
+            "标签": latest_tag,
+            "推荐日期": rec_date_str,
+            "买入价": rec_price,
+            "当前价": cur_price,
+            "持有天数": days_held,
+            "浮动盈亏(%)": pnl,
+            "止损价": stop_loss,
+            "建议持股周期": "待定(N/A)",
+            "到期日": "N/A",
+            "评分": score_str,
+        })
         continue
 
     rec_price = float(first_row['Close_Price'])
@@ -271,7 +297,7 @@ prompt = f'''
 ai_html = ""
 with client.messages.stream(
     model=TARGET_MODEL,
-    max_tokens=4000,
+    max_tokens=8000,
     temperature=0.1,
     messages=[{"role": "user", "content": prompt}]
 ) as stream:
