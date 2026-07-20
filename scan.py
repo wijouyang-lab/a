@@ -955,73 +955,281 @@ def enrich_pool_with_news(pool_data):
 # 4. 定向计算技术指标（分批抓取 + 免死金牌）
 # ==========================================
 def calc_tech_indicators(full_pool, codes, trade_date):
-    print("⚙️ [阶段3] 正在回头定向拉取 Top 300 的历史K线，分批次绕过 API 限制...")
+    print("⚙️ [阶段3] 正在拉取日线+周线K线，分批计算技术指标...")
 
-    start_hist = (get_bj_time() - datetime.timedelta(days=120)).strftime('%Y%m%d')
-    all_hist_data = []
-    batch_size = 40
+    start_hist   = (get_bj_time() - datetime.timedelta(days=120)).strftime('%Y%m%d')
+    start_weekly = (get_bj_time() - datetime.timedelta(days=400)).strftime('%Y%m%d')
+    batch_size   = 40
 
-    try:
-        for i in range(0, len(codes), batch_size):
-            batch_codes = codes[i:i+batch_size]
-            try:
-                df_batch = pro.daily(
-                    ts_code=",".join(batch_codes),
-                    start_date=start_hist,
-                    end_date=trade_date
-                )
-                if df_batch is not None and not df_batch.empty:
-                    all_hist_data.append(df_batch)
-                time.sleep(0.12)
-            except Exception as e:
-                print(f"   ⚠️ 批次拉取受限: {e}")
+    # ── 批量拉日线 ──
+    all_hist = []
+    for i in range(0, len(codes), batch_size):
+        try:
+            df_b = pro.daily(ts_code=",".join(codes[i:i+batch_size]),
+                             start_date=start_hist, end_date=trade_date)
+            if df_b is not None and not df_b.empty:
+                all_hist.append(df_b)
+            time.sleep(0.12)
+        except Exception as e:
+            print(f"   ⚠️ 日线批次受限: {e}")
+    df_hist = pd.concat(all_hist, ignore_index=True) if all_hist else pd.DataFrame()
 
-        df_hist = pd.concat(all_hist_data, ignore_index=True) if all_hist_data else pd.DataFrame()
+    # ── 批量拉周线 ──
+    all_weekly = []
+    for i in range(0, len(codes), batch_size):
+        try:
+            df_w = pro.weekly(ts_code=",".join(codes[i:i+batch_size]),
+                              start_date=start_weekly, end_date=trade_date)
+            if df_w is not None and not df_w.empty:
+                all_weekly.append(df_w)
+            time.sleep(0.15)
+        except Exception as e:
+            print(f"   ⚠️ 周线批次受限: {e}")
+    df_weekly = pd.concat(all_weekly, ignore_index=True) if all_weekly else pd.DataFrame()
 
-        for code in list(full_pool.keys()):
-            if not df_hist.empty and code in df_hist['ts_code'].values:
-                stock_data = df_hist[df_hist['ts_code'] == code].copy().sort_values('trade_date')
-                if len(stock_data) >= 30:
-                    close_px = stock_data['close']
-                    ma20 = close_px.rolling(window=20).mean().iloc[-1]
-                    current_close = full_pool[code]["Close"]
-                    full_pool[code]["乖离率(%)"] = round(((current_close - ma20) / ma20) * 100, 2)
+    FALLBACK = [
+        ("乖离率(%)", 0.0), ("RSI", 50.0), ("MACD趋势", "N/A"),
+        ("MACD_HIST_LAST", 0.0), ("MACD_HIST_PREV", 0.0),
+        ("MACD金叉", False), ("MACD绿柱缩短", False),
+        ("周线共振", False),
+        ("KDJ_J", 50.0), ("KDJ_J回升", False), ("KDJ_J超卖", False),
+        ("量能放大", False), ("量比", 1.0), ("看涨形态", []),
+    ]
 
-                    exp1 = close_px.ewm(span=12, adjust=False).mean()
-                    exp2 = close_px.ewm(span=26, adjust=False).mean()
-                    macd_line = exp1 - exp2
-                    signal_line = macd_line.ewm(span=9, adjust=False).mean()
-                    macd_hist = (macd_line - signal_line) * 2
-                    full_pool[code]["MACD趋势"] = "走强" if macd_hist.iloc[-1] > macd_hist.iloc[-2] else "走弱"
+    for code in list(full_pool.keys()):
+        # ── 周线共振：周线MA5>MA10 且 周线MACD柱向上 ──
+        weekly_bullish = False
+        if not df_weekly.empty and code in df_weekly['ts_code'].values:
+            wk = df_weekly[df_weekly['ts_code'] == code].sort_values('trade_date')
+            if len(wk) >= 12:
+                wc     = wk['close'].values.astype(float)
+                wma5   = float(pd.Series(wc).rolling(5).mean().iloc[-1])
+                wma10  = float(pd.Series(wc).rolling(10).mean().iloc[-1])
+                w_exp1 = pd.Series(wc).ewm(span=12, adjust=False).mean()
+                w_exp2 = pd.Series(wc).ewm(span=26, adjust=False).mean()
+                w_hist = (w_exp1 - w_exp2 - (w_exp1 - w_exp2).ewm(span=9, adjust=False).mean()) * 2
+                weekly_bullish = bool(wma5 > wma10 and float(w_hist.iloc[-1]) > float(w_hist.iloc[-2]))
+        full_pool[code]["周线共振"] = weekly_bullish
 
-                    delta = close_px.diff()
-                    gain = delta.clip(lower=0).ewm(com=13, adjust=False).mean()
-                    loss = (-1 * delta.clip(upper=0)).ewm(com=13, adjust=False).mean()
-                    rs = gain / loss
-                    full_pool[code]["RSI"] = round((100 - (100 / (1 + rs))).iloc[-1], 2)
-                    continue
+        if df_hist.empty or code not in df_hist['ts_code'].values:
+            for fld, dflt in FALLBACK:
+                full_pool[code].setdefault(fld, dflt)
+            continue
 
-            full_pool[code]["乖离率(%)"] = 0.0
-            full_pool[code]["RSI"] = 50.0
-            full_pool[code]["MACD趋势"] = "API限流(纯事件驱动)"
+        sd = df_hist[df_hist['ts_code'] == code].sort_values('trade_date')
+        if len(sd) < 30:
+            for fld, dflt in FALLBACK:
+                full_pool[code].setdefault(fld, dflt)
+            continue
 
-    except Exception as e:
-        print(f"🚨 指标全局处理受限: {e}，启用全量兜底。")
-        for code in full_pool:
-            if "RSI" not in full_pool[code]:
-                full_pool[code]["乖离率(%)"] = 0.0
-                full_pool[code]["RSI"] = 50.0
-                full_pool[code]["MACD趋势"] = "API崩溃保护"
+        cp  = sd['close'].values.astype(float)
+        hp  = sd['high'].values.astype(float)
+        lp  = sd['low'].values.astype(float)
+        op  = sd['open'].values.astype(float)
+        vol = sd['vol'].values.astype(float)
+        sc  = pd.Series(cp)
+
+        # 乖离率
+        ma20 = float(sc.rolling(20).mean().iloc[-1])
+        full_pool[code]["乖离率(%)"] = round(((full_pool[code]["Close"] - ma20) / ma20) * 100, 2)
+
+        # MACD：含金叉判断
+        exp1   = sc.ewm(span=12, adjust=False).mean()
+        exp2   = sc.ewm(span=26, adjust=False).mean()
+        ml     = exp1 - exp2
+        sl     = ml.ewm(span=9, adjust=False).mean()
+        hist   = (ml - sl) * 2
+        h_last, h_prev, h_prev2 = float(hist.iloc[-1]), float(hist.iloc[-2]), float(hist.iloc[-3])
+        ml_last, ml_prev = float(ml.iloc[-1]), float(ml.iloc[-2])
+        sl_last, sl_prev = float(sl.iloc[-1]), float(sl.iloc[-2])
+
+        full_pool[code]["MACD趋势"]      = "走强" if h_last > h_prev else "走弱"
+        full_pool[code]["MACD_HIST_LAST"] = round(h_last, 4)
+        full_pool[code]["MACD_HIST_PREV"] = round(h_prev, 4)
+        # 金叉：MACD线今日上穿信号线（昨日在下方）
+        full_pool[code]["MACD金叉"]       = bool(ml_last > sl_last and ml_prev <= sl_prev)
+        # 绿柱缩短：柱为负且连续两日向0收敛
+        full_pool[code]["MACD绿柱缩短"]   = bool(h_last < 0 and h_last > h_prev and h_prev < h_prev2)
+
+        # RSI
+        delta = sc.diff()
+        gain  = delta.clip(lower=0).ewm(com=13, adjust=False).mean()
+        loss  = (-1 * delta.clip(upper=0)).ewm(com=13, adjust=False).mean()
+        full_pool[code]["RSI"] = round(float((100 - 100 / (1 + gain / (loss + 1e-9))).iloc[-1]), 2)
+
+        # KDJ
+        K, D = 50.0, 50.0
+        j_lst = []
+        for i_k in range(len(cp)):
+            if i_k < 8:
+                j_lst.append(3*K - 2*D)
+                continue
+            h9  = max(hp[i_k-8: i_k+1])
+            l9  = min(lp[i_k-8: i_k+1])
+            rsv = (cp[i_k] - l9) / (h9 - l9 + 1e-9) * 100
+            K   = 2/3*K + 1/3*rsv
+            D   = 2/3*D + 1/3*K
+            j_lst.append(3*K - 2*D)
+        j_last, j_prev, j_prev2 = j_lst[-1], j_lst[-2], j_lst[-3]
+        full_pool[code]["KDJ_J"]    = round(float(j_last), 2)
+        full_pool[code]["KDJ_J回升"] = bool(j_last < 80 and j_last > j_prev and j_prev <= j_prev2)
+        full_pool[code]["KDJ_J超卖"] = bool(j_prev2 < 20)
+
+        # 量能
+        avg5  = float(pd.Series(vol[:-1]).tail(5).mean()) if len(vol) >= 6 else 0
+        vtdy  = float(vol[-1])
+        full_pool[code]["量能放大"] = bool(avg5 > 0 and vtdy >= avg5 * 1.3)
+        full_pool[code]["量比"]     = round(vtdy / (avg5 + 1e-9), 2)
+
+        # K线形态
+        patterns = []
+        if len(op) >= 3:
+            o, c   = op[-1], cp[-1]
+            o1, c1 = op[-2], cp[-2]
+            rng    = hp[-1] - lp[-1] + 1e-9
+            body   = abs(c - o)
+            l_shd  = min(o, c) - lp[-1]
+            u_shd  = hp[-1] - max(o, c)
+            if c1 < o1 and c > o and o <= c1 and c >= o1:
+                patterns.append("看涨吞没")
+            if body/rng < 0.35 and l_shd >= 2*body and u_shd <= body*0.5:
+                patterns.append("锤子线")
+            if c1 < o1 and c > o and o < c1 and c > (o1+c1)/2 and c < o1:
+                patterns.append("刺穿线")
+            o2, c2 = op[-3], cp[-3]
+            if c2 < o2 and abs(c2-o2) > rng*0.3 and abs(c1-o1) < abs(c2-o2)*0.4 and c > o and c > (o2+c2)/2:
+                patterns.append("启明星")
+        full_pool[code]["看涨形态"] = patterns
 
     final_pool = sorted(list(full_pool.values()), key=lambda x: x.get("Amount", 0), reverse=True)
-    print(f"✅ 技术指标模块执行完毕，最终保全 {len(final_pool)} 只核心标的。")
+    print(f"✅ 技术指标模块完毕，共 {len(final_pool)} 只标的，含周线共振+MACD金叉判断。")
     return final_pool
 
 
 # ==========================================
 # 5. AI 事件与全球宏观逻辑推演选股
 # ==========================================
-def generate_ai_report(pool_data, macro_news_text, macro_data_text, us_sector_text, removed_tickers, embargo_text=""):
+def screen_technical_setups(final_pool):
+    """
+    对 Top100 做客观技术形态评分（满分40分）并按板块归类，供 AI 评总分时使用。
+
+    评分明细：
+      MACD金叉（最强入场信号）       0-15分
+      MACD绿柱快速收敛（金叉预信号）  0-12分
+      KDJ超卖/低位回升              0-10分
+      量能放大（量比≥1.3）           0-10分
+      看涨K线形态                    0-5分
+    周日共振加成/惩罚：
+      周线MA5>MA10 且 周线MACD上行 → ×1.25（上限40）
+      周线逆势                      → ×0.6（日线信号打折）
+    """
+    sector_groups = {}
+    for stock in final_pool[:100]:
+        tech_score   = 0
+        tech_reasons = []
+
+        if stock.get("MACD金叉"):
+            tech_score += 15
+            tech_reasons.append("MACD金叉(+15)")
+        elif stock.get("MACD绿柱缩短"):
+            h_last = stock.get("MACD_HIST_LAST", 0)
+            h_prev = stock.get("MACD_HIST_PREV", 0)
+            pts = 12 if (h_last < 0 and abs(h_last) < abs(h_prev) * 0.85) else 8
+            tech_score += pts
+            tech_reasons.append(f"MACD绿柱收敛(+{pts})")
+        elif stock.get("MACD趋势") == "走强" and stock.get("MACD_HIST_LAST", 0) > 0:
+            tech_score += 4
+            tech_reasons.append("MACD红柱走强(+4)")
+
+        j_val = stock.get("KDJ_J", 50)
+        if stock.get("KDJ_J回升"):
+            if stock.get("KDJ_J超卖") or j_val < 20:
+                tech_score += 10; tech_reasons.append(f"KDJ超卖回头J={j_val:.0f}(+10)")
+            elif j_val < 50:
+                tech_score += 7;  tech_reasons.append(f"KDJ低位回升J={j_val:.0f}(+7)")
+            else:
+                tech_score += 3;  tech_reasons.append(f"KDJ中位回升J={j_val:.0f}(+3)")
+
+        vr = stock.get("量比", 1.0)
+        if stock.get("量能放大"):
+            pts = 10 if vr >= 2.0 else 7
+            tech_score += pts; tech_reasons.append(f"量比{vr:.1f}倍(+{pts})")
+
+        patterns = stock.get("看涨形态", [])
+        if patterns:
+            pm = {"看涨吞没": 5, "启明星": 5, "刺穿线": 4, "锤子线": 3}
+            base = min(max(pm.get(p, 2) for p in patterns) + (2 if len(patterns) > 1 else 0), 5)
+            tech_score += base; tech_reasons.append(f"{'&'.join(patterns)}(+{base})")
+
+        weekly = stock.get("周线共振", False)
+        if weekly:
+            tech_score = min(int(tech_score * 1.25), 40)
+            tech_reasons.append("✅周日共振×1.25")
+        elif tech_score > 0:
+            tech_score = int(tech_score * 0.6)
+            tech_reasons.append("⚠️仅日线×0.6")
+
+        stock["技术评分"] = min(tech_score, 40)
+        stock["技术信号"] = tech_reasons
+
+        industry = stock.get("Industry", "其他")
+        sector_groups.setdefault(industry, []).append({
+            "名称": stock["Name"], "代码": stock["Ticker"],
+            "技术评分": tech_score, "技术信号": tech_reasons,
+        })
+
+    summary = {
+        sec: sorted(stks, key=lambda x: x["技术评分"], reverse=True)
+        for sec, stks in sector_groups.items()
+        if any(s["技术评分"] > 0 for s in stks)
+    }
+    top10 = sorted(final_pool[:100], key=lambda x: x.get("技术评分", 0), reverse=True)[:10]
+    print("📊 [技术筛选] Top10：")
+    for s in top10:
+        if s.get("技术评分", 0) > 0:
+            wt = "🟢周日" if s.get("周线共振") else "🔴仅日"
+            print(f"   {s['Name']} 技术{s['技术评分']}分 {wt} | {' + '.join(s.get('技术信号',[]))}")
+    return summary
+
+
+def load_evolved_rules() -> str:
+    """
+    读取 evolve_a.py 生成的 evolved_rules.json，提取 prompt_patches 注入 AI 选股 prompt。
+    这是进化闭环的关键：evolve.py 写规则 → scan.py 读规则 → 影响今日选股。
+    文件不存在时静默返回空字符串，不影响正常运行。
+    """
+    rules_file = "evolved_rules.json"
+    if not os.path.exists(rules_file):
+        return ""
+    try:
+        with open(rules_file, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        patches      = data.get("prompt_patches", [])
+        active_rules = data.get("active_rules", [])
+        if not patches:
+            return ""
+        last_updated = data.get("last_updated", "未知")
+        win_rate     = data.get("overall_win_rate", "未知")
+        lines = [
+            f"【📈 历史绩效驱动进化规则（上次更新: {last_updated} | 历史胜率: {win_rate}%）】",
+            "以下规则由策略进化引擎基于真实交易数据自动生成，必须严格遵守：",
+            ""
+        ]
+        for i, (rule, patch) in enumerate(zip(active_rules, patches), 1):
+            lines.append(f"规则{i}【{rule.get('type','')}】{rule.get('description','')}")
+            if rule.get("evidence"):
+                lines.append(f"  数据依据: {rule['evidence']}")
+            lines.append(f"  执行要求: {patch}")
+            lines.append("")
+        lines.append("（以上规则优先级高于一般选股偏好，但低于今日突发事件强制封禁）")
+        print(f"📜 [进化规则] 已加载 {len(patches)} 条规则（历史胜率: {win_rate}%）")
+        return "\n".join(lines)
+    except Exception as e:
+        print(f"⚠️ [进化规则] 读取失败: {e}")
+        return ""
+
+
+def generate_ai_report(pool_data, macro_news_text, macro_data_text, us_sector_text, removed_tickers, embargo_text="", sector_tech_data=None):
     print("🧠 [阶段4] 召唤 AI 大脑（宏观大宗与三重交叉验证，Top5详细分析）...")
     client = anthropic.Anthropic(
         api_key=os.environ.get("CLAWSOCKET_API_KEY"),
@@ -1031,20 +1239,37 @@ def generate_ai_report(pool_data, macro_news_text, macro_data_text, us_sector_te
 
     compact_pool = []
     for d in pool_data[:100]:
-        stock_info = {
-            "名称": d["Name"],
-            "代码": d["Ticker"],
-            "行业": d["Industry"],
-            "收盘价": d["Close"],
-            "今日涨跌(%)": d.get("pct_chg", 0),
-            "乖离率(%)": d.get("乖离率(%)", "N/A"),
-            "RSI": d.get("RSI", "N/A"),
+        item = {
+            "名称": d["Name"], "代码": d["Ticker"], "行业": d["Industry"],
+            "收盘价": d["Close"], "今日涨跌(%)": d.get("pct_chg", 0),
+            "乖离率(%)": d.get("乖离率(%)", "N/A"), "RSI": d.get("RSI", "N/A"),
             "MACD": d.get("MACD趋势", "N/A"),
+            "技术评分(满分40)": d.get("技术评分", 0),
+            "技术信号": d.get("技术信号", []),
+            "周线共振": "🟢是" if d.get("周线共振") else "🔴否",
+            "MACD金叉": "✅是" if d.get("MACD金叉") else "否",
+            "KDJ_J": d.get("KDJ_J", "N/A"), "量比": d.get("量比", "N/A"),
+            "看涨形态": d.get("看涨形态", []),
         }
-        individual_news = d.get('个股新闻', [])
-        if individual_news:
-            stock_info["个股新闻"] = individual_news
-        compact_pool.append(stock_info)
+        if d.get('个股新闻'):
+            item["个股新闻"] = d['个股新闻']
+        compact_pool.append(item)
+
+    # 技术板块共振摘要
+    tech_sector_block = ""
+    if sector_tech_data:
+        lines = []
+        for sec, stks in sorted(sector_tech_data.items(),
+                                 key=lambda x: max(s["技术评分"] for s in x[1]), reverse=True)[:8]:
+            top3 = [f"{s['名称']}({s['代码']})技{s['技术评分']}分"
+                    for s in stks[:3] if s["技术评分"] > 0]
+            if top3:
+                lines.append(f"  {sec}: {' / '.join(top3)}")
+        if lines:
+            tech_sector_block = "【今日技术形态板块共振（评分>0的标的按板块归类）】：\n" + "\n".join(lines)
+
+    # 进化规则（来自历史交易数据，evolve.py生成）
+    evolved_rules_block = load_evolved_rules()
 
     removed_notice = ""
     if removed_tickers:
@@ -1061,6 +1286,10 @@ def generate_ai_report(pool_data, macro_news_text, macro_data_text, us_sector_te
 
 {removed_notice}
 
+{evolved_rules_block}
+
+{embargo_text}
+
 【今日全球宏观与A股消息面】：
 {macro_news_text}
 
@@ -1070,9 +1299,9 @@ def generate_ai_report(pool_data, macro_news_text, macro_data_text, us_sector_te
 【昨日美股各板块涨跌】：
 {us_sector_text}
 
-{embargo_text}
+{tech_sector_block}
 
-【今日A股交易额 Top 100（含个股最新新闻）】：
+【今日A股交易额 Top 100（含技术评分+个股新闻）】：
 {json.dumps(compact_pool, ensure_ascii=False)}
 
 【你的核心工作流程】：
@@ -1100,16 +1329,34 @@ def generate_ai_report(pool_data, macro_news_text, macro_data_text, us_sector_te
 ❌ 减分/排除情形（必须说明）：有负面新闻的票必须强行剥离出精选池。
 
 ━━━━━━━━━━━━━━━━━━━━━━
-第三步：技术面风控兜底
+第三步：技术面双向验证（周日共振过滤 + MACD金叉/绿柱判断）
 ━━━━━━━━━━━━━━━━━━━━━━
-乖离率>20% 且 RSI>85 视为技术极度透支，列入受损避险组。
+每只候选标的数据里已附带「技术评分(满分40)」「周线共振🟢/🔴」「MACD金叉✅/否」，这是代码客观计算的，你不得修改这些数值。
+
+优先级过滤规则：
+  ✅ 优先推荐：技术评分≥20 且 🟢周日共振（周线MA5>MA10 + 周线MACD柱上行）
+  🟡 次级候选：技术评分10-20，仅日线信号但宏观/消息面极强时可入
+  🔴 禁止推荐：🔴仅日线 + 技术评分<10，不进Top5
+  ⚠️ 强制降级：乖离率>20% 且 RSI>85，列入受损避险区
+
+MACD信号优先级：
+  1. MACD金叉✅（最强入场信号，MACD线今日上穿信号线）
+  2. MACD绿柱连续收敛（柱为负且持续向0靠拢，即将金叉的预信号）
+  3. MACD红柱走强（趋势延续，已在上行途中）
 
 ━━━━━━━━━━━━━━━━━━━━━━
-第四步：推荐评分（1-100分）
+第四步：双维度综合评分（1-100分）
 ━━━━━━━━━━━━━━━━━━━━━━
-对每一只进入【核心精选】（Top 1-5）的标的，必须给出一个1-100的综合评分：
-- 评分格式必须严格为：评分:[XX]/100。
-- 评分应结合宏观大宗趋势符合度、个股新闻直接度、资金池额度进行权衡，拉开各标的分数区间。
+【评分权重体系 — 总分100分】：
+
+■ 技术面（40分，直接读取「技术评分(满分40)」字段，你不能修改这个数值）
+■ 消息面（60分，由你评估）：
+  · 宏观事件直接度       0-25分（主线催化事件的板块直接受益程度）
+  · 个股新闻共振度       0-25分（正面公告=满分；无消息但逻辑通=15分；负面=-10分）
+  · 资金热度与行业景气    0-10分（成交额排名 + 行业当前景气周期）
+
+评分格式必须严格为：评分:[XX]/100
+示例：技术评分26分的股票，消息面你给47分，写 评分:[73]/100
 
 ━━━━━━━━━━━━━━━━━━━━━━
 第五步：输出详细报告
@@ -1355,10 +1602,12 @@ if __name__ == "__main__":
             print("🚨 触发安全熔断：清洗后有效标的不足10只，终止 AI 调用。")
             import sys; sys.exit(0)
 
+        # 技术形态筛选：40分客观评分 + 周日共振过滤 + 板块归类
+        sector_tech_data = screen_technical_setups(final_pool)
+
         final_pool = enrich_pool_with_news(final_pool)
 
-        # AI 推演
-        ai_html = generate_ai_report(final_pool, macro_news, macro_data_text, us_sector_text, removed_tickers, embargo_text)
+        ai_html = generate_ai_report(final_pool, macro_news, macro_data_text, us_sector_text, removed_tickers, embargo_text, sector_tech_data)
         # 把"今日卖出信号"卡片插在邮件最顶部，第一眼就能看到当天该处理的持仓
         ai_html = sell_signal_card_html + ai_html
         full_html = build_email(ai_html)
