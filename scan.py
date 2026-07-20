@@ -1466,7 +1466,7 @@ MACD信号优先级：
     # 使用 Pro 引擎负责高强度的核心推演
     with client.messages.stream(
         model=TARGET_MODEL,
-        max_tokens=25000,
+        max_tokens=50000,
         temperature=0.3,
         messages=[{"role": "user", "content": prompt}]
     ) as stream:
