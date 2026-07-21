@@ -17,7 +17,7 @@ jobs:
       with:
         python-version: '3.12'
     - name: Install Libs
-      run: pip install pandas tushare requests anthropic
+      run: pip install pandas tushare requests anthropic yfinance
     - name: Run Scan
       env:
         TUSHARE_TOKEN: ${{ secrets.TUSHARE_TOKEN }}
