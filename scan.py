@@ -87,16 +87,6 @@ pro = ts.pro_api()
 # 0. 扫描前：统一获取最新可用收盘价表
 # ==========================================
 def get_latest_price_map():
-    """
-    统一拉取持仓股票的最新可用价格，供阶段0a/0b共用。
-    优先级：
-      1. ts.get_realtime_quotes()  —— 盘中实时行情，9:30-15:00 内有效，拿到的是最新成交价
-      2. pro.daily(今日)           —— 盘后收盘价，盘中通常为空
-      3. pro.daily(昨日)           —— 最终兜底，至少保证有一个参考价
-
-    盘中运行时强烈依赖方案1，方案2/3仅作兜底，避免全部回退到买入价导致盈亏=0的问题。
-    """
-    # 先从 trade_history.csv 读出所有需要定价的 ticker
     holding_tickers = []
     try:
         log_file = "trade_history.csv"
@@ -110,15 +100,11 @@ def get_latest_price_map():
 
     price_map = {}
 
-    # ── 方案1：实时行情（盘中首选）──
     if holding_tickers:
         try:
-            # ts_code 格式: 000001.SZ → tushare realtime 需要去掉后缀变成 "000001" 再加市场前缀
-            # ts.get_realtime_quotes 接受不带后缀的代码列表
             bare_codes = [t.split('.')[0] for t in holding_tickers]
             df_rt = ts.get_realtime_quotes(bare_codes)
             if df_rt is not None and not df_rt.empty and 'price' in df_rt.columns:
-                # 重建 ts_code（需要判断交易所后缀）
                 exchange_map = {t.split('.')[0]: t for t in holding_tickers}
                 for _, row in df_rt.iterrows():
                     code = str(row.get('code', ''))
@@ -135,7 +121,6 @@ def get_latest_price_map():
         except Exception as e:
             print(f"⚠️ 实时行情接口失败，回退收盘价: {e}")
 
-    # ── 方案2：今日 daily 收盘价（盘后有效）──
     try:
         trade_date_latest = get_bj_time().strftime('%Y%m%d')
         df_prices = pro.daily(trade_date=trade_date_latest)
@@ -146,7 +131,6 @@ def get_latest_price_map():
     except Exception as e:
         print(f"⚠️ 今日 daily 失败: {e}")
 
-    # ── 方案3：昨日 daily 收盘价（最终兜底）──
     try:
         yesterday_str = (get_bj_time() - datetime.timedelta(days=1)).strftime('%Y%m%d')
         df_prices = pro.daily(trade_date=yesterday_str)
@@ -165,12 +149,6 @@ def get_latest_price_map():
 # 0a. 扫描前：读取持仓 + 消息面与宏观大宗数据 → AI 判断哪些应该强清与暂停追踪
 # ==========================================
 def pre_scan_portfolio_review(macro_news_text, macro_data_text, price_map):
-    """
-    在正式选股之前，先读取 trade_history.csv 里的当前持仓，
-    结合今日消息面和宏观大宗数据（美债收益率、金银铜油等），
-    让 AI 判断哪些股票因为突发消息应该立即强制清仓。
-    不再直接擦除记录，而是将 Tag 改为 'Forced_Exit' 并计算买入卖出价录入历史。
-    """
     log_file = "trade_history.csv"
     review_log = "review_history.csv"
 
@@ -184,7 +162,6 @@ def pre_scan_portfolio_review(macro_news_text, macro_data_text, price_map):
         cutoff = get_bj_time() - datetime.timedelta(days=30)
         recent = df[df['Date'] >= cutoff.replace(tzinfo=None)].copy()
 
-        # 只看还在持仓窗口内的 Core 类票
         active_tags = ['Core_Double_Dragon', 'Sub_Pioneer', 'Core_Dragon']
         holdings = recent[recent['Tag'].isin(active_tags)].copy()
 
@@ -192,8 +169,6 @@ def pre_scan_portfolio_review(macro_news_text, macro_data_text, price_map):
             print("📋 [阶段0] 当前无有效持仓，跳过持仓审查。")
             return []
 
-        # ── 新版本标记过滤：Hold_Period / Stop_Loss / Score 三字段缺一不可 ──
-        # 旧版本记录缺少这三个字段，视为无效持仓，不纳入风控审查。
         _INVALID_P0 = {'', 'n/a', 'nan', 'none'}
         for _col in ['Hold_Period', 'Stop_Loss', 'Score']:
             if _col not in holdings.columns:
@@ -212,7 +187,6 @@ def pre_scan_portfolio_review(macro_news_text, macro_data_text, price_map):
             print("📋 [阶段0] 过滤后无有效新版本持仓，跳过持仓审查。")
             return []
 
-        # 每只股只取最新一条
         holdings = holdings.sort_values('Date', ascending=False).drop_duplicates(subset='Ticker', keep='first')
         print(f"📋 [阶段0] 发现 {len(holdings)} 只持仓，正在结合宏观大宗指标与突发消息进行风险审查...")
 
@@ -241,7 +215,7 @@ def pre_scan_portfolio_review(macro_news_text, macro_data_text, price_map):
 你是顶级A股风控总监，负责每日盘前的持仓突发风险与宏观环境审查。
 
 【今日全球宏观与A股消息面】：
-{macro_news_text[:1000]} # 节约算力：截取核心新闻
+{macro_news_text[:1000]}
 
 【今日国际宏观大宗指标】：
 {macro_data_text}
@@ -254,7 +228,7 @@ def pre_scan_portfolio_review(macro_news_text, macro_data_text, price_map):
 
 判断标准（满足任意一条即建议清仓）：
 1. 今日新闻中有该公司或其所在行业的直接突发重大负面消息
-2. 宏观事件或大宗商品剧烈震荡导致该行业的产业链逻辑根本性反转
+2. 宏观事件或大宗商品剧烈震荡导致该行业的产业链逻辑根本性反论
 3. 美债收益率持续狂飙或重要宏观数据导致全球资金流向根本扭转，影响整体A股高位核心板块的估值底层逻辑
 
 【输出格式】：
@@ -272,7 +246,6 @@ def pre_scan_portfolio_review(macro_news_text, macro_data_text, price_map):
 """
 
     try:
-        # 使用 Flash 引擎进行日常算力节约版排雷
         response = client.messages.create(
             model=TARGET_MODEL,
             max_tokens=1000, 
@@ -299,9 +272,6 @@ def pre_scan_portfolio_review(macro_news_text, macro_data_text, price_map):
         print("✅ [阶段0] 所有持仓经消息面与宏观指标审查均无需清仓，继续正常扫描。")
         return []
 
-    # 当前最新价作为卖出价基准（由外部统一传入的 price_map，避免重复请求 tushare）
-
-    # 保留数据并修正 Tag
     try:
         df_orig = pd.read_csv(log_file)
         for ticker in to_remove:
@@ -311,7 +281,6 @@ def pre_scan_portfolio_review(macro_news_text, macro_data_text, price_map):
     except Exception as e:
         print(f"⚠️ [阶段0] trade_history.csv 标签状态更新失败: {e}")
 
-    # 写入 review_history.csv
     try:
         if os.path.exists(review_log):
             df_review = pd.read_csv(review_log, on_bad_lines='skip')
@@ -370,22 +339,6 @@ def pre_scan_portfolio_review(macro_news_text, macro_data_text, price_map):
 # 0b. 规则驱动卖出信号检测（止损触发 / 持有到期）—— 不依赖AI，纯数值判断
 # ==========================================
 def check_rule_based_sell_signals(price_map, exclude_tickers=None):
-    """
-    在阶段0a的AI宏观审查之后，对剩余仍在追踪的持仓做一次纯规则检测：
-      1. 现价（price_map中的最新可用收盘价）已跌破 Stop_Loss 价位 → "止损触发"
-      2. 距首次推荐日已达到/超过 Hold_Period 建议周期上限 → "持有到期"
-    这两类判断完全基于 trade_history.csv 里已经写好的数值（止损价、持股周期建议），
-    不需要再调用AI，因此 scan.py 在交易时段内运行时就能立刻产出可执行的卖出信号，
-    不必等到收盘后的 review.py 才知道。
-
-    命中后：
-      - trade_history.csv：该 Ticker 的 Tag 锁定为 'Stop_Loss_Hit' 或 'Period_Matured'，停止后续追踪/重复推荐。
-      - review_history.csv：归档买入价/现价，Tag 保留原始推荐标签（Core_Dragon等，供 evolve.py 计入真实胜率），
-        Status 记为 '止损触发清仓' 或 '周期到期清仓'。
-      - sell_signal_log.csv：独立记录一份，供邮件顶部"今日卖出信号"卡片渲染使用。
-
-    返回: (sell_signals: List[dict], removed_tickers: List[str])
-    """
     log_file = "trade_history.csv"
     review_log = "review_history.csv"
     signal_log = "sell_signal_log.csv"
@@ -421,9 +374,7 @@ def check_rule_based_sell_signals(price_map, exclude_tickers=None):
             print("📋 [阶段0b] 过滤后无有效新版本持仓，跳过规则卖出信号检测。")
             return [], []
 
-        # 每只股只取最新一条（与阶段0a保持一致的去重口径）
         holdings = holdings.sort_values('Date', ascending=False).drop_duplicates(subset='Ticker', keep='first')
-        # 阶段0a本轮已经强清的标的不再重复判断
         holdings = holdings[~holdings['Ticker'].astype(str).isin(exclude_tickers)]
         if holdings.empty:
             print("📋 [阶段0b] 持仓已被阶段0a全部处理，跳过规则卖出信号检测。")
@@ -437,7 +388,7 @@ def check_rule_based_sell_signals(price_map, exclude_tickers=None):
         if not s or s.lower() in ['n/a', 'nan'] or s in ['坚决空仓', '观望']:
             return None
         nums = re.findall(r'\d+', s)
-        return int(nums[-1]) if nums else None  # 取区间上限，如"5-10天"取10
+        return int(nums[-1]) if nums else None
 
     def _parse_stop_loss_price(stop_loss_str):
         s = str(stop_loss_str).strip()
@@ -454,7 +405,7 @@ def check_rule_based_sell_signals(price_map, exclude_tickers=None):
         ticker = str(row['Ticker'])
         buy_price = float(row['Close_Price'])
         buy_date = row['Date']
-        orig_tag = row['Tag']  # 此时一定是 active_tags 之一（Core_Dragon等）
+        orig_tag = row['Tag']
         hold_days = _parse_hold_days(row.get('Hold_Period'))
         stop_loss_val = _parse_stop_loss_price(row.get('Stop_Loss'))
         cur_price = price_map.get(ticker, buy_price)
@@ -489,7 +440,7 @@ def check_rule_based_sell_signals(price_map, exclude_tickers=None):
             "hold_period": row.get('Hold_Period', 'N/A'),
             "stop_loss": row.get('Stop_Loss', 'N/A'),
             "score": row.get('Score', 'N/A'),
-            "reason": reason.replace(",", "，"),  # 防止英文逗号破坏后续CSV手写格式
+            "reason": reason.replace(",", "，"),
         })
         removed_tickers.append(ticker)
 
@@ -497,7 +448,6 @@ def check_rule_based_sell_signals(price_map, exclude_tickers=None):
         print("✅ [阶段0b] 规则审查：当前持仓无止损触发或持有到期信号。")
         return [], []
 
-    # 锁定 trade_history.csv 标签，停止后续追踪/重复推荐
     try:
         df_orig = pd.read_csv(log_file)
         for s in sell_signals:
@@ -508,7 +458,6 @@ def check_rule_based_sell_signals(price_map, exclude_tickers=None):
     except Exception as e:
         print(f"⚠️ [阶段0b] trade_history.csv 标签更新失败: {e}")
 
-    # 归档至 review_history.csv —— 保留原始推荐 Tag（供 evolve.py 计入真实胜率统计）
     try:
         if os.path.exists(review_log):
             df_review = pd.read_csv(review_log, on_bad_lines='skip')
@@ -541,7 +490,6 @@ def check_rule_based_sell_signals(price_map, exclude_tickers=None):
     except Exception as e:
         print(f"⚠️ [阶段0b] review_history.csv 归档失败: {e}")
 
-    # 独立卖出信号日志，供邮件卡片渲染（与AI宏观强清的 forced_exit_log.csv 区分开）
     try:
         log_exists = os.path.exists(signal_log)
         with open(signal_log, "a", encoding="utf-8") as f:
@@ -560,15 +508,9 @@ def check_rule_based_sell_signals(price_map, exclude_tickers=None):
 
 
 # ==========================================
-# 0c. 统一渲染"今日卖出信号"卡片（汇总阶段0a的AI强清 + 阶段0b的规则信号）
+# 0c. 统一渲染"今日卖出信号"卡片
 # ==========================================
 def build_sell_signal_card(macro_removed_tickers, rule_sell_signals):
-    """
-    把阶段0a（AI宏观突发利空强清）与阶段0b（止损触发/持有到期）两类信号
-    汇总成一张醒目卡片，插在邮件最顶部。
-    这样只要打开今天的scan邮件，就能在一个地方看到"今天必须处理的持仓"，
-    可以在交易时段内直接找机会卖出，不需要等盘后review.py的复盘邮件。
-    """
     if not macro_removed_tickers and not rule_sell_signals:
         return ""
 
@@ -621,10 +563,96 @@ def build_sell_signal_card(macro_removed_tickers, rule_sell_signals):
 
 
 # ==========================================
+# 0d. 渲染"当前持仓监控"卡片
+# ==========================================
+def build_current_holdings_card(price_map):
+    """
+    读取经过阶段0a/0b处理后，trade_history.csv 中依然处于活跃持仓状态（Tag 在 active_tags 中）的标的，
+    计算最新浮动盈亏与持股天数，渲染成“当前持仓”展示卡片。
+    """
+    log_file = "trade_history.csv"
+    if not os.path.exists(log_file):
+        return ""
+
+    try:
+        df = pd.read_csv(log_file)
+        if df.empty or 'Tag' not in df.columns:
+            return ""
+
+        df['Date'] = pd.to_datetime(df['Date'])
+        cutoff = get_bj_time() - datetime.timedelta(days=30)
+        recent = df[df['Date'] >= cutoff.replace(tzinfo=None)].copy()
+
+        active_tags = {'Core_Double_Dragon', 'Sub_Pioneer', 'Core_Dragon'}
+        holdings = recent[recent['Tag'].isin(active_tags)].copy()
+
+        if holdings.empty:
+            return ""
+
+        _INVALID = {'', 'n/a', 'nan', 'none'}
+        for _col in ['Hold_Period', 'Stop_Loss', 'Score']:
+            if _col not in holdings.columns:
+                holdings[_col] = ''
+        _valid_mask = (
+            holdings['Hold_Period'].astype(str).str.strip().str.lower().map(lambda v: v not in _INVALID) &
+            holdings['Stop_Loss'].astype(str).str.strip().str.lower().map(lambda v: v not in _INVALID) &
+            holdings['Score'].astype(str).str.strip().str.lower().map(lambda v: v not in _INVALID)
+        )
+        holdings = holdings[_valid_mask].copy()
+
+        if holdings.empty:
+            return ""
+
+        holdings = holdings.sort_values('Date', ascending=False).drop_duplicates(subset='Ticker', keep='first')
+
+        now = get_bj_time().replace(tzinfo=None)
+        rows_html = ""
+        for _, row in holdings.iterrows():
+            ticker = str(row['Ticker'])
+            name = str(row.get('Name', ticker))
+            buy_price = float(row['Close_Price'])
+            buy_date = pd.to_datetime(row['Date'])
+            days_held = (now - buy_date).days
+            cur_price = price_map.get(ticker, buy_price)
+            pnl_pct = round(((cur_price - buy_price) / buy_price) * 100, 2)
+            pnl_color = "#d32f2f" if pnl_pct >= 0 else "#388e3c"
+
+            rows_html += f"""
+        <tr style="border-bottom:1px solid #c8e6c9;">
+            <td style="padding:8px 4px;"><b>{name}({ticker})</b></td>
+            <td style="padding:8px 4px;">{str(buy_date)[:10]}（已持股{days_held}天）</td>
+            <td style="padding:8px 4px;">买入¥{buy_price:.2f} → 现价¥{cur_price:.2f}</td>
+            <td style="padding:8px 4px; color:{pnl_color}; font-weight:bold;">{pnl_pct:+.2f}%</td>
+            <td style="padding:8px 4px;">{row.get('Hold_Period', 'N/A')}</td>
+            <td style="padding:8px 4px;">{row.get('Stop_Loss', 'N/A')}</td>
+        </tr>"""
+
+        total = len(holdings)
+        return f"""
+<div style="background:#e8f5e9; border-left:6px solid #2e7d32; padding:20px; margin-bottom:25px; border-radius:8px;">
+    <h3 style="margin:0 0 12px 0; color:#1b5e20;">📦 当前持仓监控（共 {total} 只）</h3>
+    <table style="width:100%; border-collapse:collapse; font-size:14px;">
+        <tr style="text-align:left; color:#2e7d32; border-bottom:1px solid #a5d6a7;">
+            <th style="padding:6px 4px;">标的</th>
+            <th style="padding:6px 4px;">买入时间</th>
+            <th style="padding:6px 4px;">价格变动</th>
+            <th style="padding:6px 4px;">浮动盈亏</th>
+            <th style="padding:6px 4px;">建议周期</th>
+            <th style="padding:6px 4px;">止损位</th>
+        </tr>
+        {rows_html}
+    </table>
+</div>
+"""
+    except Exception as e:
+        print(f"⚠️ 渲染当前持仓卡片失败: {e}")
+        return ""
+
+
+# ==========================================
 # 2.6  美股板块大跌 → A股联动封禁清单（规则驱动，不依赖AI判断）
 # ==========================================
 
-# ETF → 对应A股板块中文标签映射（供封禁通知和后续过滤使用）
 US_SECTOR_TO_ASHARE = {
     "SOXX": ["半导体", "芯片", "封测", "晶圆", "半导体材料", "半导体设备"],
     "XLK":  ["科技", "AI算力", "光模块", "CPO", "云计算", "数据中心"],
@@ -637,20 +665,9 @@ US_SECTOR_TO_ASHARE = {
     "ARKK": ["AI", "基因", "新能源汽车", "自动驾驶"],
 }
 
-# 封禁阈值：美股板块单日跌幅超过此值，对应A股板块今日进入封禁名单
-EMBARGO_THRESHOLD_PCT = -1.5   # -1.5% 触发预警；-3% 触发强封
+EMBARGO_THRESHOLD_PCT = -1.5
 
 def parse_sector_embargo(us_sector_text):
-    """
-    解析 get_us_sector_performance() 的输出，找出跌幅超过阈值的ETF，
-    生成两部分输出：
-      1. embargo_sectors: list[str] —— 今日A股被封禁的板块关键词列表
-         （注入AI prompt中作为硬性禁止推荐的依据）
-      2. embargo_text: str —— 格式化的封禁通知文本，直接插入AI prompt醒目位置
-
-    设计原则：跌幅越大封禁力度越强，SOXX是最重要的信号，单独列出；
-    不试图让AI自行"综合判断"，而是把已经判断好的结论作为约束传入。
-    """
     if not us_sector_text or "暂无" in us_sector_text:
         return [], ""
 
@@ -662,7 +679,6 @@ def parse_sector_embargo(us_sector_text):
         if not line or '📉' not in line:
             continue
         try:
-            # 格式: 📉 SOXX: -3.45% — 费城半导体指数 → A股半导体...
             parts = line.replace('📉', '').strip().split(':')
             etf = parts[0].strip()
             pct_str = parts[1].strip().split('%')[0].strip()
@@ -670,7 +686,7 @@ def parse_sector_embargo(us_sector_text):
         except Exception:
             continue
 
-        if pct >= EMBARGO_THRESHOLD_PCT:  # 没超阈值（是正数或跌幅较小），跳过
+        if pct >= EMBARGO_THRESHOLD_PCT:
             continue
 
         a_share_labels = US_SECTOR_TO_ASHARE.get(etf, [])
@@ -687,7 +703,7 @@ def parse_sector_embargo(us_sector_text):
     if not embargo_lines:
         return [], ""
 
-    embargo_sectors = list(dict.fromkeys(embargo_sectors))  # 去重，保持顺序
+    embargo_sectors = list(dict.fromkeys(embargo_sectors))
     embargo_text = f"""
 🚨【美股板块联动封禁名单 —— 硬性纪律，不可违反】：
 根据昨夜美股板块涨跌数据，以下A股板块今日进入联动封禁区：
@@ -742,6 +758,7 @@ def get_top_300_pool():
             "Ticker": ts_code,
             "Name": name_map.get(ts_code, ts_code),
             "Industry": industry_map.get(ts_code, "未知"),
+            "Open": row.get('open', row['close']),
             "Close": row['close'],
             "Amount": row['amount'],
             "pct_chg": row.get('pct_chg', 0),
@@ -900,34 +917,12 @@ def get_us_sector_performance():
 # 3. 个股新闻抓取
 # ==========================================
 def get_stock_news(ticker_code: str, ticker_name: str, max_items: int = 5) -> list[str]:
-    """
-    为A股单只标的抓取最新新闻，三源并联，任一成功即返回。
-
-    来源1 — 东方财富公告 API（首选）
-      免费、无需API Key、返回结构化JSON，覆盖全部A股公告与重大事项。
-      URL: https://np-anotice-stock.eastmoney.com/api/security/ann
-
-    来源2 — Yahoo Finance（yfinance）
-      免费，覆盖沪深主要上市公司的英文新闻，
-      ticker格式：600036.SH → 600036.SS；000001.SZ 不变。
-
-    来源3 — 新浪财经 per-stock RSS
-      免费，中文财经新闻，按股票代码精准过滤，
-      URL: https://feed.mix.sina.com.cn/api/roll/get
-
-    设计原则：
-    - 三源顺序尝试，不重复请求；任意一源凑满 max_items 条就停止
-    - 每条新闻加来源标注 [东财公告] / [Yahoo] / [新浪]，方便AI判断可信度
-    - 单源超时不影响其他源；全部失败返回空列表
-    """
     news_items = []
-    code = ticker_code.split('.')[0]  # 去掉 .SH/.SZ，只保留数字代码
+    code = ticker_code.split('.')[0]
 
     _HEADERS = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
                 'Referer': 'https://www.eastmoney.com/'}
 
-    # ── 来源1：东方财富公告 API ──
-    # 公告类型 t=1(年报),2(半年报),9(重大事项),22(业绩预告),40(其他公告)
     try:
         url = (f"https://np-anotice-stock.eastmoney.com/api/security/ann"
                f"?sr=-1&page=1&size={max_items}&s=&c={code}&t=1,2,9,22,40")
@@ -941,17 +936,15 @@ def get_stock_news(ticker_code: str, ticker_name: str, max_items: int = 5) -> li
             if title:
                 news_items.append(f"[东财公告][{date}] {title}")
     except Exception as e:
-        pass  # 静默失败，继续尝试下一源
+        pass
 
-    # ── 来源2：Yahoo Finance（yfinance）──
     if len(news_items) < max_items:
         try:
-            # 格式转换：600036.SH → 600036.SS；000001.SZ 保持不变
             if ticker_code.upper().endswith('.SH'):
                 yahoo_ticker = code + '.SS'
             else:
                 yahoo_ticker = code + '.SZ'
-            cutoff_ts = time.time() - 14 * 86400  # 只看14天内的新闻
+            cutoff_ts = time.time() - 14 * 86400
             raw = yf.Ticker(yahoo_ticker).news or []
             for item in raw:
                 if len(news_items) >= max_items:
@@ -967,11 +960,8 @@ def get_stock_news(ticker_code: str, ticker_name: str, max_items: int = 5) -> li
         except Exception:
             pass
 
-    # ── 来源3：新浪财经 per-stock RSS ──
     if len(news_items) < max_items:
         try:
-            # 新浪财经按股票代码过滤的滚动新闻接口
-            # pageid=153(市场新闻), lid=2512(个股新闻板块), k={code}为过滤关键词
             sina_url = (f"https://feed.mix.sina.com.cn/api/roll/get"
                         f"?pageid=153&lid=2512&k={code}&num={max_items}&page=1")
             req = urllib.request.Request(sina_url, headers=_HEADERS)
@@ -993,14 +983,6 @@ def get_stock_news(ticker_code: str, ticker_name: str, max_items: int = 5) -> li
 
 
 def enrich_pool_with_news(pool_data: list) -> list:
-    """
-    为资金池 Top 100 标的逐只抓取个股新闻。
-
-    策略：
-    - Top 30（成交额最大）：三源全查，每只间隔随机延迟避免被封
-    - 31-100：只查东方财富公告（速度最快），Yahoo 和新浪跳过
-    这样既保证核心标的有充分的新闻覆盖，又把总耗时控制在合理范围内。
-    """
     print("📰 [阶段4] 正在逐只抓取个股新闻（东方财富/Yahoo/新浪 三源并联）...")
 
     enriched = 0
@@ -1009,11 +991,9 @@ def enrich_pool_with_news(pool_data: list) -> list:
         ticker_name = item.get('Name', '')
 
         if idx < 30:
-            # Top30：完整三源查询
             news = get_stock_news(ticker_code, ticker_name, max_items=5)
             time.sleep(random.uniform(0.25, 0.55))
         else:
-            # 31-100：只查东方财富公告（最快，无需延迟）
             code = ticker_code.split('.')[0]
             news = []
             try:
@@ -1041,8 +1021,6 @@ def enrich_pool_with_news(pool_data: list) -> list:
     return pool_data
 
 
-
-
 # ==========================================
 # 4. 定向计算技术指标（分批抓取 + 免死金牌）
 # ==========================================
@@ -1053,7 +1031,6 @@ def calc_tech_indicators(full_pool, codes, trade_date):
     start_weekly = (get_bj_time() - datetime.timedelta(days=400)).strftime('%Y%m%d')
     batch_size   = 40
 
-    # ── 批量拉日线 ──
     all_hist = []
     for i in range(0, len(codes), batch_size):
         try:
@@ -1066,7 +1043,6 @@ def calc_tech_indicators(full_pool, codes, trade_date):
             print(f"   ⚠️ 日线批次受限: {e}")
     df_hist = pd.concat(all_hist, ignore_index=True) if all_hist else pd.DataFrame()
 
-    # ── 批量拉周线 ──
     all_weekly = []
     for i in range(0, len(codes), batch_size):
         try:
@@ -1089,7 +1065,6 @@ def calc_tech_indicators(full_pool, codes, trade_date):
     ]
 
     for code in list(full_pool.keys()):
-        # ── 周线共振：周线MA5>MA10 且 周线MACD柱向上 ──
         weekly_bullish = False
         if not df_weekly.empty and code in df_weekly['ts_code'].values:
             wk = df_weekly[df_weekly['ts_code'] == code].sort_values('trade_date')
@@ -1121,11 +1096,9 @@ def calc_tech_indicators(full_pool, codes, trade_date):
         vol = sd['vol'].values.astype(float)
         sc  = pd.Series(cp)
 
-        # 乖离率
         ma20 = float(sc.rolling(20).mean().iloc[-1])
         full_pool[code]["乖离率(%)"] = round(((full_pool[code]["Close"] - ma20) / ma20) * 100, 2)
 
-        # MACD：含金叉判断
         exp1   = sc.ewm(span=12, adjust=False).mean()
         exp2   = sc.ewm(span=26, adjust=False).mean()
         ml     = exp1 - exp2
@@ -1138,18 +1111,14 @@ def calc_tech_indicators(full_pool, codes, trade_date):
         full_pool[code]["MACD趋势"]      = "走强" if h_last > h_prev else "走弱"
         full_pool[code]["MACD_HIST_LAST"] = round(h_last, 4)
         full_pool[code]["MACD_HIST_PREV"] = round(h_prev, 4)
-        # 金叉：MACD线今日上穿信号线（昨日在下方）
         full_pool[code]["MACD金叉"]       = bool(ml_last > sl_last and ml_prev <= sl_prev)
-        # 绿柱缩短：柱为负且连续两日向0收敛
         full_pool[code]["MACD绿柱缩短"]   = bool(h_last < 0 and h_last > h_prev and h_prev < h_prev2)
 
-        # RSI
         delta = sc.diff()
         gain  = delta.clip(lower=0).ewm(com=13, adjust=False).mean()
         loss  = (-1 * delta.clip(upper=0)).ewm(com=13, adjust=False).mean()
         full_pool[code]["RSI"] = round(float((100 - 100 / (1 + gain / (loss + 1e-9))).iloc[-1]), 2)
 
-        # KDJ
         K, D = 50.0, 50.0
         j_lst = []
         for i_k in range(len(cp)):
@@ -1167,13 +1136,11 @@ def calc_tech_indicators(full_pool, codes, trade_date):
         full_pool[code]["KDJ_J回升"] = bool(j_last < 80 and j_last > j_prev and j_prev <= j_prev2)
         full_pool[code]["KDJ_J超卖"] = bool(j_prev2 < 20)
 
-        # 量能
         avg5  = float(pd.Series(vol[:-1]).tail(5).mean()) if len(vol) >= 6 else 0
         vtdy  = float(vol[-1])
         full_pool[code]["量能放大"] = bool(avg5 > 0 and vtdy >= avg5 * 1.3)
         full_pool[code]["量比"]     = round(vtdy / (avg5 + 1e-9), 2)
 
-        # K线形态
         patterns = []
         if len(op) >= 3:
             o, c   = op[-1], cp[-1]
@@ -1202,19 +1169,6 @@ def calc_tech_indicators(full_pool, codes, trade_date):
 # 5. AI 事件与全球宏观逻辑推演选股
 # ==========================================
 def screen_technical_setups(final_pool):
-    """
-    对 Top100 做客观技术形态评分（满分40分）并按板块归类，供 AI 评总分时使用。
-
-    评分明细：
-      MACD金叉（最强入场信号）       0-15分
-      MACD绿柱快速收敛（金叉预信号）  0-12分
-      KDJ超卖/低位回升              0-10分
-      量能放大（量比≥1.3）           0-10分
-      看涨K线形态                    0-5分
-    周日共振加成/惩罚：
-      周线MA5>MA10 且 周线MACD上行 → ×1.25（上限40）
-      周线逆势                      → ×0.6（日线信号打折）
-    """
     sector_groups = {}
     for stock in final_pool[:100]:
         tech_score   = 0
@@ -1285,11 +1239,6 @@ def screen_technical_setups(final_pool):
 
 
 def load_evolved_rules() -> str:
-    """
-    读取 evolve_a.py 生成的 evolved_rules.json，提取 prompt_patches 注入 AI 选股 prompt。
-    这是进化闭环的关键：evolve.py 写规则 → scan.py 读规则 → 影响今日选股。
-    文件不存在时静默返回空字符串，不影响正常运行。
-    """
     rules_file = "evolved_rules.json"
     if not os.path.exists(rules_file):
         return ""
@@ -1347,7 +1296,6 @@ def generate_ai_report(pool_data, macro_news_text, macro_data_text, us_sector_te
             item["个股新闻"] = d['个股新闻']
         compact_pool.append(item)
 
-    # 技术板块共振摘要
     tech_sector_block = ""
     if sector_tech_data:
         lines = []
@@ -1360,7 +1308,6 @@ def generate_ai_report(pool_data, macro_news_text, macro_data_text, us_sector_te
         if lines:
             tech_sector_block = "【今日技术形态板块共振（评分>0的标的按板块归类）】：\n" + "\n".join(lines)
 
-    # 进化规则（来自历史交易数据，evolve.py生成）
     evolved_rules_block = load_evolved_rules()
 
     removed_notice = ""
@@ -1555,7 +1502,6 @@ MACD信号优先级：
 '''
 
     ai_html = ""
-    # 使用 Pro 引擎负责高强度的核心推演
     with client.messages.stream(
         model=TARGET_MODEL,
         max_tokens=50000,
@@ -1572,12 +1518,9 @@ MACD信号优先级：
         print(f"⚠️ 检测到AI输出前置了 {html_start} 字符的非HTML内容，已自动截断丢弃")
         ai_html = ai_html[html_start:]
 
-    # 注：原有的"强制清仓"卡片渲染逻辑已统一移至 build_sell_signal_card()，
-    # 与阶段0b的止损/到期信号合并为一张"今日卖出信号汇总"卡片，由 __main__ 在邮件最顶部统一插入，
-    # 避免同一批 removed_tickers 在邮件里出现两张内容重复的卡片。
-
     print("✅ AI 事件逻辑推演报告生成完毕")
     return ai_html
+
 def build_email(ai_html):
     style = """
     <style>
@@ -1658,33 +1601,27 @@ def locate_stock_section(clean_html, ticker_code, name):
 
 
 if __name__ == "__main__":
-    # 阶段2：拉取宏观与核心大宗商品高频数据
     macro_news = get_free_macro_news()
     macro_data_text = get_global_macro_data()
 
-    # 统一拉取一次最新可用收盘价，阶段0a/0b共用，避免重复请求 tushare
     latest_price_map = get_latest_price_map()
 
-    # 阶段0a：AI 宏观/消息面驱动的持仓强制清仓审查
     removed_tickers_macro = pre_scan_portfolio_review(macro_news, macro_data_text, latest_price_map)
 
-    # 阶段0b：规则驱动卖出信号检测（止损触发 / 持有到期）——纯数值判断，交易时段内即可拿到结果
     rule_sell_signals, removed_tickers_rule = check_rule_based_sell_signals(
         latest_price_map, exclude_tickers=removed_tickers_macro
     )
 
     removed_tickers = removed_tickers_macro + removed_tickers_rule
 
-    # 汇总两类信号，生成统一的"今日卖出信号"卡片（后面会插到邮件最顶部）
     sell_signal_card_html = build_sell_signal_card(removed_tickers_macro, rule_sell_signals)
 
-    # 阶段2.5：获取昨日美股板块数据
+    current_holdings_card_html = build_current_holdings_card(latest_price_map)
+
     us_sector_text = get_us_sector_performance()
 
-    # 阶段2.6：解析美股板块大跌，生成A股联动封禁清单（硬性规则，不依赖AI判断）
     _embargo_sectors, embargo_text = parse_sector_embargo(us_sector_text)
 
-    # 阶段1：拉取今日A股核心资金池
     full_pool, codes, trade_date = get_top_300_pool()
 
     if full_pool:
@@ -1694,14 +1631,14 @@ if __name__ == "__main__":
             print("🚨 触发安全熔断：清洗后有效标的不足10只，终止 AI 调用。")
             import sys; sys.exit(0)
 
-        # 技术形态筛选：40分客观评分 + 周日共振过滤 + 板块归类
         sector_tech_data = screen_technical_setups(final_pool)
 
         final_pool = enrich_pool_with_news(final_pool)
 
         ai_html = generate_ai_report(final_pool, macro_news, macro_data_text, us_sector_text, removed_tickers, embargo_text, sector_tech_data)
-        # 把"今日卖出信号"卡片插在邮件最顶部，第一眼就能看到当天该处理的持仓
-        ai_html = sell_signal_card_html + ai_html
+        
+        # 将"今日卖出信号"与"当前持仓"卡片直接插入邮件顶部
+        ai_html = sell_signal_card_html + current_holdings_card_html + ai_html
         full_html = build_email(ai_html)
 
         chosen = []
@@ -1742,13 +1679,14 @@ if __name__ == "__main__":
                 if stop_loss_raw:
                     try:
                         sl_value = float(re.sub(r'[^\d.]', '', stop_loss_raw))
-                        if abs(sl_value - item['Close']) / item['Close'] > 0.30:
-                            print(f"⚠️ {item['Name']} 止损价 {stop_loss_raw} 与现价 {item['Close']} 偏离过大，改用默认止损")
+                        ref_price = item.get('Open', item['Close'])
+                        if abs(sl_value - ref_price) / ref_price > 0.30:
+                            print(f"⚠️ {item['Name']} 止损价 {stop_loss_raw} 与买入价 {ref_price} 偏离过大，改用默认止损")
                             stop_loss_raw = None
                     except (ValueError, ZeroDivisionError):
                         stop_loss_raw = None
 
-                stop_loss = stop_loss_raw if stop_loss_raw else f"{round(item['Close'] * (1 + DEFAULT_STOP_LOSS_PCT / 100), 2)}元"
+                stop_loss = stop_loss_raw if stop_loss_raw else f"{round(item.get('Open', item['Close']) * (1 + DEFAULT_STOP_LOSS_PCT / 100), 2)}元"
                 score_match = re.search(r'评分\s*[:：]\s*\[?(\d{1,3})\s*/\s*100', chunk)
                 score = score_match.group(1).strip() if score_match else "N/A"
 
@@ -1773,9 +1711,6 @@ if __name__ == "__main__":
                     f.writelines(lines)
                 print("⚠️ 检测到旧版trade_history.csv缺少Score列，已自动升级表头")
 
-        # ── 写账前过滤：剔除已被标记为 Forced_Exit / Trap_Warning / Stop_Loss_Hit / Period_Matured 的 ticker ──
-        # 只查 trade_history.csv 本身，不依赖阶段0返回值，确保跨进程重启也能正确过滤。
-        # 原有历史行（含买入价、卖出价）保持不动，供 review.py / evolve.py 计算胜率。
         frozen_tickers: set = set()
         FROZEN_TAGS = {'Forced_Exit', 'Trap_Warning', 'Stop_Loss_Hit', 'Period_Matured'}
         if file_exists:
@@ -1795,27 +1730,27 @@ if __name__ == "__main__":
         if skipped_frozen > 0:
             print(f"⏭️ 已跳过 {skipped_frozen} 只冻结标的，不写入新追踪记录。")
 
+        # 写入当天开盘价 Open 替代 Close
         with open(log_file, "a", encoding="utf-8") as f:
             if need_header:
                 f.write(new_header)
             ts_date = get_bj_time().strftime('%Y-%m-%d')
             for i in chosen_to_write:
-                f.write(f"{ts_date},{i['Ticker']},{i['Name']},{i['Tag']},{i.get('Industry','未知')},{i['Close']},{i['Amount']},{i['Daily_Pct']},{i['Hold_Period']},{i['Stop_Loss']},{i.get('Score','N/A')}\n")
+                f.write(f"{ts_date},{i['Ticker']},{i['Name']},{i['Tag']},{i.get('Industry','未知')},{i.get('Open', i['Close'])},{i['Amount']},{i['Daily_Pct']},{i['Hold_Period']},{i['Stop_Loss']},{i.get('Score','N/A')}\n")
 
-        print(f"✅ 共安全记账 {len(chosen_to_write)} 条核心数据（冻结过滤后）。")
+        print(f"✅ 共安全记账 {len(chosen_to_write)} 条核心数据（买入价使用当天开盘价）。")
         with open("report.html", "w", encoding="utf-8") as f:
             f.write(full_html)
         send_emails(full_html)
     else:
         print("⚠️ 数据池为空，跳过执行。")
-        # 兜底：即使本次主选股流程因数据问题中止，只要阶段0a/0b产生了卖出信号，
-        # 也要单独发一封邮件通知，避免"今天该卖的股票"被悄悄吞掉。
-        if sell_signal_card_html:
+        if sell_signal_card_html or current_holdings_card_html:
             fallback_html = f"""
 <div class="header-card">
-    <h2>⚠️ 今日选股流程未完成，仅推送卖出信号</h2>
-    <p>本次资金池数据拉取失败，AI选股报告未生成；但持仓卖出信号检测不依赖资金池数据，照常推送如下。</p>
+    <h2>⚠️ 今日选股流程未完成，仅推送卖出信号与持仓监控</h2>
+    <p>本次资金池数据拉取失败，AI选股报告未生成；但持仓卖出信号与持仓监控照常推送如下。</p>
 </div>
 {sell_signal_card_html}
+{current_holdings_card_html}
 """
             send_emails(build_email(fallback_html))
