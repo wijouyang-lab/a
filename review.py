@@ -41,10 +41,6 @@ except Exception as e:
     import sys; sys.exit(1)
 
 # ── 版本过滤：只用 Score 区分新旧版本记录，Stop_Loss/Hold_Period 不再强制要求 ──
-# 设计原则：review.py 的职责是"追踪当前持仓"，不是"统计胜率"（那是 evolve.py 的职责）。
-# 今日新推荐如果 Stop_Loss=N/A（AI未给出或解析失败），仍应被纳入追踪，
-# 否则会出现"scan 推荐了但 review 没追踪"的断层。
-# 真正需要过滤的是：Score 也为空的彻底旧格式记录（它们连评分都没有，是初始测试数据）。
 _INVALID = {'', 'n/a', 'nan', 'none'}
 for _col in ['Hold_Period', 'Stop_Loss', 'Score']:
     if _col not in recent_picks.columns:
@@ -57,7 +53,7 @@ if _dropped > 0:
     print(f"🗂️ 版本过滤：剔除 {_dropped} 条无评分的旧版本记录，不纳入复盘。")
 recent_picks = recent_picks[_score_valid].copy()
 
-# Stop_Loss=N/A 的记录打印一下提示，但继续追踪（不剔除）
+# Stop_Loss=N/A 的记录打印提示，但继续追踪（不剔除）
 _no_stoploss = recent_picks['Stop_Loss'].astype(str).str.strip().str.lower().isin(_INVALID)
 if _no_stoploss.sum() > 0:
     tickers_no_sl = recent_picks.loc[_no_stoploss, 'Ticker'].tolist()
@@ -166,26 +162,26 @@ for ticker, group in recent_picks.groupby('Ticker'):
 
     hold_days = parse_hold_days(hold_period_str)
     if hold_days is None:
-        # Hold_Period=N/A 时：不跳过，继续追踪，标记为"持仓中，周期待定"
-        # 解决今日新推荐 Stop_Loss/Hold_Period=N/A 时完全消失在复盘里的问题
+        # Hold_Period=N/A 时：修正字典键名，保持与 active_list 规范统一
         print(f"⚠️ {ticker} Hold_Period=N/A，仅追踪持仓状态，不做到期判断")
         rec_price = float(first_row['Close_Price'])
         rec_date_str = first_row['Date'].strftime('%Y-%m-%d')
-        cur_price = get_price_on_date(ticker, get_bj_time().strftime('%Y-%m-%d')) or rec_price
+        cur_price = price_map_today.get(ticker) or get_price_on_date(ticker, get_bj_time().strftime('%Y-%m-%d')) or rec_price
         pnl = round((cur_price - rec_price) / rec_price * 100, 2) if rec_price > 0 else 0
         active_list.append({
-            "ticker": ticker,
-            "name": first_row.get('Name', ticker),
+            "代码": ticker,
+            "名称": first_row.get('Name', ticker),
             "标签": latest_tag,
-            "推荐日期": rec_date_str,
-            "买入价": rec_price,
-            "当前价": cur_price,
-            "持有天数": days_held,
-            "浮动盈亏(%)": pnl,
+            "推荐评分": score_str,
+            "持股周期建议": "待定(N/A)",
             "止损价": stop_loss,
-            "建议持股周期": "待定(N/A)",
-            "到期日": "N/A",
-            "评分": score_str,
+            "首次推荐日": rec_date_str,
+            "首次推荐价": rec_price,
+            "现价": cur_price,
+            "持仓天数": days_held,
+            "剩余天数": "N/A",
+            "当前盈亏(%)": pnl,
+            "系统连续推荐次数": len(group),
         })
         continue
 
