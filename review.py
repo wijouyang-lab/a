@@ -162,7 +162,6 @@ for ticker, group in recent_picks.groupby('Ticker'):
 
     hold_days = parse_hold_days(hold_period_str)
     if hold_days is None:
-        # Hold_Period=N/A 时：修正字典键名，保持与 active_list 规范统一
         print(f"⚠️ {ticker} Hold_Period=N/A，仅追踪持仓状态，不做到期判断")
         rec_price = float(first_row['Close_Price'])
         rec_date_str = first_row['Date'].strftime('%Y-%m-%d')
@@ -328,7 +327,7 @@ try:
         review_date = get_bj_time().strftime('%Y-%m-%d')
 
         for item in active_list:
-            f.write(f"{review_date},{item['代码']},{item['名称']},{item['标签']},{item['首次推荐日']},{item['首次推荐价']},{item['现价']},{item['持仓天数']},{item['当前盈亏(%)']}, Jaeger,{item['持股周期建议']},{item['止损价']},{item['系统连续推荐次数']},持仓中,{item['推荐评分']}\n")
+            f.write(f"{review_date},{item['代码']},{item['名称']},{item['标签']},{item['首次推荐日']},{item['首次推荐价']},{item['现价']},{item['持仓天数']},{item['当前盈亏(%)']},,{item['持股周期建议']},{item['止损价']},{item['系统连续推荐次数']},持仓中,{item['推荐评分']}\n")
 
         for item in expired_list:
             maturity_pnl = item['期满日盈亏(%)'] if item['期满日盈亏(%)'] != "无数据" else ""
