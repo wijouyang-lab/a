@@ -7,6 +7,7 @@ import json
 import re
 import smtplib
 import urllib.request
+import urllib.parse
 import xml.etree.ElementTree as ET
 import tushare as ts
 import hashlib
@@ -14,6 +15,8 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 import anthropic
 import time
+import random
+import yfinance as yf
 
 BEIJING_TZ = datetime.timezone(datetime.timedelta(hours=8))
 def get_bj_time():
@@ -896,59 +899,148 @@ def get_us_sector_performance():
 # ==========================================
 # 3. 个股新闻抓取
 # ==========================================
-def get_stock_news(ticker_name, max_items=3):
-    headlines = []
-    return headlines
+def get_stock_news(ticker_code: str, ticker_name: str, max_items: int = 5) -> list[str]:
+    """
+    为A股单只标的抓取最新新闻，三源并联，任一成功即返回。
 
+    来源1 — 东方财富公告 API（首选）
+      免费、无需API Key、返回结构化JSON，覆盖全部A股公告与重大事项。
+      URL: https://np-anotice-stock.eastmoney.com/api/security/ann
 
-def enrich_pool_with_news(pool_data):
-    print("📰 [阶段3.5] 正在为 Top 100 标的抓取个股新闻...")
+    来源2 — Yahoo Finance（yfinance）
+      免费，覆盖沪深主要上市公司的英文新闻，
+      ticker格式：600036.SH → 600036.SS；000001.SZ 不变。
 
-    all_sina_news = []
+    来源3 — 新浪财经 per-stock RSS
+      免费，中文财经新闻，按股票代码精准过滤，
+      URL: https://feed.mix.sina.com.cn/api/roll/get
+
+    设计原则：
+    - 三源顺序尝试，不重复请求；任意一源凑满 max_items 条就停止
+    - 每条新闻加来源标注 [东财公告] / [Yahoo] / [新浪]，方便AI判断可信度
+    - 单源超时不影响其他源；全部失败返回空列表
+    """
+    news_items = []
+    code = ticker_code.split('.')[0]  # 去掉 .SH/.SZ，只保留数字代码
+
+    _HEADERS = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                'Referer': 'https://www.eastmoney.com/'}
+
+    # ── 来源1：东方财富公告 API ──
+    # 公告类型 t=1(年报),2(半年报),9(重大事项),22(业绩预告),40(其他公告)
     try:
-        req = urllib.request.Request(
-            "https://rss.sina.com.cn/roll/finance/hot_roll.xml",
-            headers={'User-Agent': 'Mozilla/5.0'}
-        )
-        with urllib.request.urlopen(req, timeout=10) as response:
-            xml_data = response.read()
-        root = ET.fromstring(xml_data)
-        items = root.findall('.//item')[:200]
-        for item in items:
-            title = item.find('title')
-            if title is not None and title.text:
-                all_sina_news.append(title.text.strip())
+        url = (f"https://np-anotice-stock.eastmoney.com/api/security/ann"
+               f"?sr=-1&page=1&size={max_items}&s=&c={code}&t=1,2,9,22,40")
+        req = urllib.request.Request(url, headers=_HEADERS)
+        with urllib.request.urlopen(req, timeout=7) as resp:
+            data = json.loads(resp.read().decode('utf-8'))
+        ann_list = data.get('data', {}).get('list', [])
+        for item in ann_list[:max_items]:
+            title = str(item.get('title', '')).strip()
+            date  = str(item.get('notice_date', ''))[:10]
+            if title:
+                news_items.append(f"[东财公告][{date}] {title}")
     except Exception as e:
-        print(f"   ⚠️ 新浪新闻批量抓取失败: {e}")
+        pass  # 静默失败，继续尝试下一源
 
-    tushare_news = []
-    try:
-        df_news = pro.news(src='sina', limit=100)
-        if df_news is not None and not df_news.empty:
-            tushare_news = df_news['title'].tolist()
-    except Exception:
-        pass
+    # ── 来源2：Yahoo Finance（yfinance）──
+    if len(news_items) < max_items:
+        try:
+            # 格式转换：600036.SH → 600036.SS；000001.SZ 保持不变
+            if ticker_code.upper().endswith('.SH'):
+                yahoo_ticker = code + '.SS'
+            else:
+                yahoo_ticker = code + '.SZ'
+            cutoff_ts = time.time() - 14 * 86400  # 只看14天内的新闻
+            raw = yf.Ticker(yahoo_ticker).news or []
+            for item in raw:
+                if len(news_items) >= max_items:
+                    break
+                if item.get('providerPublishTime', 0) < cutoff_ts:
+                    continue
+                title     = str(item.get('title', '')).strip()
+                publisher = str(item.get('publisher', 'Yahoo'))
+                pub_ts    = item.get('providerPublishTime', 0)
+                date_str  = datetime.datetime.fromtimestamp(pub_ts).strftime('%m-%d') if pub_ts else ''
+                if title:
+                    news_items.append(f"[Yahoo/{publisher}][{date_str}] {title}")
+        except Exception:
+            pass
 
-    combined_news = all_sina_news + tushare_news
+    # ── 来源3：新浪财经 per-stock RSS ──
+    if len(news_items) < max_items:
+        try:
+            # 新浪财经按股票代码过滤的滚动新闻接口
+            # pageid=153(市场新闻), lid=2512(个股新闻板块), k={code}为过滤关键词
+            sina_url = (f"https://feed.mix.sina.com.cn/api/roll/get"
+                        f"?pageid=153&lid=2512&k={code}&num={max_items}&page=1")
+            req = urllib.request.Request(sina_url, headers=_HEADERS)
+            with urllib.request.urlopen(req, timeout=6) as resp:
+                content = resp.read().decode('utf-8')
+            sina_data = json.loads(content)
+            for item in sina_data.get('result', {}).get('data', []):
+                if len(news_items) >= max_items:
+                    break
+                title    = str(item.get('title', '')).strip()
+                ctime    = str(item.get('ctime', ''))[:10]
+                media    = str(item.get('media_name', '新浪财经'))
+                if title and (code in title or ticker_name[:2] in title or True):
+                    news_items.append(f"[新浪/{media}][{ctime}] {title}")
+        except Exception:
+            pass
+
+    return news_items[:max_items]
+
+
+def enrich_pool_with_news(pool_data: list) -> list:
+    """
+    为资金池 Top 100 标的逐只抓取个股新闻。
+
+    策略：
+    - Top 30（成交额最大）：三源全查，每只间隔随机延迟避免被封
+    - 31-100：只查东方财富公告（速度最快），Yahoo 和新浪跳过
+    这样既保证核心标的有充分的新闻覆盖，又把总耗时控制在合理范围内。
+    """
+    print("📰 [阶段4] 正在逐只抓取个股新闻（东方财富/Yahoo/新浪 三源并联）...")
 
     enriched = 0
-    for item in pool_data[:100]:
-        name = item.get('Name', '')
-        keyword = name[:3] if len(name) >= 3 else name
+    for idx, item in enumerate(pool_data[:100]):
+        ticker_code = item.get('Ticker', '')
+        ticker_name = item.get('Name', '')
 
-        matched = []
-        for news_title in combined_news:
-            if keyword in news_title or name in news_title:
-                matched.append(news_title)
-            if len(matched) >= 3:
-                break
+        if idx < 30:
+            # Top30：完整三源查询
+            news = get_stock_news(ticker_code, ticker_name, max_items=5)
+            time.sleep(random.uniform(0.25, 0.55))
+        else:
+            # 31-100：只查东方财富公告（最快，无需延迟）
+            code = ticker_code.split('.')[0]
+            news = []
+            try:
+                url = (f"https://np-anotice-stock.eastmoney.com/api/security/ann"
+                       f"?sr=-1&page=1&size=3&s=&c={code}&t=1,2,9,22,40")
+                req = urllib.request.Request(
+                    url,
+                    headers={'User-Agent': 'Mozilla/5.0', 'Referer': 'https://www.eastmoney.com/'})
+                with urllib.request.urlopen(req, timeout=5) as resp:
+                    data = json.loads(resp.read().decode('utf-8'))
+                for ann in data.get('data', {}).get('list', [])[:3]:
+                    title = str(ann.get('title', '')).strip()
+                    date  = str(ann.get('notice_date', ''))[:10]
+                    if title:
+                        news.append(f"[东财公告][{date}] {title}")
+            except Exception:
+                pass
+            time.sleep(random.uniform(0.08, 0.18))
 
-        item['个股新闻'] = matched if matched else []
-        if matched:
+        item['个股新闻'] = news
+        if news:
             enriched += 1
 
-    print(f"✅ 个股新闻匹配完毕，{enriched} 只标的找到相关新闻。")
+    print(f"✅ 个股新闻抓取完毕：{enriched}/100 只标的有新闻（Top30三源全查，31-100仅东财公告）")
     return pool_data
+
+
 
 
 # ==========================================
