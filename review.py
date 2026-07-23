@@ -113,6 +113,36 @@ def get_price_on_date(ticker, target_date_str):
     return float(valid.iloc[-1]['close'])
 
 
+def get_live_quote(ticker):
+    """
+    实时行情兜底：今日刚入账的新推荐，pro.daily 的全市场当日快照有时会因为
+    数据尚未发布完整而查不到该标的，导致它在后面被 continue 跳过、从复盘
+    报告里"消失"。这里对单个标的调用 tushare 实时行情接口兜底，取开盘价/最新价。
+    与 scan.py 的 get_latest_price_map 用的是同一套实时行情接口，保持口径一致。
+    """
+    try:
+        bare_code = ticker.split('.')[0] if '.' in ticker else ticker
+        df_rt = ts.get_realtime_quotes(bare_code)
+        if df_rt is None or df_rt.empty:
+            return None, None
+        row = df_rt.iloc[0]
+        open_p, last_p = None, None
+        try:
+            v = float(row.get('open', 0))
+            open_p = v if v > 0 else None
+        except (ValueError, TypeError):
+            pass
+        try:
+            v = float(row.get('price', 0))
+            last_p = v if v > 0 else None
+        except (ValueError, TypeError):
+            pass
+        return open_p, last_p
+    except Exception as e:
+        print(f"⚠️ 实时行情兜底查询失败 [{ticker}]: {e}")
+        return None, None
+
+
 already_archived = set()
 review_log_path = "review_history.csv"
 if os.path.exists(review_log_path) and os.path.getsize(review_log_path) > 0:
@@ -165,7 +195,15 @@ for ticker, group in recent_picks.groupby('Ticker'):
         print(f"⚠️ {ticker} Hold_Period=N/A，仅追踪持仓状态，不做到期判断")
         rec_price = float(first_row['Close_Price'])
         rec_date_str = first_row['Date'].strftime('%Y-%m-%d')
-        cur_price = price_map_today.get(ticker) or get_price_on_date(ticker, get_bj_time().strftime('%Y-%m-%d')) or rec_price
+        is_new_today = (rec_date_str == get_bj_time().strftime('%Y-%m-%d'))
+        today_open_price = None
+        cur_price = price_map_today.get(ticker) or get_price_on_date(ticker, get_bj_time().strftime('%Y-%m-%d'))
+        if not cur_price or is_new_today:
+            live_open, live_last = get_live_quote(ticker)
+            today_open_price = live_open
+            if not cur_price:
+                cur_price = live_last or live_open
+        cur_price = cur_price or rec_price
         pnl = round((cur_price - rec_price) / rec_price * 100, 2) if rec_price > 0 else 0
         active_list.append({
             "代码": ticker,
@@ -176,10 +214,12 @@ for ticker, group in recent_picks.groupby('Ticker'):
             "止损价": stop_loss,
             "首次推荐日": rec_date_str,
             "首次推荐价": rec_price,
+            "今日开盘价": round(today_open_price, 2) if today_open_price else ("N/A" if not is_new_today else round(cur_price, 2)),
             "现价": cur_price,
             "持仓天数": days_held,
             "剩余天数": "N/A",
             "当前盈亏(%)": pnl,
+            "今日新增": "是" if is_new_today else "否",
             "系统连续推荐次数": len(group),
         })
         continue
@@ -213,11 +253,29 @@ for ticker, group in recent_picks.groupby('Ticker'):
             "系统连续推荐次数": len(group),
         })
     else:
-        cur_price = price_map_today.get(ticker)
-        if not cur_price:
-            continue
+        is_new_today = (rec_date_str == get_bj_time().strftime('%Y-%m-%d'))
+        today_open_price = None
 
-        cur_pnl = round(((cur_price - rec_price) / rec_price) * 100, 2)
+        cur_price = price_map_today.get(ticker)
+
+        if not cur_price:
+            cur_price = get_price_on_date(ticker, get_bj_time().strftime('%Y-%m-%d'))
+
+        if not cur_price or is_new_today:
+            # 全市场当日快照可能还没收录"今天"这只标的（新入账推荐尤其常见）：
+            # 单独发起实时查询，拿到当天的开盘价/最新价兜底。
+            live_open, live_last = get_live_quote(ticker)
+            today_open_price = live_open
+            if not cur_price:
+                cur_price = live_last or live_open
+
+        if not cur_price:
+            # 实时查询也失败，最后兜底用推荐价本身，保证该标的仍会出现在复盘报告里
+            # （而不是被静默跳过），同时明确打印警告方便排查。
+            print(f"⚠️ 标的 [{ticker}] 现价/开盘价均获取失败，暂用推荐价代替显示，盈亏将显示为 0%。")
+            cur_price = rec_price
+
+        cur_pnl = round(((cur_price - rec_price) / rec_price) * 100, 2) if rec_price > 0 else 0
         remaining = (maturity_date_dt.replace(tzinfo=None) - get_bj_time().replace(tzinfo=None)).days
 
         active_list.append({
@@ -229,10 +287,12 @@ for ticker, group in recent_picks.groupby('Ticker'):
             "止损价": stop_loss,
             "首次推荐日": rec_date_str,
             "首次推荐价": rec_price,
+            "今日开盘价": round(today_open_price, 2) if today_open_price else ("N/A" if not is_new_today else round(cur_price, 2)),
             "现价": cur_price,
             "持仓天数": days_held,
             "剩余天数": remaining,
             "当前盈亏(%)": cur_pnl,
+            "今日新增": "是" if is_new_today else "否",
             "系统连续推荐次数": len(group),
         })
 
@@ -261,20 +321,22 @@ prompt = f'''
 
 在风控判断或策略复盘时，请结合推荐评分进行验证：高分票（80分以上）如果出现明显亏损，需要特别指出"高信心预期未兑现"；低分票（60分以下）如果反而盈利良好，也需要指出"评分体系可能过于保守"。
 
+【今日新增标的特别说明】持仓列表中"今日新增"="是"的标的是当天刚生成的全新推荐，"现价"为当天的开盘价/实时价，尚未经历完整交易日，几乎不会有真实盈亏。这类标的请勿按亏损/止损逻辑给风控指令，只需确认开盘价已正确入账，风控动作指令统一给"新建仓，持有观察，明日起纳入正常止损监控"，摘要中也不要把它们的 0% 波动算作"高信心预期未兑现"。
+
 请严格按以下 HTML 骨架输出复盘报告（直出HTML，禁加markdown框，盈利标红，亏损标绿）：
 
 <div style="background: #eceff1; border-left: 6px solid #455a64; padding: 20px; margin-bottom: 25px; border-radius: 8px;">
     <h3 style="margin-top: 0; color: #263238;">⚖️ 盘后总体风控审查</h3>
-    <p>(总结持仓中标的整体盈亏状况，以及本次新归档标的的策略胜率评估，特别指出评分与实际表现是否存在明显反差)</p>
+    <p>(总结持仓中标的整体盈亏状况，以及本次新归档标的的策略胜率评估，特别指出评分与实际表现是否存在明显反差；若有今日新增标的，在此提一句今日共新增几只)</p>
 </div>
 
 <h2 style="color: #1565c0; border-bottom: 2px solid #1565c0; padding-bottom: 5px;">📊 持仓中 - 风控纪律核对单</h2>
 <div style="background: #fff; padding: 20px; margin-bottom: 15px; border-radius: 8px; border: 1px solid #e0e0e0; box-shadow: 0 2px 8px rgba(0,0,0,0.05);">
-    <h3 style="margin: 0 0 10px 0;">[首次推荐日] | [股票名称] ([代码]) | 评分[推荐评分]/100 | 系统连续推荐[N]次 | 还剩[剩余天数]天到期</h3>
+    <h3 style="margin: 0 0 10px 0;">[若"今日新增"="是"则在最前面加一个 🆕今日新增 徽章] [首次推荐日] | [股票名称] ([代码]) | 评分[推荐评分]/100 | 系统连续推荐[N]次 | 还剩[剩余天数]天到期</h3>
     <p><b>持股周期建议:</b> [持股周期建议] | <b>止损位:</b> [止损价]</p>
-    <p><b>买入成本:</b> ¥[首次推荐价] ➔ <b>现价:</b> ¥[现价] | <b>当前盈亏:</b> <span style="font-weight:bold; color:[盈利#d32f2f/亏损#388e3c];">[当前盈亏(%)]%</span></p>
+    <p><b>买入成本:</b> ¥[首次推荐价] ➔ <b>现价:</b> ¥[现价]（今日开盘价 ¥[今日开盘价]） | <b>当前盈亏:</b> <span style="font-weight:bold; color:[盈利#d32f2f/亏损#388e3c];">[当前盈亏(%)]%</span></p>
     <p><span style="background: #607d8b; color: #fff; padding: 2px 6px; border-radius: 4px; font-size: 12px;">风控动作指令</span>
-    (判断：现价是否跌破止损位？给出持有/止损/减仓指令)</p>
+    (今日新增标的：给"新建仓，持有观察"；其余标的：判断现价是否跌破止损位，给出持有/止损/减仓指令)</p>
 </div>
 
 <h2 style="color: #37474f; border-bottom: 2px solid #cfd8dc; padding-bottom: 5px; margin-top: 40px;">📁 已超期归档 - 策略复盘评价</h2>
@@ -397,8 +459,11 @@ active_count = len(active_list)
 closed_count = len(all_closed_trades)
 total_count = active_count + closed_count
 
-active_wins = sum(1 for x in active_list if isinstance(x['当前盈亏(%)'], (int, float)) and x['当前盈亏(%)'] > 0)
-active_win_rate = (active_wins / active_count * 100) if active_count > 0 else 0.0
+new_today_count = sum(1 for x in active_list if x.get('今日新增') == '是')
+# 今日新增标的当天开盘即入账，几乎不会有真实盈亏，不计入胜率分母，避免拉低数据准确性
+_win_rate_pool = [x for x in active_list if x.get('今日新增') != '是']
+active_wins = sum(1 for x in _win_rate_pool if isinstance(x['当前盈亏(%)'], (int, float)) and x['当前盈亏(%)'] > 0)
+active_win_rate = (active_wins / len(_win_rate_pool) * 100) if _win_rate_pool else 0.0
 
 closed_wins = sum(1 for x in all_closed_trades if x['pnl'] > 0)
 closed_win_rate = (closed_wins / closed_count * 100) if closed_count > 0 else 0.0
@@ -423,12 +488,12 @@ kpi_html = f"""
     <div style="background: #ffffff; border: 1px solid #eef2f5; border-radius: 10px; padding: 15px; box-shadow: 0 4px 6px rgba(0,0,0,0.02); border-top: 4px solid #1565c0;">
         <div style="font-size: 13px; color: #7f8c8d; margin-bottom: 5px;">📊 总推荐笔数</div>
         <div style="font-size: 24px; font-weight: bold; color: #2c3e50; margin-bottom: 5px;">{total_count}</div>
-        <div style="font-size: 12px; color: #95a5a6;">活跃持仓 {active_count} 笔 · 历史归档 {closed_count} 笔</div>
+        <div style="font-size: 12px; color: #95a5a6;">活跃持仓 {active_count} 笔（含今日新增 {new_today_count} 笔） · 历史归档 {closed_count} 笔</div>
     </div>
     <div style="background: #ffffff; border: 1px solid #eef2f5; border-radius: 10px; padding: 15px; box-shadow: 0 4px 6px rgba(0,0,0,0.02); border-top: 4px solid #2ecc71;">
         <div style="font-size: 13px; color: #7f8c8d; margin-bottom: 5px;">📈 活跃持仓胜率</div>
         <div style="font-size: 24px; font-weight: bold; color: #2ecc71; margin-bottom: 5px;">{active_win_rate:.2f}%</div>
-        <div style="font-size: 12px; color: #95a5a6;">{active_wins} 赢 / {active_count - active_wins} 亏</div>
+        <div style="font-size: 12px; color: #95a5a6;">{active_wins} 赢 / {len(_win_rate_pool) - active_wins} 亏（不含今日新增 {new_today_count} 笔）</div>
     </div>
     <div style="background: #ffffff; border: 1px solid #eef2f5; border-radius: 10px; padding: 15px; box-shadow: 0 4px 6px rgba(0,0,0,0.02); border-top: 4px solid #e67e22;">
         <div style="font-size: 13px; color: #7f8c8d; margin-bottom: 5px;">📉 已归档实现胜率</div>
