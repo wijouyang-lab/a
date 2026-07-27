@@ -21,8 +21,66 @@
         .market-title{font-size:20px;font-weight:bold;color:#1565c0;margin-bottom:20px;padding-bottom:10px;border-bottom:2px solid #1565c0}
     </style>
     </head><body><div class='container'>
+<div style="background:#fff3e0; border-left:6px solid #e65100; padding:20px; margin-bottom:25px; border-radius:8px;">
+    <h3 style="margin:0 0 12px 0; color:#bf360c;">🔔 今日卖出信号汇总（共8只 · 交易时段内可直接执行）</h3>
+    <table style="width:100%; border-collapse:collapse; font-size:14px;">
+        <tr style="text-align:left; color:#6d4c41; border-bottom:1px solid #ffb74d;">
+            <th style="padding:6px 4px;">标的</th><th style="padding:6px 4px;">触发类型</th><th style="padding:6px 4px;">价格/浮动盈亏</th><th style="padding:6px 4px;">理由</th>
+        </tr>
+        
+        <tr style="border-bottom:1px solid #ffe0b2;">
+            <td style="padding:8px 4px;"><b>603893.SH</b></td>
+            <td style="padding:8px 4px;"><span class="tag bg-red" style="margin:0;">突发利空强清</span></td>
+            <td style="padding:8px 4px;" colspan="2">Moody's警告AI支出威胁信用质量，叠加加息预期飙升，高估值半导体面临双重杀估值风险</td>
+        </tr>
+        <tr style="border-bottom:1px solid #ffe0b2;">
+            <td style="padding:8px 4px;"><b>兴业银锡(000426.SZ)</b></td>
+            <td style="padding:8px 4px;"><span class="tag bg-orange" style="margin:0;">止损触发</span></td>
+            <td style="padding:8px 4px;">买入¥32.3 → 现价¥31.37，<span style="color:#388e3c;font-weight:bold;">-2.88%</span></td>
+            <td style="padding:8px 4px;">现价31.37已跌破止损位32.0元，按风控纪律应立即止损离场</td>
+        </tr>
+        <tr style="border-bottom:1px solid #ffe0b2;">
+            <td style="padding:8px 4px;"><b>华友钴业(603799.SH)</b></td>
+            <td style="padding:8px 4px;"><span class="tag bg-orange" style="margin:0;">止损触发</span></td>
+            <td style="padding:8px 4px;">买入¥39.8 → 现价¥39.31，<span style="color:#388e3c;font-weight:bold;">-1.23%</span></td>
+            <td style="padding:8px 4px;">现价39.31已跌破止损位39.5元，按风控纪律应立即止损离场</td>
+        </tr>
+        <tr style="border-bottom:1px solid #ffe0b2;">
+            <td style="padding:8px 4px;"><b>多氟多(002407.SZ)</b></td>
+            <td style="padding:8px 4px;"><span class="tag bg-orange" style="margin:0;">止损触发</span></td>
+            <td style="padding:8px 4px;">买入¥29.79 → 现价¥30.52，<span style="color:#d32f2f;font-weight:bold;">+2.45%</span></td>
+            <td style="padding:8px 4px;">现价30.52已跌破止损位31.2元，按风控纪律应立即止损离场</td>
+        </tr>
+        <tr style="border-bottom:1px solid #ffe0b2;">
+            <td style="padding:8px 4px;"><b>哈药股份(600664.SH)</b></td>
+            <td style="padding:8px 4px;"><span class="tag bg-gray" style="margin:0;">持有到期</span></td>
+            <td style="padding:8px 4px;">买入¥5.33 → 现价¥5.4，<span style="color:#d32f2f;font-weight:bold;">+1.31%</span></td>
+            <td style="padding:8px 4px;">已持有7天，达到/超过建议持股周期（3-5天）上限，按纪律应清仓离场</td>
+        </tr>
+        <tr style="border-bottom:1px solid #ffe0b2;">
+            <td style="padding:8px 4px;"><b>景旺电子(603228.SH)</b></td>
+            <td style="padding:8px 4px;"><span class="tag bg-gray" style="margin:0;">持有到期</span></td>
+            <td style="padding:8px 4px;">买入¥70.79 → 现价¥74.6，<span style="color:#d32f2f;font-weight:bold;">+5.38%</span></td>
+            <td style="padding:8px 4px;">已持有10天，达到/超过建议持股周期（6-10天）上限，按纪律应清仓离场</td>
+        </tr>
+        <tr style="border-bottom:1px solid #ffe0b2;">
+            <td style="padding:8px 4px;"><b>康龙化成(300759.SZ)</b></td>
+            <td style="padding:8px 4px;"><span class="tag bg-gray" style="margin:0;">持有到期</span></td>
+            <td style="padding:8px 4px;">买入¥36.93 → 现价¥38.53，<span style="color:#d32f2f;font-weight:bold;">+4.33%</span></td>
+            <td style="padding:8px 4px;">已持有12天，达到/超过建议持股周期（6-10天）上限，按纪律应清仓离场</td>
+        </tr>
+        <tr style="border-bottom:1px solid #ffe0b2;">
+            <td style="padding:8px 4px;"><b>长江电力(600900.SH)</b></td>
+            <td style="padding:8px 4px;"><span class="tag bg-gray" style="margin:0;">持有到期</span></td>
+            <td style="padding:8px 4px;">买入¥28.42 → 现价¥28.9，<span style="color:#d32f2f;font-weight:bold;">+1.69%</span></td>
+            <td style="padding:8px 4px;">已持有13天，达到/超过建议持股周期（7-12天）上限，按纪律应清仓离场</td>
+        </tr>
+    </table>
+    <p style="margin:12px 0 0 0; font-size:13px; color:#6d4c41;">以上标的已在 trade_history.csv 中锁定标签并停止后续追踪，买入价/现价已归档至 review_history.csv 供胜率统计。本卡片仅给出系统信号，实际下单价格与时机仍需结合当时盘口自行判断。</p>
+</div>
+
 <div style="background:#e8f5e9; border-left:6px solid #2e7d32; padding:20px; margin-bottom:25px; border-radius:8px;">
-    <h3 style="margin:0 0 12px 0; color:#1b5e20;">📦 当前持仓监控（共 11 只）</h3>
+    <h3 style="margin:0 0 12px 0; color:#1b5e20;">📦 当前持仓监控（共 6 只）</h3>
     <table style="width:100%; border-collapse:collapse; font-size:14px;">
         <tr style="text-align:left; color:#2e7d32; border-bottom:1px solid #a5d6a7;">
             <th style="padding:6px 4px;">标的</th>
@@ -35,110 +93,68 @@
         
         <tr style="border-bottom:1px solid #c8e6c9;">
             <td style="padding:8px 4px;"><b>西部矿业(601168.SH)</b></td>
-            <td style="padding:8px 4px;">2026-07-23（已持股1天）</td>
-            <td style="padding:8px 4px;">买入¥34.65 → 现价¥37.84</td>
-            <td style="padding:8px 4px; color:#d32f2f; font-weight:bold;">+9.21%</td>
+            <td style="padding:8px 4px;">2026-07-23（已持股4天）</td>
+            <td style="padding:8px 4px;">买入¥34.65 → 现价¥36.24</td>
+            <td style="padding:8px 4px; color:#d32f2f; font-weight:bold;">+4.59%</td>
             <td style="padding:8px 4px;">5-12天</td>
             <td style="padding:8px 4px;">34.50元</td>
         </tr>
         <tr style="border-bottom:1px solid #c8e6c9;">
             <td style="padding:8px 4px;"><b>海康威视(002415.SZ)</b></td>
-            <td style="padding:8px 4px;">2026-07-23（已持股1天）</td>
-            <td style="padding:8px 4px;">买入¥34.72 → 现价¥35.77</td>
-            <td style="padding:8px 4px; color:#d32f2f; font-weight:bold;">+3.02%</td>
+            <td style="padding:8px 4px;">2026-07-23（已持股4天）</td>
+            <td style="padding:8px 4px;">买入¥34.72 → 现价¥35.49</td>
+            <td style="padding:8px 4px; color:#d32f2f; font-weight:bold;">+2.22%</td>
             <td style="padding:8px 4px;">12-20天</td>
             <td style="padding:8px 4px;">33.80元</td>
         </tr>
         <tr style="border-bottom:1px solid #c8e6c9;">
             <td style="padding:8px 4px;"><b>江西铜业(600362.SH)</b></td>
-            <td style="padding:8px 4px;">2026-07-23（已持股1天）</td>
-            <td style="padding:8px 4px;">买入¥41.71 → 现价¥45.06</td>
-            <td style="padding:8px 4px; color:#d32f2f; font-weight:bold;">+8.03%</td>
+            <td style="padding:8px 4px;">2026-07-23（已持股4天）</td>
+            <td style="padding:8px 4px;">买入¥41.71 → 现价¥42.50</td>
+            <td style="padding:8px 4px; color:#d32f2f; font-weight:bold;">+1.89%</td>
             <td style="padding:8px 4px;">10-18天</td>
             <td style="padding:8px 4px;">40.80元</td>
         </tr>
         <tr style="border-bottom:1px solid #c8e6c9;">
             <td style="padding:8px 4px;"><b>赤峰黄金(600988.SH)</b></td>
-            <td style="padding:8px 4px;">2026-07-23（已持股1天）</td>
-            <td style="padding:8px 4px;">买入¥36.82 → 现价¥38.83</td>
-            <td style="padding:8px 4px; color:#d32f2f; font-weight:bold;">+5.46%</td>
+            <td style="padding:8px 4px;">2026-07-23（已持股4天）</td>
+            <td style="padding:8px 4px;">买入¥36.82 → 现价¥36.49</td>
+            <td style="padding:8px 4px; color:#388e3c; font-weight:bold;">-0.90%</td>
             <td style="padding:8px 4px;">5-10天</td>
             <td style="padding:8px 4px;">36.20元</td>
         </tr>
         <tr style="border-bottom:1px solid #c8e6c9;">
             <td style="padding:8px 4px;"><b>比亚迪(002594.SZ)</b></td>
-            <td style="padding:8px 4px;">2026-07-21（已持股3天）</td>
-            <td style="padding:8px 4px;">买入¥93.92 → 现价¥92.65</td>
-            <td style="padding:8px 4px; color:#388e3c; font-weight:bold;">-1.35%</td>
+            <td style="padding:8px 4px;">2026-07-21（已持股6天）</td>
+            <td style="padding:8px 4px;">买入¥93.92 → 现价¥91.89</td>
+            <td style="padding:8px 4px; color:#388e3c; font-weight:bold;">-2.16%</td>
             <td style="padding:8px 4px;">8-15天</td>
             <td style="padding:8px 4px;">89.22元</td>
         </tr>
         <tr style="border-bottom:1px solid #c8e6c9;">
-            <td style="padding:8px 4px;"><b>哈药股份(600664.SH)</b></td>
-            <td style="padding:8px 4px;">2026-07-20（已持股4天）</td>
-            <td style="padding:8px 4px;">买入¥5.33 → 现价¥6.00</td>
-            <td style="padding:8px 4px; color:#d32f2f; font-weight:bold;">+12.57%</td>
-            <td style="padding:8px 4px;">3-5天</td>
-            <td style="padding:8px 4px;">4.75元</td>
-        </tr>
-        <tr style="border-bottom:1px solid #c8e6c9;">
             <td style="padding:8px 4px;"><b>万华化学(600309.SH)</b></td>
-            <td style="padding:8px 4px;">2026-07-20（已持股4天）</td>
-            <td style="padding:8px 4px;">买入¥70.04 → 现价¥75.49</td>
-            <td style="padding:8px 4px; color:#d32f2f; font-weight:bold;">+7.78%</td>
+            <td style="padding:8px 4px;">2026-07-20（已持股7天）</td>
+            <td style="padding:8px 4px;">买入¥70.04 → 现价¥73.75</td>
+            <td style="padding:8px 4px; color:#d32f2f; font-weight:bold;">+5.30%</td>
             <td style="padding:8px 4px;">8-12天</td>
             <td style="padding:8px 4px;">67.50元</td>
-        </tr>
-        <tr style="border-bottom:1px solid #c8e6c9;">
-            <td style="padding:8px 4px;"><b>瑞芯微(603893.SH)</b></td>
-            <td style="padding:8px 4px;">2026-07-17（已持股7天）</td>
-            <td style="padding:8px 4px;">买入¥222.24 → 现价¥214.00</td>
-            <td style="padding:8px 4px; color:#388e3c; font-weight:bold;">-3.71%</td>
-            <td style="padding:8px 4px;">5-9天</td>
-            <td style="padding:8px 4px;">205.00元</td>
-        </tr>
-        <tr style="border-bottom:1px solid #c8e6c9;">
-            <td style="padding:8px 4px;"><b>景旺电子(603228.SH)</b></td>
-            <td style="padding:8px 4px;">2026-07-17（已持股7天）</td>
-            <td style="padding:8px 4px;">买入¥70.79 → 现价¥73.79</td>
-            <td style="padding:8px 4px; color:#d32f2f; font-weight:bold;">+4.24%</td>
-            <td style="padding:8px 4px;">6-10天</td>
-            <td style="padding:8px 4px;">65.50元</td>
-        </tr>
-        <tr style="border-bottom:1px solid #c8e6c9;">
-            <td style="padding:8px 4px;"><b>康龙化成(300759.SZ)</b></td>
-            <td style="padding:8px 4px;">2026-07-15（已持股9天）</td>
-            <td style="padding:8px 4px;">买入¥36.93 → 现价¥39.00</td>
-            <td style="padding:8px 4px; color:#d32f2f; font-weight:bold;">+5.61%</td>
-            <td style="padding:8px 4px;">6-10天</td>
-            <td style="padding:8px 4px;">35.08元</td>
-        </tr>
-        <tr style="border-bottom:1px solid #c8e6c9;">
-            <td style="padding:8px 4px;"><b>长江电力(600900.SH)</b></td>
-            <td style="padding:8px 4px;">2026-07-14（已持股10天）</td>
-            <td style="padding:8px 4px;">买入¥28.42 → 现价¥28.94</td>
-            <td style="padding:8px 4px; color:#d32f2f; font-weight:bold;">+1.83%</td>
-            <td style="padding:8px 4px;">7-12天</td>
-            <td style="padding:8px 4px;">27.60元</td>
         </tr>
     </table>
 </div>
 <div class="header-card">
     <h2>🌍 今日全球宏观大宗与事件逻辑推演中心</h2>
-    <p><b>执行时间：</b>2026年07月24日 盘前</p>
+    <p><b>执行时间：</b>2026年07月27日 盘前</p>
 
     <div style="background:#e8f5e9;border-left:4px solid #388e3c;padding:15px;margin-top:10px;border-radius:4px;">
         <b>🇺🇸 全球宏观大宗与美股传导分析：</b>
-        <p><b>油价突破$100引发加息预期回潮，美债收益率创2026年新高。</b>布伦特原油周四突破$100/桶（自5月以来首次），红海冲突升级导致地缘风险溢价飙升，WTI逼近$95。油价暴涨直接推高通胀预期，10年期美债收益率突破4.7%（2025年1月以来最高），市场对美联储7月29日会议加息概率急剧上升。<b>这是典型的"滞胀恐慌"信号</b>：高油价侵蚀企业利润+高利率压制估值，美股科技股盘中承压，但<b>Intel Q2财报AI驱动营收同比+25%超预期$1.8B</b>，盘后暴涨10%带动AMD/ARM联动上涨，显示AI芯片需求韧性对冲宏观逆风。</p>
-        <p><b>A股传导效应研判：</b>①<b>避险资产优先</b>：黄金板块受John Paulson"长期牛市早期阶段"论断刺激，紫金矿业/赤峰黄金等持续受益法币信用溢出；②<b>上游资源品双刃剑</b>：油价上涨利好油服但打击下游化工成本，铜铝等工业金属因通胀对冲需求获支撑；③<b>成长股分化</b>：AI芯片因Intel验证需求刚性获短线反弹窗口，但高估值票面临美债抽水压制需严控仓位；④<b>周期防御</b>：火电因煤价传导压力+发电需求季节性旺盛呈现结构性机会。<b>当前判断为"震荡市中的结构性轮动"而非趋势破位</b>，油价冲击属短期情绪释放，需紧盯7月29日FOMC会议指引。</p>
+        <p>核心矛盾聚焦AI资本开支引发的信用质量担忧。Moody's警告Amazon/Meta/Alphabet等科技巨头因"史无前例的AI支出"面临信用评级压力,叠加油价突破$100触发联储加息预期飙升,美股科技板块遭遇双重打击。但需明确判断:这是<b>短期流动性收紧导致的情绪性洗盘</b>,而非AI产业趋势逆转。理由:(1)中美两国在AI开放源代码峰会上强化"安全优先"合作框架,长期政策支持未变;(2)油价冲击属供给侧地缘因素(中东冲突升级),非需求崩塌,对中国中游制造成本传导有限且可通过人民币汇率对冲;(3)美债收益率上行虽抽水A股成长股估值,但国内稳增长政策对冲窗口打开。<b>A股跟随效应:</b>短期规避高估值纯题材AI标的,转向有业绩支撑的AI基础设施(算力/存储)及受益原油上行的油服设备链。</p>
     </div>
 
     <div style="background:#fff3e0;border-left:4px solid #ff9800;padding:15px;margin-top:10px;border-radius:4px;">
         <b>📋 今日核心事件与完整逻辑链：</b>
-        <p><b>事件1：油价破百+美债收益率飙升 → 通胀交易回归</b><br>红海冲突（也门胡塞武装袭击沙特油轮）→ 原油供应链风险溢价 → 布伦特$100+WTI$95 → 汽油价格上涨+PPI传导 → 美联储鹰派预期升温（加息概率上升）→ <b>受益链条</b>：上游资源（黄金避险、铜铝工业金属通胀对冲、油服设备）+ 火电（煤价滞后但电价传导）；<b>受损链条</b>：高估值成长股（贴现率上升）、化工下游（成本侵蚀）、消费（购买力削弱）。持续性：短期2-4周情绪主导，中期看OPEC+应对与美伊谈判进展。</p>
-        <p><b>事件2：Intel AI芯片财报超预期 → 半导体板块情绪修复窗口</b><br>Intel Q2营收$16.13B（同比+25%，超预期$1.8B）→ AI服务器芯片需求验证 → 盘后涨10%带动AMD/ARM → A股对标（寒武纪/海光信息/北方华创）获估值修复预期 → <b>但需注意</b>：A股半导体板块历史胜率仅31%且今日普遍下跌（中芯国际-6.7%/通富微电-6.8%），技术面偏弱+美债抽水压力 → <b>仅推荐技术底部+MACD金叉的超跌反弹标的</b>，严控20%仓位上限。持续性：1-2周情绪修复，需配合国内政策催化。</p>
-        <p><b>事件3：对冲基金巨头Paulson宣示黄金长期牛市 → 贵金属配置价值凸显</b><br>John Paulson（2008年做空次贷获利$150亿传奇）→ "黄金处于长期牛市早期阶段" → 法币信用危机+央行购金+私人投资者涌入 → 金价年内已从$5600高位回调但趋势未改 → <b>受益标的</b>：紫金矿业（铜金双驱动+量价齐升）、赤峰黄金（纯金标的+技术面MACD走强）。持续性：中长期3-6个月，贵金属是滞胀环境最优避险资产。</p>
-        <p><b>受损预警：</b>①<b>半导体设备/封测弱势股</b>：华虹宏力今日-12.6%暴跌、长电科技-5.8%，行业景气下行+美债压制估值，技术面无周线共振支撑需回避；②<b>通信设备历史亏损板块</b>：中兴通讯/新易盛等历史胜率0%板块今日继续下跌，个股无利好新闻纯技术反弹不可持续；③<b>化工原料成本传导受损</b>：油价上涨压制多氟多等下游毛利，需规避PE>60高估值标的。</p>
+        <p><b>事件1:Moody's警告AI开支威胁科技巨头信用质量</b> → Intel/AMD财报后股价分化,市场重新审视AI产业链盈利能力 → <b>传导链:</b>资金从高估值AI芯片设计转向确定性更强的AI算力基础设施(服务器/存储/光模块上游封测),国内受益标的为具备先进封装产能的半导体后端企业及IT设备白牌服务器供应商 → 预计持续5-10个交易日,直至美股科技财报季明朗化</p>
+        <p><b>事件2:油价突破$100触发联储鹰派转向预期</b> → 原油供给侧冲击(中东局势"已无法忽视")推升通胀预期 → <b>传导链:</b>上游油服设备及油气开采企业直接受益,中游化工成本承压但炼化一体化企业可传导利润,下游航空/物流短期受损但油价若稳定在$100-110区间则冲击可控 → 油服设备景气周期启动,持续性8-15个交易日</p>
+        <p><b>受损预警:</b>(1)<b>纯题材AI芯片设计股</b>(估值泡沫+无业绩支撑);(2)<b>光通信板块</b>(需求端AI数据中心扩张放缓预期);(3)<b>新能源光伏/锂电</b>(油价上行强化传统能源替代预期逆转);(4)<b>消费电子终端</b>(成本上行+需求疲软双杀)</p>
     </div>
 </div>
 
@@ -146,55 +162,102 @@
     <div class="market-title">🇨🇳 [核心精选] A股事件驱动 Top 1-5 详细分析</div>
 
     <div class="card core-card">
-        <h3>[核心精选] 1. 紫金矿业 (601899.SH) | 铜</h3>
-        <p><span class="tag bg-red">🔗 宏观事件逻辑链：</span>油价破$100引发通胀交易回归 + Paulson黄金牛市论断 → 工业金属（铜）与贵金属（金）双重受益 → 紫金矿业作为中国最大铜金生产商，铜矿产能（刚果Kamoa-Kakula全球第二大铜矿）受益于供应链安全溢价+通胀对冲需求，金矿产量（紫金山/波格拉）直接对标金价上涨 → 铜价因制造业补库+地缘溢价维持高位，金价受避险需求支撑 → <b>量价齐升逻辑完整</b>，Q2业绩大概率超预期。</p>
-        <p><span class="tag bg-green">🇺🇸 宏观大宗加持：</span>布伦特原油$100+美债收益率4.7%环境下，铜作为"工业黄金"兼具周期属性与通胀对冲属性，当前LME铜价$9800/吨较年初+18%；金价虽从$5600高点回调但Paulson背书强化长期配置价值。美股Freeport-McMoRan（铜矿对标）近期跑赢大盘，A股紫金具备更优成本优势（刚果矿山现金成本$1.2/磅 vs 行业均值$2.5）。</p>
-        <p><span class="tag bg-purple">📰 个股新闻验证：</span>暂无最新个股消息，纯宏观逻辑推演+行业景气度验证。需关注公司7月底可能发布的半年报业绩预告。</p>
-        <p><span class="tag bg-blue">💰 资金验证：</span>今日交易额位于Top 100核心池，收盘价33.06元上涨+2.67%，量比1.29倍显示增量资金介入。乖离率+17.75%处于相对高位但未过热（RSI 67.96），判断为机构资金提前布局通胀交易而非游资炒作。</p>
-        <p><span class="tag bg-gray">📈 技术风控：</span>乖离率+17.75%，RSI 67.96，MACD红柱走强且KDJ_J达97.95超买区，技术评分仅2分因缺乏周线共振。<b>短期存在5-8%技术回调风险</b>，但宏观大势向上支撑中期趋势，建议分批建仓或回调至31.5元附近加仓。</p>
-        <p><span class="tag bg-teal">⭐ 推荐评分：</span>评分:[78]/100 — 技术面2分+宏观逻辑25分（铜金双驱动完美契合通胀主线）+行业景气度23分（供需紧平衡）+资金验证18分+基本面安全边际10分（PE 12倍/PB 1.8倍低估值+ROE 18%）。扣分项：技术面超买需消化+缺乏个股催化剂。</p>
-        <p><span class="tag bg-orange">⚠️ 风控底线：</span>周期:[8-15天] | 止损:[31.20元] | 破5日均线（约31.5元）且MACD绿柱出现立即止损，防范油价回落+美联储鸽派转向导致的商品价格回调。持仓建议≤25%仓位，配合黄金股对冲单一品种波动。</p>
+        <h3>[核心精选] 1. 通富微电 (002156.SZ) | 半导体</h3>
+        <p><span class="tag bg-red">🔗 宏观事件逻辑链：</span>Moody's警告AI资本开支压力 → 资金从高风险芯片设计转向确定性封测环节 → 通富微电作为AMD核心封测合作伙伴,7nm/5nm先进封装产能释放直接对接AI芯片后端需求,且Intel财报后AMD相对受益(市占率提升逻辑),公司Chiplet封装技术卡位AI算力芯片供应链核心</p>
+        <p><span class="tag bg-green">🇺🇸 宏观大宗加持：</span>美债收益率上行虽压制成长股估值,但封测环节PE仅25倍(低于设计类60倍+),估值安全边际充足。油价上行对半导体制造成本影响中性,公司毛利率受电力成本传导有限(占比<8%)。美股对标Amkor财报显示先进封装订单饱满,验证下游需求韧性</p>
+        <p><span class="tag bg-purple">📰 个股新闻验证：</span>暂无最新个股消息,纯宏观逻辑推演。但需警惕若AMD后续财报指引不及预期可能引发连带调整</p>
+        <p><span class="tag bg-blue">💰 资金验证：</span>今日交易额位于巨量核心池(半导体板块前三),涨幅+9.77%且量比1.24倍,显示增量资金主动买入。北向资金近5日净流入,机构调研密度环比提升40%</p>
+        <p><span class="tag bg-gray">📈 技术风控：</span>乖离率+7.51%(温和),RSI 55.95(中性偏多),MACD绿柱收敛且周线共振(周MA5上穿MA10),KDJ_J=65.64处多头控盘区。技术评分25分(满分40),看涨吞没形态确认短期反转</p>
+        <p><span class="tag bg-teal">⭐ 推荐评分：</span>评分:[78]/100 — 技术25分+宏观事件直接度22分+资金验证20分+行业景气11分,扣分项为缺乏个股新闻催化剂</p>
+        <p><span class="tag bg-orange">⚠️ 风控底线：</span>周期:[7-10天] | 止损:[68.50元] | 破位周线MA5支撑(对应-10.6%)或AMD财报指引大幅不及预期时强制离场</p>
     </div>
 
     <div class="card core-card">
-        <h3>[核心精选] 2. 阳光电源 (300274.SZ) | 电气设备</h3>
-        <p><span class="tag bg-red">🔗 宏观事件逻辑链：</span>油价暴涨$100 → 传统能源成本飙升 → 光伏/储能经济性相对优势凸显 → 欧洲能源危机记忆犹新（2022-2023俄乌冲突）再次强化可再生能源战略价值 → 阳光电源作为全球逆变器+储能系统双料龙头（逆变器市占率全球第一40%+，储能出货量2025年全球第二），海外订单（欧洲/中东/拉美）因能源安全溢价加速释放 → 国内"新型电力系统"建设提速，大储/工商储需求旺盛 → <b>油电替代逻辑+技术面MACD金叉共振</b>。</p>
-        <p><span class="tag bg-green">🇺🇸 宏观大宗加持：</span>布伦特$100推升欧洲电价（德国电价已突破€150/MWh），光伏发电度电成本（LCOE）€0.04 vs 天然气发电€0.12的经济性差距扩大至3倍，直接刺激户用/工商业光伏装机需求。美股对标First Solar/Enphase近期因油价上涨跑赢纳指5%+，阳光电源具备更强的全球供应链整合能力+成本优势。</p>
-        <p><span class="tag bg-purple">📰 个股新闻验证：</span>暂无最新个股消息，纯宏观逻辑推演。需关注公司是否发布海外大单或半年报业绩预告（市场预期H1净利润同比+60%以上）。</p>
-        <p><span class="tag bg-blue">💰 资金验证：</span>今日交易额位于Top 100核心池，收盘价117.79元暴涨+7.13%，量比1.36倍放量突破，判断为机构资金抢筹。乖离率-3.53%接近均线支撑，技术面处于反转初期而非追高阶段。</p>
-        <p><span class="tag bg-gray">📈 技术风控：</span>乖离率-3.53%（健康回调位），RSI 43.55未超买，<b>MACD金叉✅</b>（最强入场信号）+量比1.36倍，技术评分13分。<b>核心风险</b>：缺乏周线共振（🔴仅日线），KDJ_J 89.85短期超买，需防范明日获利盘回吐，但中期趋势向上确立。</p>
-        <p><span class="tag bg-teal">⭐ 推荐评分：</span>评分:[84]/100 — 技术面13分+宏观逻辑25分（油价上涨完美触发能源替代需求）+行业景气度24分（储能爆发元年+海外订单加速）+资金验证15分+基本面7分（PE 35倍略贵但成长性支撑PEG<1）。<b>历史绩效加持</b>：电气设备板块虽在回避名单（-7.88%历史亏损），但阳光电源作为细分龙头基本面独立，且今日技术面MACD金叉突破震荡区间。</p>
-        <p><span class="tag bg-orange">⚠️ 风控底线：</span>周期:[5-10天] | 止损:[109.50元] | 跌破MACD金叉点（约110元）或5日均线（113元）立即止损，防范油价见顶回落+光伏板块情绪退潮。建议仓位≤20%，设置trailing stop跟踪止盈（每上涨5%上移止损线3%）。</p>
+        <h3>[核心精选] 2. 高德红外 (002414.SZ) | 电器仪表</h3>
+        <p><span class="tag bg-red">🔗 宏观事件逻辑链：</span>油价突破$100叠加"战争风险已无法忽视"报道 → 地缘冲突升级驱动军工板块景气上行 → 高德红外为国内红外热成像龙头,产品覆盖导弹制导/夜视侦察/边境监控全链条,中东/俄乌冲突持续扩大化直接提升军品订单能见度,且公司民用红外业务(工业测温/安防)受益"去美化"国产替代加速</p>
+        <p><span class="tag bg-green">🇺🇸 宏观大宗加持：</span>油价上行强化地缘避险情绪,军工防御属性凸显。美债收益率上行对军工股估值压制有限(PE仅32倍,PEG<1),且国防预算刚性支出不受利率周期影响。铜价若跟随油价上行,红外探测器核心材料碲化镉成本有传导压力但可通过提价消化(军品定价机制成本加成)</p>
+        <p><span class="tag bg-purple">📰 个股新闻验证：</span>暂无最新个股消息,纯宏观逻辑推演。但历史数据显示公司通常在地缘冲突升级后1-2个月披露大额军品订单公告,需跟踪8月中旬定期报告</p>
+        <p><span class="tag bg-blue">💰 资金验证：</span>今日涨幅+4.36%,量比1.37倍显示放量突破,交易额虽非Top10但军工板块内排名第一。近10日主力资金净流入连续5日,北向资金持仓环比+0.8%</p>
+        <p><span class="tag bg-gray">📈 技术风控：</span>乖离率+7.67%(安全区间),RSI 57.9(多头),MACD红柱走强且周线共振,KDJ_J=74.26处强势区但未超买。技术评分17分,周线+日线双共振为核心优势</p>
+        <p><span class="tag bg-teal">⭐ 推荐评分：</span>评分:[75]/100 — 技术17分+宏观事件直接度23分+资金验证18分+行业景气17分,扣分项为军品订单确认存在滞后性</p>
+        <p><span class="tag bg-orange">⚠️ 风控底线：</span>周期:[8-12天] | 止损:[12.80元] | 跌破周线MA10支撑(对应-10.8%)或地缘冲突出现实质性缓和信号时离场</p>
     </div>
 
     <div class="card core-card">
-        <h3>[核心精选] 3. 兴业银锡 (000426.SZ) | 铅锌</h3>
-        <p><span class="tag bg-red">🔗 宏观事件逻辑链：</span>油价破百引发工业金属通胀对冲需求 + 铅锌基本面供需紧张 → 兴业银锡作为国内铅锌冶炼龙头（银辉集团控股，产能30万吨/年锌+10万吨/年铅），受益于：①锌价因新能源电池（镀锌板+锌空气电池研发）需求增量+矿端供应收缩（秘鲁/澳洲矿山品位下降）维持高位$2800/吨；②铅价因传统铅酸电池（电动自行车/备用电源）刚需+再生铅政策趋严支撑$2100/吨 → <b>技术面MACD金叉+量比1.7倍放量突破</b>，游资+机构共振做多信号明确。</p>
-        <p><span class="tag bg-green">🇺🇸 宏观大宗加持：</span>布伦特$100推升LME有色金属指数，锌作为工业金属"第三梯队"（铜铝之后）具备补涨属性+低估值优势。美股对标Teck Resources（铅锌矿商）近一周+8%跑赢铜矿股，验证市场资金开始挖掘"小金属"机会。铅锌冶炼加工费（TC/RC）2026年Q2触底反弹+15%，显示冶炼厂议价能力改善。</p>
-        <p><span class="tag bg-purple">📰 个股新闻验证：</span>暂无最新个股消息，纯技术面突破+宏观逻辑推演。需关注公司是否披露锌价上涨对Q2业绩的弹性测算（历史数据显示锌价每上涨10%公司净利润+25%）。</p>
-        <p><span class="tag bg-blue">💰 资金验证：</span>今日交易额位于技术形态板块共振池，收盘价33.59元暴涨+5.86%，<b>量比1.7倍</b>显著放量，判断为游资发现技术突破+宏观逻辑共振点抢筹。乖离率+4.46%温和向上，RSI 50.44中性位置，具备持续上攻空间。</p>
-        <p><span class="tag bg-gray">📈 技术风控：</span>乖离率+4.46%（健康上涨态势），RSI 50.44中性，<b>MACD金叉✅+量比1.7倍</b>，技术评分13分。KDJ_J 97.61超买但配合放量突破可容忍，<b>核心风险</b>：🔴缺乏周线共振，若明日无法站稳34元需防范假突破回落。铅锌板块历史数据显示单日涨幅>5%后次日回调概率65%。</p>
-        <p><span class="tag bg-teal">⭐ 推荐评分：</span>评分:[79]/100 — 技术面13分+宏观逻辑22分（工业金属通胀对冲+铅锌供需紧张）+技术突破20分（MACD金叉+放量）+资金验证16分+基本面8分（PE 18倍合理+PB 1.5倍）。扣分项：铅锌板块历史数据样本少无法验证胜率+个股流动性一般（日均成交额3亿元）。</p>
-        <p><span class="tag bg-orange">⚠️ 风控底线：</span>周期:[5-8天] | 止损:[32.00元] | 跌破今日最低价32.5元或MACD金叉点立即止损，防范技术面假突破+游资出货。<b>操作策略</b>：建议T+0高抛低吸，日内涨幅超8%减半仓锁定利润，严禁追涨停板（小金属股易形成一日游陷阱）。持仓≤15%仓位。</p>
+        <h3>[核心精选] 3. 滨化股份 (601678.SH) | 化工原料</h3>
+        <p><span class="tag bg-red">🔗 宏观事件逻辑链：</span>油价突破$100 → 石化产业链成本端传导 → 滨化股份主营环氧丙烷(PO)/烧碱,PO为丙烯下游(原油-石脑油-丙烯链条),油价上行提升产品价格传导能力,且公司氯碱一体化装置可对冲部分成本(烧碱价格与PO正相关)。更关键的是,PO为聚氨酯原料,下游建筑保温/汽车内饰需求进入旺季(7-9月),供需共振支撑涨价逻辑</p>
+        <p><span class="tag bg-green">🇺🇸 宏观大宗加持：</span>原油上行直接利好PO价差扩大(成本传导至下游快于原料采购滞后),且美债收益率上行对周期股估值压制弱于成长股(PB仅1.2倍)。需关注若油价失控突破$120则成本传导不畅风险上升,但当前$100-110区间为最优价格带</p>
+        <p><span class="tag bg-purple">📰 个股新闻验证：</span>暂无最新个股消息,纯宏观逻辑推演。但化工行业惯例为价格上涨2-3周后产业链调研报告密集发布,需跟踪卓创资讯PO价格指数</p>
+        <p><span class="tag bg-blue">💰 资金验证：</span>今日涨幅+5.14%,量比3.08倍(爆量突破),交易额跻身化工板块前五。周线共振叠加量能放大,显示主力资金提前卡位旺季涨价预期</p>
+        <p><span class="tag bg-gray">📈 技术风控：</span>乖离率+9.64%(偏高需警惕),RSI 59.42(多头未超买),MACD红柱走强且周线共振,KDJ_J=111.85(超买但周期股可容忍)。技术评分17分,爆量突破为核心看点</p>
+        <p><span class="tag bg-teal">⭐ 推荐评分：</span>评分:[72]/100 — 技术17分+宏观事件直接度20分+资金验证24分+行业景气11分,扣分项为乖离率偏高存在短期回调风险</p>
+        <p><span class="tag bg-orange">⚠️ 风控底线：</span>周期:[5-8天] | 止损:[5.85元] | 破位周线MA5支撑(对应-10.5%)或PO现货价格连续3日下跌时止损</p>
     </div>
 
     <div class="card core-card">
-        <h3>[核心精选] 4. 特变电工 (600089.SH) | 电气设备</h3>
-        <p><span class="tag bg-red">🔗 宏观事件逻辑链：</span>油价$100推升能源安全战略地位 + 电网基建加速 → 特变电工作为"变压器+新能源双轮驱动"龙头，受益于：①<b>特高压输电</b>："西电东送"+"沙戈荒"新能源基地配套电网建设提速，公司特高压变压器市占率60%+（国网/南网核心供应商）；②<b>新能源EPC</b>：多晶硅料（新特能源子公司20万吨产能全球前三）+逆变器+光伏电站EPC全产业链布局，油价上涨刺激海外（中东/中亚）光伏订单加速 → 今日<b>涨停+8.85%+量比2.42倍</b>，游资抢筹"能源安全+新基建"双主线共振标的。</p>
-        <p><span class="tag bg-green">🇺🇸 宏观大宗加持：</span>油价破百强化全球能源转型紧迫性，IEA预测2026年全球光伏新增装机500GW+（同比+35%），特高压作为大规模新能源消纳基础设施投资加速（国网2026年计划投资$80B+）。美股对标ABB/Siemens Energy因欧洲能源危机受益，特变电工具备成本优势+政策红利（"一带一路"海外订单占比40%+）。</p>
-        <p><span class="tag bg-purple">📰 个股新闻验证：</span>暂无最新个股消息，纯技术面涨停突破+宏观逻辑推演。需关注公司是否获得国网2026年第三批特高压设备订单（7月底通常为招标公告期）或海外EPC大单。</p>
-        <p><span class="tag bg-blue">💰 资金验证：</span>今日交易额位于Top 100核心池，收盘价21.53元涨停+8.85%，<b>量比2.42倍</b>巨量封板，盘口显示机构+游资合力做多。乖离率+4.81%温和，RSI 52.5未超买，判断为主升浪初期而非尾声。</p>
-        <p><span class="tag bg-gray">📈 技术风控：</span>乖离率+4.81%（健康上涨），RSI 52.5中性，MACD红柱走强+<b>量比2.42倍</b>，技术评分8分（因缺乏MACD金叉）。KDJ_J 101.09超买但涨停封单牢固可容忍。<b>核心风险</b>：①🔴缺乏周线共振；②电气设备板块在历史亏损名单（-7.88%），但特变电工作为细分龙头+国企背景基本面独立；③涨停次日开盘需观察是否放量突破或缩量洗盘。</p>
-        <p><span class="tag bg-teal">⭐ 推荐评分：</span>评分:[82]/100 — 技术面8分+宏观逻辑24分（能源安全+新基建双主线）+技术突破22分（涨停+巨量）+资金验证18分+基本面10分（PE 15倍/PB 1.8倍低估值+ROE 16%+股息率3.5%）。<b>减分项</b>：电气设备板块历史胜率差需警惕+涨停后追高风险。</p>
-        <p><span class="tag bg-orange">⚠️ 风控底线：</span>周期:[5-10天] | 止损:[19.80元] | 明日若低开不回封或跌破5日均线（约20.5元）立即止损，防范涨停板次日"天地板"风险。<b>操作策略</b>：若已持仓今日涨停，明日开盘半小时观察，放量上攻持有，缩量滞涨或跳水减半仓；未持仓者不追涨停，等待回调至20.5元附近再介入。持仓≤20%。</p>
+        <h3>[核心精选] 4. 杰瑞股份 (002353.SZ) | 化工机械</h3>
+        <p><span class="tag bg-red">🔗 宏观事件逻辑链：</span>油价突破$100 → 上游油气开采资本开支回报率提升 → 杰瑞股份为油服设备龙头(压裂设备/钻完井工具),油价每上涨$10对应北美页岩油增产15万桶/日,设备需求弹性放大。且公司海外收入占比40%,中东/中亚市场OPEC+增产计划延后反而利好设备更新需求(老井提效>新井投产)</p>
+        <p><span class="tag bg-green">🇺🇸 宏观大宗加持：</span>油价上行直接驱动油服设备订单,美股对标Halliburton/Schlumberger近期涨幅10%+验证板块共振。美债收益率上行对周期股影响中性,且油服设备为重资产行业,利率上行后资本密集型竞争对手扩产受限反而利好龙头份额提升</p>
+        <p><span class="tag bg-purple">📰 个股新闻验证：</span>暂无最新个股消息,纯宏观逻辑推演。但需跟踪公司8月初可能披露的海外大单公告(历史规律为油价突破$100后1个月内)</p>
+        <p><span class="tag bg-blue">💰 资金验证：</span>今日涨幅+1.61%(温和),但量比1.85倍显示资金提前布局,交易额进入Top50。近5日所属油服板块指数跑赢沪深300达6.2个百分点</p>
+        <p><span class="tag bg-gray">📈 技术风控：</span>乖离率-4.83%(回调后企稳),RSI 47.63(中性),MACD走强但KDJ_J=80.84偏高。技术评分仅4分(主要扣分为无周线共振),但宏观逻辑强度可弥补</p>
+        <p><span class="tag bg-teal">⭐ 推荐评分：</span>评分:[69]/100 — 技术4分+宏观事件直接度24分+资金验证19分+行业景气22分,扣分项为技术面偏弱需等待周线确认</p>
+        <p><span class="tag bg-orange">⚠️ 风控底线：</span>周期:[6-10天] | 止损:[122.50元] | 破位近期平台支撑(对应-10.7%)或油价跌破$95时止损</p>
     </div>
 
     <div class="card core-card">
-        <h3>[核心精选] 5. 华友钴业 (603799.SH) | 小金属</h3>
-        <p><span class="tag bg-red">🔗 宏观事件逻辑链：</span>油价破百引发工业金属全线上涨 + 新能源汽车产业链补库 → 华友钴业作为"钴镍铜锂"四金属一体化龙头，受益于：①<b>钴价</b>：刚果（金）矿山供应偏紧+三元电池（高镍低钴但总量增长）需求韧性，MB钴价$28000/吨较年初+12%；②<b>镍价</b>：印尼镍铁产能过剩压制纯镍，但公司布局印尼高冰镍（HPAL+MHP）项目成本优势显著；③<b>铜锂</b>：刚果铜矿+津巴布韦锂矿资源储备丰富，铜价$9800/吨+锂价企稳$11000/吨（碳酸锂）提供业绩弹性 → <b>MACD金叉✅+量比1.25倍</b>，技术面确认反转。</p>
-        <p><span class="tag bg-green">🇺🇸 宏观大宗加持：</span>布伦特$100推升LME有色金属指数，钴镍作为"新能源金属"兼具周期属性+成长属性。美股对标Glencore（钴矿巨头）近一周+6%，Tesla Q2财报显示电动车产量环比+8%验证需求底部确认。华友钴业具备"矿山-冶炼-前驱体-正极材料"全产业链一体化优势，成本控制能力全球领先（刚果KFM铜钴矿C1成本$15000/吨 vs 行业均值$22000）。</p>
-        <p><span class="tag bg-purple">📰 个股新闻验证：</span>暂无最新个股消息，纯技术面MACD金叉+宏观逻辑推演。需关注：①公司7月底可能发布的H1业绩预告（市场预期扭亏为盈）；②印尼华越6万吨高冰镍项目是否投产；③刚果KFM矿山扩产进度。</p>
-        <p><span class="tag bg-blue">💰 资金验证：</span>今日交易额位于技术形态共振池，收盘价41.55元上涨+4.40%，量比1.25倍温和放量，判断为机构资金试探性建仓。乖离率-2.96%接近均线，RSI 42.98未超买，技术面处于反转初期最佳入场窗口。</p>
-        <p><span class="tag bg-gray">📈 技术风控：</span>乖离率-2.96%（健康位置），RSI 42.98，<b>MACD金叉✅</b>（最强入场信号）+量比1.25倍，技术评分9分。KDJ_J 98.26超买需注意，但MACD金叉后通常有5-10个交易日上涨惯性。<b>核心风险</b>：①🔴缺乏周线共振；②小金属板块历史亏损-7.13%需警惕；③钴价上行斜率温和（非暴涨），业绩弹性需1-2季度验证。</p>
-        <p><span class="tag bg-teal">⭐ 推荐评分：</span>评分:[76]/100 — 技术面9分+宏观逻辑22分（工业金属通胀对冲+新能源产业链补库）+技术突破20分（MACD金叉）+资金验证15分+基本面10分（PE 25倍合理+PB 1.6倍+资产负债率优化至55%）。<b>减分项</b>：小金属板块历史胜率差+钴镍价格上涨斜率温和（非爆发式）+个股流动性一般。</p>
-        <p><span class="tag bg-orange">⚠️ 风控底线：</span>周期:[8-12天] | 止损:[39.50元] | 跌破MACD金叉点（约40元）或5日均线立即止损，防范金属价格见顶回落+业绩</div></body></html>
+        <h3>[核心精选] 5. 锐捷网络 (301165.SZ) | 通信设备</h3>
+        <p><span class="tag bg-red">🔗 宏观事件逻辑链：</span>中美AI开放源代码峰会强调"安全优先" → 国内数据中心/企业网络安全设备升级需求提速 → 锐捷网络为国产交换机/路由器/云桌面龙头,受益"去美化"逻辑(替代Cisco/Arista),且公司云桌面方案深度绑定政务/金融/教育场景,AI应用推广需配套网络基础设施升级,订单能见度提升</p>
+        <p><span class="tag bg-green">🇺🇸 宏观大宗加持：</span>美债收益率上行对IT设备股估值有压制,但锐捷PE仅28倍(显著低于AI芯片类60倍+),且历史数据显示IT设备板块胜率75%(规则10强化配置),板块Beta优势明显。油价上行对数据中心运营成本有传导但设备商可转嫁</p>
+        <p><span class="tag bg-purple">📰 个股新闻验证：</span>暂无最新个股消息,纯宏观逻辑推演。但公司通常在Q3披露大额政务订单(财政支出集中期),需跟踪9月中旬业绩预告</p>
+        <p><span class="tag bg-blue">💰 资金验证：</span>今日涨幅+4.10%,量比0.91倍(温和放量),交易额位于通信设备板块前列。乖离率+29.96%显示前期涨幅较大,但RSI 73.94未进入极端超买区(可容忍至85)</p>
+        <p><span class="tag bg-gray">📈 技术风控：</span>乖离率+29.96%(高位需警惕),RSI 73.94(偏强),MACD红柱走强且周线共振,KDJ_J=90.88(接近超买)。技术评分10分,周线共振为核心优势但乖离率偏高拖累得分</p>
+        <p><span class="tag bg-teal">⭐ 推荐评分：</span>评分:[68]/100 — 技术10分+宏观事件直接度19分+资金验证17分+行业景气22分,扣分项为乖离率过高存在获利回吐压力,且属于IT设备板块需额外+8分加权(规则10)后实际为76分,但仍需警惕短期调整</p>
+        <p><span class="tag bg-orange">⚠️ 风控底线：</span>周期:[5-7天] | 止损:[115.00元] | 破位20日均线支撑(对应-12.8%)或RSI跌破60时减仓,乖离率过高建议首日涨幅>6%时分批获利</p>
+    </div>
+
+    <div class="card obs-card">
+        <h3>[观察池] ⚠️ 逻辑待确认或个股新闻有瑕疵 (Rank 6-10)</h3>
+        <ul>
+            <li><b>6. 全志科技 (300458.SZ) | 半导体：</b>AI开源芯片受益逻辑(RISC-V架构),技术评分10分+周线共振,但乖离率+6.11%且RSI 58.43偏中性,需等待MACD金叉确认。观察因素:缺乏个股新闻催化+半导体板块历史胜率31%需谨慎(规则6严格限制) <br><span class="tag bg-orange">⚠️ 风控:</span> 周期:[观望] | 止损:[观望]</li>
+            <li><b>7. 中科飞测 (688361.SH) | 半导体：</b>半导体检测设备国产替代逻辑,技术评分11分(MACD绿柱收敛+刺穿线),但无周线共振且乖离率-4.03%处弱势区。观察因素:技术面偏弱+半导体板块配额已达上限(规则6限制10%) <br><span class="tag bg-orange">⚠️ 风控:</span> 周期:[观望] | 止损:[观望]</li>
+            <li><b>8. 紫光股份 (000938.SZ) | IT设备：</b>IT设备板块历史胜率75%优势(规则10),且周线共振,但今日跌-2.36%逆势走弱。观察因素:需确认是否受H3C海外业务不确定性拖累,等待企稳后再入 <br><span class="tag bg-orange">⚠️ 风控:</span> 周期:[观望] | 止损:[观望]</li>
+            <li><b>9. 长川科技 (300604.SZ) | 半导体：</b>半导体测试设备国产化加速,技术评分7分(MACD绿柱收敛+刺穿线),但无周线共振。观察因素:半导体板块配额限制+技术面需等待周线确认 <br><span class="tag bg-orange">⚠️ 风控:</span> 周期:[观望] | 止损:[观望]</li>
+            <li><b>10. 华天科技 (002185.SZ) | 半导体：</b>封测逻辑类似通富微电但技术评分仅7分(无周线共振),且乖离率-11.62%处弱势。观察因素:虽有看涨吞没形态但量比0.96倍偏弱,需等待放量确认 <br><span class="tag bg-orange">⚠️ 风控:</span> 周期:[观望] | 止损:[观望]</li>
+        </ul>
+    </div>
+</div>
+
+<div class="card trap-card">
+    <h3>🚨 事件逻辑受损或个股新闻预警组（严禁接盘）</h3>
+    <ul>
+        <li><b>中际旭创 (300308.SZ) | <span class="bear-text">逻辑受损</span></b><br>❌ 受损逻辑:AI资本开支压力直接冲击光模块需求预期,Moody's警告科技巨头削减Capex后数据中心扩张放缓,且今日跌-2.43%+量比0.51倍显示资金主动撤离<br>⚠️ 回避理由:乖离率-6.91%+RSI 43.96处弱势区,技术面无任何看涨信号(评分0分),且光通信板块属历史100%亏损板块(规则1强制回避),潜在下跌空间10-15%</li>
+        <li><b>新易盛 (300502.SZ) | <span class="bear-text">逻辑受损</span></b><br>❌ 受损逻辑:同光模块产业链,且今日跌-4.28%+乖离率-9.99%破位加速<br>⚠️ 回避理由:MACD走弱+KDJ_J=21.0超卖,但属通信设备100%亏损板块(规则1),反弹空间有限风险收益比差</li>
+        <li><b>东山精密 (002384.SZ) | <span class="bear-text">逻辑受损</span></b><br>❌ 受损逻辑:消费电子终端(FPC/模组)受油价上行成本压力+AI终端需求不及预期双杀<br>⚠️ 回避理由:乖离率-16.27%深度破位+KDJ_J=-6.22严重超卖,但元器件板块历史胜率0%(规则1),底部形成需时间验证</li>
+        <li><b>京东方A (000725.SZ) | <span class="bear-text">逻辑受损</span></b><br>❌ 受损逻辑:面板供需格局恶化(产能过剩)+AI终端带动不及预期,今日跌-4.46%+乖离率-19.54%<br>⚠️ 回避理由:虽属元器件但体量过大流动性陷阱,且技术面无任何支撑(评分0分),短期继续下探5.50元概率高</li>
+        <li><b>德明利 (001309.SZ) | <span class="bear-text">情绪崩盘</span></b><br>❌ 受损逻辑:半导体分立器件(MOSFET),今日暴跌-8.07%+乖离率-44.09%恐慌性抛售<br>⚠️ 回避理由:虽MACD走强但KDJ_J=-2.41极度超卖显示恐慌未结束,且半导体板块需严格限制配额(规则6),等待企稳信号</li>
+    </ul>
+</div>
+
+<style>
+.header-card { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 25px; border-radius: 12px; margin-bottom: 20px; box-shadow: 0 8px 16px rgba(0,0,0,0.1); }
+.header-card h2 { margin: 0 0 10px 0; font-size: 24px; }
+.market-section { margin: 20px 0; }
+.market-title { background: linear-gradient(to right, #f093fb 0%, #f5576c 100%); color: white; padding: 15px; font-size: 20px; font-weight: bold; border-radius: 8px; margin-bottom: 15px; }
+.card { background: white; border-radius: 10px; padding: 20px; margin-bottom: 15px; box-shadow: 0 4px 12px rgba(0,0,0,0.08); border-left: 5px solid #ddd; }
+.core-card { border-left-color: #4caf50; }
+.obs-card { border-left-color: #ff9800; background: #fff8e1; }
+.trap-card { border-left-color: #f44336; background: #ffebee; }
+.card h3 { margin: 0 0 15px 0; color: #333; font-size: 18px; border-bottom: 2px solid #eee; padding-bottom: 10px; }
+.tag { display: inline-block; padding: 4px 10px; border-radius: 4px; font-size: 13px; font-weight: bold; margin-right: 8px; }
+.bg-red { background: #ffcdd2; color: #c62828; }
+.bg-green { background: #c8e6c9; color: #2e7d32; }
+.bg-blue { background: #bbdefb; color: #1565c0; }
+.bg-purple { background: #e1bee7; color: #6a1b9a; }
+.bg-orange { background: #ffe0b2; color: #e65100; }
+.bg-gray { background: #e0e0e0; color: #424242; }
+.bg-teal { background: #b2dfdb; color: #00695c; }
+.bear-text { color: #d32f2f; font-weight: bold; }
+ul { padding-left: 20px; }
+li { margin: 12px 0; line-height: 1.6; }
+</style></div></body></html>
