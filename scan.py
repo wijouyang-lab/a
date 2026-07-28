@@ -1616,7 +1616,8 @@ if __name__ == "__main__":
 
     sell_signal_card_html = build_sell_signal_card(removed_tickers_macro, rule_sell_signals)
 
-    current_holdings_card_html = build_current_holdings_card(latest_price_map)
+    # 当前持仓监控卡片已取消在盘前邮件中展示（build_current_holdings_card 函数保留，未来如需恢复可直接调用）
+    current_holdings_card_html = ""
 
     us_sector_text = get_us_sector_performance()
 
