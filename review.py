@@ -192,36 +192,7 @@ for ticker, group in recent_picks.groupby('Ticker'):
 
     hold_days = parse_hold_days(hold_period_str)
     if hold_days is None:
-        print(f"⚠️ {ticker} Hold_Period=N/A，仅追踪持仓状态，不做到期判断")
-        rec_price = float(first_row['Close_Price'])
-        rec_date_str = first_row['Date'].strftime('%Y-%m-%d')
-        is_new_today = (rec_date_str == get_bj_time().strftime('%Y-%m-%d'))
-        today_open_price = None
-        cur_price = price_map_today.get(ticker) or get_price_on_date(ticker, get_bj_time().strftime('%Y-%m-%d'))
-        if not cur_price or is_new_today:
-            live_open, live_last = get_live_quote(ticker)
-            today_open_price = live_open
-            if not cur_price:
-                cur_price = live_last or live_open
-        cur_price = cur_price or rec_price
-        pnl = round((cur_price - rec_price) / rec_price * 100, 2) if rec_price > 0 else 0
-        active_list.append({
-            "代码": ticker,
-            "名称": first_row.get('Name', ticker),
-            "标签": latest_tag,
-            "推荐评分": score_str,
-            "持股周期建议": "待定(N/A)",
-            "止损价": stop_loss,
-            "首次推荐日": rec_date_str,
-            "首次推荐价": rec_price,
-            "今日开盘价": round(today_open_price, 2) if today_open_price else ("N/A" if not is_new_today else round(cur_price, 2)),
-            "现价": cur_price,
-            "持仓天数": days_held,
-            "剩余天数": "N/A",
-            "当前盈亏(%)": pnl,
-            "今日新增": "是" if is_new_today else "否",
-            "系统连续推荐次数": len(group),
-        })
+        print(f"⚠️ {ticker} Hold_Period=N/A，按要求从复盘中剔除")
         continue
 
     rec_price = float(first_row['Close_Price'])
