@@ -40,18 +40,28 @@ except Exception as e:
     print(f"⚠️ 账本读取失败: {e}")
     import sys; sys.exit(1)
 
-# ── 版本过滤：只用 Score 区分新旧版本记录，Stop_Loss/Hold_Period 不再强制要求 ──
+# ── 版本过滤：改用 Hold_Period 区分新旧版本记录 ──
+# 原来用 Score 判断，但 Score 解析曾经有正则bug（"评分:[74]/100"里的方括号没处理，
+# 恒为N/A），会导致这一个月本该正常追踪的核心票被这里当成"旧版本"整批丢弃、
+# 从复盘里消失（即便它们已经正常写进了 trade_history.csv）。Hold_Period 没被那个bug
+# 影响过，用它来判断"是否是新版本完整记录"更可靠。
 _INVALID = {'', 'n/a', 'nan', 'none'}
 for _col in ['Hold_Period', 'Stop_Loss', 'Score']:
     if _col not in recent_picks.columns:
         recent_picks[_col] = ''
 
-# 只要 Score 有效就纳入复盘（Hold_Period/Stop_Loss 可以是 N/A）
-_score_valid = recent_picks['Score'].astype(str).str.strip().str.lower().map(lambda v: v not in _INVALID)
-_dropped = (~_score_valid).sum()
+_schema_valid = recent_picks['Hold_Period'].astype(str).str.strip().str.lower().map(lambda v: v not in _INVALID)
+_dropped = (~_schema_valid).sum()
 if _dropped > 0:
-    print(f"🗂️ 版本过滤：剔除 {_dropped} 条无评分的旧版本记录，不纳入复盘。")
-recent_picks = recent_picks[_score_valid].copy()
+    print(f"🗂️ 版本过滤：剔除 {_dropped} 条 Hold_Period 缺失的旧版本/不完整记录，不纳入复盘。")
+recent_picks = recent_picks[_schema_valid].copy()
+
+# Score=N/A 的记录打印提示，但继续追踪（不剔除——很可能只是历史评分bug导致这一列是N/A，
+# Hold_Period/Stop_Loss 仍然有效，不该被连带丢弃）
+_no_score = recent_picks['Score'].astype(str).str.strip().str.lower().isin(_INVALID)
+if _no_score.sum() > 0:
+    tickers_no_score = recent_picks.loc[_no_score, 'Ticker'].tolist()
+    print(f"⚠️ 以下 {_no_score.sum()} 条记录 Score=N/A（可能是历史评分bug所致），仍会继续追踪：{tickers_no_score[:10]}")
 
 # Stop_Loss=N/A 的记录打印提示，但继续追踪（不剔除）
 _no_stoploss = recent_picks['Stop_Loss'].astype(str).str.strip().str.lower().isin(_INVALID)
