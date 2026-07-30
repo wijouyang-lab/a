@@ -192,7 +192,7 @@ for ticker, group in recent_picks.groupby('Ticker'):
 
     hold_days = parse_hold_days(hold_period_str)
     if hold_days is None:
-        print(f"⚠️ {ticker} Hold_Period=N/A，按要求从复盘中剔除")
+        print(f"⏭️ {ticker} Hold_Period=N/A，按要求从复盘列表中剔除。")
         continue
 
     rec_price = float(first_row['Close_Price'])
