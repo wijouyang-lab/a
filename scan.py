@@ -1513,7 +1513,7 @@ MACD信号优先级：
     ai_html = ""
     with client.messages.stream(
         model=TARGET_MODEL,
-        max_tokens=80000,
+        max_tokens=50000,
         temperature=0.3,
         messages=[{"role": "user", "content": prompt}]
     ) as stream:
@@ -1776,16 +1776,20 @@ if __name__ == "__main__":
                 print("⚠️ 检测到旧版trade_history.csv缺少Score列，已自动升级表头")
 
         frozen_tickers: set = set()
-        FROZEN_TAGS = {'Forced_Exit', 'Trap_Warning', 'Stop_Loss_Hit', 'Period_Matured'}
+        # 冻结名单调整：Period_Matured（持有到期，正常退出）不再永久拉黑，允许后续重新入选；
+        # Forced_Exit/Stop_Loss_Hit/Trap_Warning（强制离场/止损/诱多，都是"出了问题"才离场）继续永久冻结。
+        # 注意：这里判断的是"该 Ticker 历史上是否出现过这些标签"，不看日期——同一只票只要曾经
+        # 止损过一次，就永久拉黑；这个"无时间限制"的特性本身予以保留，只是把 Period_Matured 挪出去了。
+        PERMANENT_FROZEN_TAGS = {'Forced_Exit', 'Trap_Warning', 'Stop_Loss_Hit'}
         if file_exists:
             try:
                 df_hist_check = pd.read_csv(log_file, on_bad_lines='skip')
                 if 'Tag' in df_hist_check.columns and 'Ticker' in df_hist_check.columns:
                     frozen_tickers = set(
-                        df_hist_check.loc[df_hist_check['Tag'].isin(FROZEN_TAGS), 'Ticker'].astype(str)
+                        df_hist_check.loc[df_hist_check['Tag'].isin(PERMANENT_FROZEN_TAGS), 'Ticker'].astype(str)
                     )
                     if frozen_tickers:
-                        print(f"🔒 写账过滤：检测到 {len(frozen_tickers)} 只冻结标的 {frozen_tickers}，本次不追加新行（历史买卖价保留）")
+                        print(f"🔒 写账过滤：检测到 {len(frozen_tickers)} 只永久冻结标的（止损/强制离场/诱多）{frozen_tickers}，本次不追加新行（历史买卖价保留）")
             except Exception as e:
                 print(f"⚠️ 写账过滤读取 trade_history.csv 失败，不执行过滤: {e}")
 
