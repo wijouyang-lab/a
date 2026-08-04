@@ -96,6 +96,7 @@ def calculate_metrics(df: pd.DataFrame) -> dict | None:
             print(f"⚠️ 读取 review_history.csv 失败: {e}")
 
     rows = []
+    skipped_no_sell = []
     for _, row in closed.iterrows():
         buy = safe_float(row.get(PRICE_COL))
         if buy is None:
@@ -116,6 +117,11 @@ def calculate_metrics(df: pd.DataFrame) -> dict | None:
             if pnl_str is not None and buy is not None:
                 sell = round(buy * (1 + pnl_str / 100), 2)
         if sell is None:
+            # 三个来源都没拿到卖出价——大概率是 review_history.csv 里从没留下过这只票
+            # 的记录（比如刚入账就同一天触发止损，还没被review.py正常巡检到一次就已经
+            # 被跳过）。这类记录目前会被排除在胜率统计外，打印出来方便你自己核对是否
+            # 真的该算作"没有止损统计进去"。
+            skipped_no_sell.append(f"{row.get('Name','')}({ticker})[{row.get('Tag','')}]")
             continue
 
         pnl_pct = pnl_pct_direct if pnl_pct_direct is not None else round((sell - buy) / buy * 100, 2)
@@ -131,6 +137,9 @@ def calculate_metrics(df: pd.DataFrame) -> dict | None:
             "sell":     float(sell),
             "hold_period": str(row.get("Hold_Period", "")),
         })
+
+    if skipped_no_sell:
+        print(f"⚠️ {len(skipped_no_sell)} 条已平仓记录因三个来源都拿不到卖出价，被排除在胜率统计外: {skipped_no_sell[:15]}")
 
     if not rows:
         print("⚠️ 平仓记录均无有效买入/卖出价（trade_history.csv 和 review_history.csv 都没有）。")
@@ -374,15 +383,21 @@ if __name__ == "__main__":
     df_raw = pd.read_csv(HISTORY_FILE, keep_default_na=False)
 
     # 过滤：Hold_Period / Stop_Loss / Score 三字段必须有效
+    # 修复：原来要求 Hold_Period/Stop_Loss/Score 三个字段都有效才纳入统计，但历史上
+    # 评分正则曾有bug导致大量记录 Score=N/A（Hold_Period/Stop_Loss 没受影响）。这批记录
+    # 里包含了不少已经止损/到期的真实交易，用旧过滤条件会被整批剔除出胜率统计，导致
+    # 统计出来的胜率虚高。改成只要求 Hold_Period/Stop_Loss 有效，Score 缺失不再剔除。
     _INVALID = {"", "n/a", "nan", "none", "坚决空仓", "观望", "绝对规避"}
     for col in ["Hold_Period", "Stop_Loss", SCORE_COL]:
         if col not in df_raw.columns:
             df_raw[col] = ""
     valid_mask = (
         df_raw["Hold_Period"].astype(str).str.strip().str.lower().map(lambda v: v not in _INVALID) &
-        df_raw["Stop_Loss"].astype(str).str.strip().str.lower().map(lambda v: v not in _INVALID) &
-        df_raw[SCORE_COL].astype(str).str.strip().str.lower().map(lambda v: v not in _INVALID)
+        df_raw["Stop_Loss"].astype(str).str.strip().str.lower().map(lambda v: v not in _INVALID)
     )
+    no_score_count = df_raw[SCORE_COL].astype(str).str.strip().str.lower().isin(_INVALID).sum()
+    if no_score_count > 0:
+        print(f"⚠️ {no_score_count} 条记录 Score=N/A（可能是历史评分bug所致），仍纳入胜率统计。")
     dropped_count = (~valid_mask).sum()
     if dropped_count > 0:
         print(f"🗂️ 过滤掉 {dropped_count} 条旧版本/不完整记录，不纳入绩效统计。")
