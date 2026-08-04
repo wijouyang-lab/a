@@ -1414,6 +1414,7 @@ MACD信号优先级：
 2. 同一只股票绝对不能重复出现。
 3. 风控底线格式：周期:[X-Y天] | 止损:[XX.XX元]（止损必须贴近该股当前收盘价）。
 4. 严格按以下HTML骨架输出，不加markdown外框。第一个字符必须是 < 符号。
+5. 括号里的字数是上限不是下限，越精简越好，禁止凑字数、禁止套话。
 
 <div class="header-card">
     <h2>🌍 今日全球宏观大宗与事件逻辑推演中心</h2>
@@ -1421,14 +1422,14 @@ MACD信号优先级：
 
     <div style="background:#e8f5e9;border-left:4px solid #388e3c;padding:15px;margin-top:10px;border-radius:4px;">
         <b>🇺🇸 全球宏观大宗与美股传导分析：</b>
-        <p>[深度整合国债收益率变动及金银铜油大宗异动，全面研判市场当前冲击（例如PCE压制等）是属于短暂回调还是趋势改变，并指出今日A股跟随效应或避险板块方向]</p>
+        <p>[国债收益率+金银铜油走势对A股的传导判断，是回调还是趋势改变，80字以内]</p>
     </div>
 
     <div style="background:#fff3e0;border-left:4px solid #ff9800;padding:15px;margin-top:10px;border-radius:4px;">
         <b>📋 今日核心事件与完整逻辑链：</b>
-        <p><b>事件1：</b>[事件标题] → [完整推演：为什么这个事件利好/利空哪个产业链，受益逻辑是什么，预计持续多久]</p>
-        <p><b>事件2：</b>[事件标题] → [完整推演]</p>
-        <p><b>受损预警：</b>[哪些行业/标的因宏观数据或者大宗价格链条传导受损，需回避]</p>
+        <p><b>事件1：</b>[事件标题] → [受益产业链+持续时间，50字以内]</p>
+        <p><b>事件2：</b>[事件标题] → [同上标准，40字以内，如无则写"无"]</p>
+        <p><b>受损预警：</b>[需回避的行业/标的，30字以内]</p>
     </div>
 </div>
 
@@ -1437,18 +1438,18 @@ MACD信号优先级：
 
     <div class="card core-card">
         <h3>[核心精选] 1. [名称] ([代码]) | [行业]</h3>
-        <p><span class="tag bg-red">🔗 宏观事件逻辑链：</span>[具体事件] → [产业链传导机制] → [该企业核心受益竞争优势点]</p>
-        <p><span class="tag bg-green">🇺🇸 宏观大宗加持：</span>[说明收益率/金银铜油趋势对该行业的宏观传导利弊，以及美股对标动向效应]</p>
-        <p><span class="tag bg-purple">📰 个股新闻验证：</span>[相关个股新闻匹配判定，如无则写"暂无最新个股消息，纯宏观逻辑推演"]</p>
-        <p><span class="tag bg-blue">💰 资金验证：</span>今日交易额位于巨量核心池，涨跌[X]%，[主力、机构等大资金行为推断]</p>
-        <p><span class="tag bg-gray">📈 技术风控：</span>乖离率[X]%，RSI[X]，MACD[走强/走弱]，[技术综合研判]</p>
-        <p><span class="tag bg-teal">⭐ 推荐评分：</span>评分:[XX]/100 — [一句话评分科学依据描述]</p>
-        <p><span class="tag bg-orange">⚠️ 风控底线：</span>周期:[5-12天] | 止损:[XX.XX元] | [止损精细依据]</p>
+        <p><span class="tag bg-red">🔗 宏观事件逻辑链：</span>[事件→传导→受益点，40字以内]</p>
+        <p><span class="tag bg-green">🇺🇸 宏观大宗加持：</span>[对该行业的传导利弊，20字以内]</p>
+        <p><span class="tag bg-purple">📰 个股新闻验证：</span>[最相关1条或"暂无最新消息"，20字以内]</p>
+        <p><span class="tag bg-blue">💰 资金验证：</span>涨跌[X]%，[资金行为判断，15字以内]</p>
+        <p><span class="tag bg-gray">📈 技术风控：</span>乖离率[X]% RSI[X] MACD[走强/走弱]，[结论10字以内]</p>
+        <p><span class="tag bg-teal">⭐ 推荐评分：</span>评分:[XX]/100 — [15字以内理由]</p>
+        <p><span class="tag bg-orange">⚠️ 风控底线：</span>周期:[5-12天] | 止损:[XX.XX元] | [依据10字以内]</p>
     </div>
 
     <div class="card core-card">
         <h3>[核心精选] 2. [名称] ([代码]) | [行业]</h3>
-        <p><span class="tag bg-red">🔗 宏观事件逻辑链：</span>(同等详细程度)</p>
+        <p><span class="tag bg-red">🔗 宏观事件逻辑链：</span>(同上标准)</p>
         <p><span class="tag bg-green">🇺🇸 宏观大宗加持：</span>(...)</p>
         <p><span class="tag bg-purple">📰 个股新闻验证：</span>(...)</p>
         <p><span class="tag bg-blue">💰 资金验证：</span>(...)</p>
@@ -1459,7 +1460,7 @@ MACD信号优先级：
 
     <div class="card core-card">
         <h3>[核心精选] 3. [名称] ([代码]) | [行业]</h3>
-        <p><span class="tag bg-red">🔗 宏观事件逻辑链：</span>(同等详细程度)</p>
+        <p><span class="tag bg-red">🔗 宏观事件逻辑链：</span>(同上标准)</p>
         <p><span class="tag bg-green">🇺🇸 宏观大宗加持：</span>(...)</p>
         <p><span class="tag bg-purple">📰 个股新闻验证：</span>(...)</p>
         <p><span class="tag bg-blue">💰 资金验证：</span>(...)</p>
@@ -1470,7 +1471,7 @@ MACD信号优先级：
 
     <div class="card core-card">
         <h3>[核心精选] 4. [名称] ([代码]) | [行业]</h3>
-        <p><span class="tag bg-red">🔗 宏观事件逻辑链：</span>(同等详细程度)</p>
+        <p><span class="tag bg-red">🔗 宏观事件逻辑链：</span>(同上标准)</p>
         <p><span class="tag bg-green">🇺🇸 宏观大宗加持：</span>(...)</p>
         <p><span class="tag bg-purple">📰 个股新闻验证：</span>(...)</p>
         <p><span class="tag bg-blue">💰 资金验证：</span>(...)</p>
@@ -1481,7 +1482,7 @@ MACD信号优先级：
 
     <div class="card core-card">
         <h3>[核心精选] 5. [名称] ([代码]) | [行业]</h3>
-        <p><span class="tag bg-red">🔗 宏观事件逻辑链：</span>(同等详细程度)</p>
+        <p><span class="tag bg-red">🔗 宏观事件逻辑链：</span>(同上标准)</p>
         <p><span class="tag bg-green">🇺🇸 宏观大宗加持：</span>(...)</p>
         <p><span class="tag bg-purple">📰 个股新闻验证：</span>(...)</p>
         <p><span class="tag bg-blue">💰 资金验证：</span>(...)</p>
@@ -1493,7 +1494,7 @@ MACD信号优先级：
     <div class="card obs-card">
         <h3>[观察池] ⚠️ 逻辑待确认或个股新闻有瑕疵 (Rank 6-10)</h3>
         <ul>
-            <li><b>6. [名称] ([代码]) | [行业]：</b>[因由阐述] <br><span class="tag bg-orange">⚠️ 风控:</span> 周期:[观望] | 止损:[观望]</li>
+            <li><b>6. [名称] ([代码]) | [行业]：</b>[因由，20字以内] <br><span class="tag bg-orange">⚠️ 风控:</span> 周期:[观望] | 止损:[观望]</li>
             <li><b>7. [名称] ([代码]) | [行业]：</b>(...) <br><span class="tag bg-orange">⚠️ 风控:</span> 周期:[观望] | 止损:[观望]</li>
             <li><b>8. [名称] ([代码]) | [行业]：</b>(...) <br><span class="tag bg-orange">⚠️ 风控:</span> 周期:[观望] | 止损:[观望]</li>
             <li><b>9. [名称] ([代码]) | [行业]：</b>(...) <br><span class="tag bg-orange">⚠️ 风控:</span> 周期:[观望] | 止损:[观望]</li>
@@ -1505,7 +1506,7 @@ MACD信号优先级：
 <div class="card trap-card">
     <h3>🚨 事件逻辑受损或个股新闻预警组（严禁接盘）</h3>
     <ul>
-        <li><b>[名称] ([代码]) | <span class="bear-text">逻辑受损/新闻预警</span></b><br>❌ 受损逻辑：[具体宏观或大宗负面破坏链条说明]<br>⚠️ 回避理由：[潜在风险释放空间描述]</li>
+        <li><b>[名称] ([代码]) | <span class="bear-text">逻辑受损/新闻预警</span></b><br>❌ 受损逻辑：[具体宏观或大宗负面破坏链条说明，15字以内]<br>⚠️ 回避理由：[潜在风险释放空间描述，10字以内]</li>
     </ul>
 </div>
 '''
@@ -1775,25 +1776,43 @@ if __name__ == "__main__":
                     f.writelines(lines)
                 print("⚠️ 检测到旧版trade_history.csv缺少Score列，已自动升级表头")
 
-        frozen_tickers: set = set()
-        # 冻结名单调整：Period_Matured（持有到期，正常退出）不再永久拉黑，允许后续重新入选；
-        # Forced_Exit/Stop_Loss_Hit/Trap_Warning（强制离场/止损/诱多，都是"出了问题"才离场）继续永久冻结。
-        # 注意：这里判断的是"该 Ticker 历史上是否出现过这些标签"，不看日期——同一只票只要曾经
-        # 止损过一次，就永久拉黑；这个"无时间限制"的特性本身予以保留，只是把 Period_Matured 挪出去了。
+        # 冻结机制调整：不再是"曾经止损/强制离场/诱多过就永久拉黑"，改成不限时间、
+        # 但要求这次评分超过它历史所有"离场失败"记录里最高分 + REQUALIFY_MARGIN 才能重新入选。
+        # Period_Matured（到期，正常退出）不计入"失败"，不受此限制。
+        # 若历史失败记录的 Score 本身缺失（比如踩到了之前的评分正则bug）无法验证是否达标，
+        # 保守起见记为需要 inf 分（等于继续锁死），避免在数据不完整的情况下贸然放行。
         PERMANENT_FROZEN_TAGS = {'Forced_Exit', 'Trap_Warning', 'Stop_Loss_Hit'}
+        REQUALIFY_MARGIN = 10  # 需要比历史最高失败分再高出多少分才能重新入选，可调整
+        frozen_min_score: dict = {}
         if file_exists:
             try:
                 df_hist_check = pd.read_csv(log_file, on_bad_lines='skip')
-                if 'Tag' in df_hist_check.columns and 'Ticker' in df_hist_check.columns:
-                    frozen_tickers = set(
-                        df_hist_check.loc[df_hist_check['Tag'].isin(PERMANENT_FROZEN_TAGS), 'Ticker'].astype(str)
-                    )
-                    if frozen_tickers:
-                        print(f"🔒 写账过滤：检测到 {len(frozen_tickers)} 只永久冻结标的（止损/强制离场/诱多）{frozen_tickers}，本次不追加新行（历史买卖价保留）")
+                if {'Tag', 'Ticker', 'Score'}.issubset(df_hist_check.columns):
+                    bad_exits = df_hist_check[df_hist_check['Tag'].isin(PERMANENT_FROZEN_TAGS)].copy()
+                    bad_exits['Score_num'] = pd.to_numeric(bad_exits['Score'], errors='coerce')
+                    for tk, g in bad_exits.groupby('Ticker'):
+                        tk = str(tk)
+                        if g['Score_num'].notna().any():
+                            frozen_min_score[tk] = float(g['Score_num'].max()) + REQUALIFY_MARGIN
+                        else:
+                            frozen_min_score[tk] = float('inf')
+                    if frozen_min_score:
+                        locked = sum(1 for v in frozen_min_score.values() if v == float('inf'))
+                        print(f"🔒 写账过滤：{len(frozen_min_score)} 只曾止损/离场标的需评分达标才能重新入选（其中 {locked} 只因历史评分缺失暂无法解冻）")
             except Exception as e:
                 print(f"⚠️ 写账过滤读取 trade_history.csv 失败，不执行过滤: {e}")
 
-        chosen_to_write = [i for i in chosen if str(i['Ticker']) not in frozen_tickers]
+        def _requalifies(item):
+            tk = str(item.get('Ticker', ''))
+            if tk not in frozen_min_score:
+                return True
+            try:
+                cur_score = float(str(item.get('Score', '')).strip())
+            except (ValueError, TypeError):
+                return False
+            return cur_score >= frozen_min_score[tk]
+
+        chosen_to_write = [i for i in chosen if _requalifies(i)]
         skipped_frozen = len(chosen) - len(chosen_to_write)
         if skipped_frozen > 0:
             print(f"⏭️ 已跳过 {skipped_frozen} 只冻结标的，不写入新追踪记录。")
