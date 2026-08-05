@@ -2,7 +2,7 @@ name: A股盘后复盘
 
 on:
   schedule:
-    - cron: '30 07 * * 1-5'  # ✨ 添加了定时运行（北京时间15:30）
+    - cron: '30 07 * * 1-5'
   workflow_dispatch:
 
 jobs:
@@ -17,7 +17,7 @@ jobs:
           fetch-depth: 0
 
       - name: 拉取最新代码
-        run: git pull origin main --ff-only  # ✨ 添加：获取最新待确认文件
+        run: git pull origin main --ff-only
 
       - name: 设置Python
         uses: actions/setup-python@v4
@@ -25,7 +25,8 @@ jobs:
           python-version: '3.9'
 
       - name: 安装依赖
-        run: pip install pandas tushare anthropic requests
+        run: |
+          pip install pandas tushare anthropic requests
 
       - name: 配置Git
         run: |
@@ -43,27 +44,14 @@ jobs:
 
       - name: 提交账本和处理记录
         run: |
-          # ✨ 改动：精确提交，避免混乱
           git add trade_history.csv review_history.csv
           
-          # 提交已处理的备份
           if ls ashare_stocks_pending_*.csv.processed 1> /dev/null 2>&1; then
             git add ashare_stocks_pending_*.csv.processed
           fi
           
-          # 删除待确认文件（已处理）
           git rm -f ashare_stocks_pending_*.csv 2>/dev/null || true
           
-          # 提交
           git commit -m "chore: A股盘后补充成交 $(date +%Y-%m-%d)" || echo "无变更"
           git push
           echo "✅ A股成交记录已提交"
-
-      - name: 上传日志
-        if: always()
-        uses: actions/upload-artifact@v3
-        with:
-          name: review-logs
-          path: |
-            review_report.html
-            *.log
