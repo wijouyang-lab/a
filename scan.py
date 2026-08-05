@@ -1817,15 +1817,21 @@ if __name__ == "__main__":
         if skipped_frozen > 0:
             print(f"⏭️ 已跳过 {skipped_frozen} 只冻结标的，不写入新追踪记录。")
 
-        # 写入当天开盘价 Open 替代 Close
-        with open(log_file, "a", encoding="utf-8") as f:
-            if need_header:
-                f.write(new_header)
-            ts_date = get_bj_time().strftime('%Y-%m-%d')
-            for i in chosen_to_write:
-                f.write(f"{ts_date},{i['Ticker']},{i['Name']},{i['Tag']},{i.get('Industry','未知')},{i.get('Open', i['Close'])},{i['Amount']},{i['Daily_Pct']},{i['Hold_Period']},{i['Stop_Loss']},{i.get('Score','N/A')}\n")
+        # ✅ 【改动】A股盘中写入待确认文件，盘后由 review_ashare.py 补充写入正式账本
+        # 原因：确保盘后有完整的收盘数据再记账，避免盘中价格不准确
+        ts_date = get_bj_time().strftime('%Y-%m-%d')
+        
+        if chosen_to_write:
+            pending_file = f"ashare_stocks_pending_{ts_date.replace('-', '')}.csv"
+            pending_header = "Date,Ticker,Name,Tag,Industry,Recommended_Price,Amount,Daily_Pct,Hold_Period,Stop_Loss,Score,Status\n"
+            with open(pending_file, "w", encoding="utf-8") as f:
+                f.write(pending_header)
+                for i in chosen_to_write:
+                    f.write(f"{ts_date},{i['Ticker']},{i['Name']},{i['Tag']},{i.get('Industry','未知')},{i.get('Open', i['Close'])},{i['Amount']},{i['Daily_Pct']},{i['Hold_Period']},{i['Stop_Loss']},{i.get('Score','N/A')},pending\n")
+            
+            print(f"✅ 共生成 {len(chosen_to_write)} 条A股推荐记录（已保存至 {pending_file}）")
+            print(f"⏳ 成交确认将在盘后 review_ashare.py 执行时补充写入 trade_history.csv")
 
-        print(f"✅ 共安全记账 {len(chosen_to_write)} 条核心数据（买入价使用当天开盘价）。")
         with open("report.html", "w", encoding="utf-8") as f:
             f.write(full_html)
         send_emails(full_html)
