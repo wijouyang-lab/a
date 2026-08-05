@@ -1,36 +1,60 @@
-name: A-Share Scan
+name: A股盘前扫描
+
 on:
+  schedule:
+    - cron: '30 01 * * 1-5'  # ✨ 添加了定时运行（北京时间9:30）
   workflow_dispatch:
 
 jobs:
-  run-scan:
+  scan:
     runs-on: ubuntu-latest
-    env:
-      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-    permissions:
-      contents: write
+    
     steps:
-    - name: Checkout Code
-      uses: actions/checkout@v4
-    - name: Setup Python
-      uses: actions/setup-python@v5
-      with:
-        python-version: '3.12'
-    - name: Install Libs
-      run: pip install pandas tushare requests anthropic yfinance
-    - name: Run Scan
-      env:
-        TUSHARE_TOKEN: ${{ secrets.TUSHARE_TOKEN }}
-        CLAWSOCKET_API_KEY: ${{ secrets.CLAWSOCKET_API_KEY }}
-        CLAWSOCKET_BASE_URL: ${{ secrets.CLAWSOCKET_BASE_URL }}
-        EMAIL_ACCOUNT: ${{ secrets.EMAIL_ACCOUNT }}
-        EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
-        TARGET_EMAILS: ${{ secrets.TARGET_EMAILS }}
-      run: python scan.py
-    - name: Save Logs
-      run: |
-        git config --global user.email "action@github.com"
-        git config --global user.name "Alpha Bot"
-        git add -A
-        git diff --quiet && git diff --staged --quiet || git commit -m "Auto update logs"
-        git push
+      - name: 检出代码
+        uses: actions/checkout@v3
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
+
+      - name: 设置Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+
+      - name: 安装依赖
+        run: pip install pandas tushare anthropic requests
+
+      - name: 配置Git
+        run: |
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config user.name "github-actions[bot]"
+
+      - name: 运行A股盘前扫描
+        env:
+          TUSHARE_TOKEN: ${{ secrets.TUSHARE_TOKEN }}
+          TARGET_EMAILS: ${{ secrets.TARGET_EMAILS }}
+          EMAIL_ACCOUNT: ${{ secrets.EMAIL_ACCOUNT }}
+          EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: python scan__1_.py
+
+      - name: 提交待确认文件
+        run: |
+          # ✨ 改动：只提交待确认文件，不提交所有文件
+          if ls ashare_stocks_pending_*.csv 1> /dev/null 2>&1; then
+            git add ashare_stocks_pending_*.csv
+            git commit -m "chore: A股盘前待确认 $(date +%Y-%m-%d)"
+            git push
+            echo "✅ A股待确认文件已提交"
+          else
+            echo "⚠️ 未生成A股待确认文件"
+          fi
+
+      - name: 上传日志
+        if: always()
+        uses: actions/upload-artifact@v3
+        with:
+          name: scan-logs
+          path: |
+            report.html
+            *.log
