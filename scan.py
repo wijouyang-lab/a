@@ -16,6 +16,15 @@ from email.mime.multipart import MIMEMultipart
 import anthropic
 import time
 import random
+import yfinance as yf
+
+# ==========================================
+# 启动前置校验：AI 凭证（缺失则立即报错退出，
+# 避免跑完前面几个阶段耗时的数据抓取后才在AI调用阶段才崩溃）
+# ==========================================
+if not os.environ.get("ANTHROPIC_API_KEY"):
+    print("致命错误：未检测到环境变量 ANTHROPIC_API_KEY！请检查 GitHub Actions 仓库的 Secrets 配置（Settings → Secrets and variables → Actions），并确认 workflow yml 中已通过 env: 正确传递。")
+    import sys; sys.exit(1)
 
 BEIJING_TZ = datetime.timezone(datetime.timedelta(hours=8))
 def get_bj_time():
@@ -206,8 +215,8 @@ def pre_scan_portfolio_review(macro_news_text, macro_data_text, price_map):
         })
 
     client = anthropic.Anthropic(
-        api_key=os.environ.get("CLAWSOCKET_API_KEY"),
-        base_url=os.environ.get("CLAWSOCKET_BASE_URL")
+        api_key=os.environ.get("ANTHROPIC_API_KEY"),
+        base_url=os.environ.get("ANTHROPIC_BASE_URL")
     )
 
     review_prompt = f"""
@@ -1281,8 +1290,8 @@ def load_evolved_rules() -> str:
 def generate_ai_report(pool_data, macro_news_text, macro_data_text, us_sector_text, removed_tickers, embargo_text="", sector_tech_data=None):
     print("🧠 [阶段4] 召唤 AI 大脑（宏观大宗与三重交叉验证，Top5详细分析）...")
     client = anthropic.Anthropic(
-        api_key=os.environ.get("CLAWSOCKET_API_KEY"),
-        base_url=os.environ.get("CLAWSOCKET_BASE_URL")
+        api_key=os.environ.get("ANTHROPIC_API_KEY"),
+        base_url=os.environ.get("ANTHROPIC_BASE_URL")
     )
     today_str = get_bj_time().strftime('%Y年%m月%d日')
 
