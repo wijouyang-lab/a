@@ -20,10 +20,11 @@ jobs:
       - name: 设置Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: '3.12'
 
       - name: 安装依赖
         run: |
+          pip install --upgrade pip
           pip install pandas tushare anthropic requests
 
       - name: 配置Git
