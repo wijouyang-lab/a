@@ -1,8 +1,6 @@
 name: A股盘后复盘
 
 on:
-  schedule:
-    - cron: '30 07 * * 1-5'
   workflow_dispatch:
 
 jobs:
