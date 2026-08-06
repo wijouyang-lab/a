@@ -37,7 +37,7 @@ jobs:
           EMAIL_ACCOUNT: ${{ secrets.EMAIL_ACCOUNT }}
           EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-        run: python scan__1_.py
+        run: python scan.py
 
       - name: 提交待确认文件
         run: |
