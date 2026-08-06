@@ -674,20 +674,22 @@ full_html = f"""<!DOCTYPE html><html><head><meta charset='utf-8'>
 def send_mail():
     acc = os.environ.get("EMAIL_ACCOUNT")
     pwd = os.environ.get("EMAIL_PASSWORD")
-    owner_email = os.environ.get("OWNER_EMAIL")
+    owner_email = os.environ.get("TARGET_EMAILS") or os.environ.get("OWNER_EMAIL")
     if not acc or not pwd or not owner_email:
         print("⚠️ 邮箱配置缺失，跳过发送。")
         return
 
+    targets = [e.strip() for e in owner_email.split(",") if e.strip()]
+
     msg = MIMEMultipart()
     msg['From'] = acc
-    msg['To'] = owner_email
+    msg['To'] = ", ".join(targets)
     msg['Subject'] = f"【盘后清算】A股风控纪律与复盘 ({get_bj_time().strftime('%Y-%m-%d')})"
     msg.attach(MIMEText(full_html, 'html'))
     try:
         with smtplib.SMTP_SSL("smtp.gmail.com", 465) as s:
             s.login(acc, pwd)
-            s.sendmail(acc, [owner_email], msg.as_string())
+            s.sendmail(acc, targets, msg.as_string())
             print(f"✅ 复盘报告已发送！")
     except Exception as e:
         print(f"❌ 发送失败: {e}")
