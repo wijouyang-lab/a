@@ -16,7 +16,6 @@ from email.mime.multipart import MIMEMultipart
 import anthropic
 import time
 import random
-import yfinance as yf
 
 BEIJING_TZ = datetime.timezone(datetime.timedelta(hours=8))
 def get_bj_time():
