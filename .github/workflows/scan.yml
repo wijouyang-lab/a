@@ -22,7 +22,7 @@ jobs:
       - name: 安装依赖
         run: |
           pip install --upgrade pip
-          pip install pandas tushare anthropic requests
+          pip install pandas tushare anthropic requests yfinance
 
       - name: 配置Git
         run: |
