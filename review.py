@@ -2,13 +2,16 @@
 import pandas as pd
 import datetime
 import os
+import glob
+import re
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 import anthropic
+import tushare as ts
 
-# 启动前置校验：AI 凭证（缺失则立即报错退出，避免跑完前面的复盘数据整理逻辑后才在AI调用阶段崩溃）
-_missing_env = [k for k in ("CLAWSOCKET_API_KEY", "CLAWSOCKET_BASE_URL") if not os.environ.get(k)]
+# 启动前置校验：AI 凭证 + tushare token（缺失则立即报错退出，避免跑完前面的复盘数据整理逻辑后才崩溃）
+_missing_env = [k for k in ("CLAWSOCKET_API_KEY", "CLAWSOCKET_BASE_URL", "TUSHARE_TOKEN") if not os.environ.get(k)]
 if _missing_env:
     print(f"致命错误：未检测到环境变量 {', '.join(_missing_env)}！请检查 GitHub Actions 仓库的 Secrets 配置（Settings → Secrets and variables → Actions），并确认 workflow yml 中已通过 env: 正确传递。")
     import sys; sys.exit(1)
@@ -29,136 +32,237 @@ if bj_hour < 15:
 TARGET_MODEL = 'claude-opus-4-8'
 print("启动 A 股盘后复盘引擎...")
 
+# ✅ 【根因修复】tushare token 提前到这里统一设置一次，全局只建一个 pro 客户端。
+# 原来 set_token 写在文件后半段（原第218行左右），但 supplement_ashare_stocks_from_pending()
+# 在那之前（原第164行）就被调用了：函数内部 ts.pro_api() 在 token 还没设置的情况下发起请求，
+# 认证大概率失败，又被外层 try/except 整体吞掉、只打印一行错误日志——这就是"今天新增的
+# 没有写入 trade_history.csv"的根本原因。挪到这里保证后面任何地方用到 tushare 时 token 都已就绪。
+ts.set_token(os.environ.get("TUSHARE_TOKEN"))
+pro = ts.pro_api()
+
 # ==========================================
 # 【新增】补充A股成交记录（从盘前待确认文件）
 # ==========================================
+def get_live_quote(ticker):
+    """
+    实时行情兜底：今日刚入账的新推荐，pro.daily 的全市场当日快照有时会因为
+    数据尚未发布完整而查不到该标的，导致它在后面被 continue 跳过、从复盘
+    报告里"消失"。这里对单个标的调用 tushare 实时行情接口兜底，取开盘价/最新价。
+    与 scan.py 的 get_latest_price_map 用的是同一套实时行情接口，保持口径一致。
+    （原定义在文件更后面，这里挪到前面是因为 supplement_ashare_stocks_from_pending()
+    现在也需要用它做开盘价/收盘价兜底，而该函数在启动时就会被调用。）
+    """
+    try:
+        bare_code = ticker.split('.')[0] if '.' in ticker else ticker
+        df_rt = ts.get_realtime_quotes(bare_code)
+        if df_rt is None or df_rt.empty:
+            return None, None
+        row = df_rt.iloc[0]
+        open_p, last_p = None, None
+        try:
+            v = float(row.get('open', 0))
+            open_p = v if v > 0 else None
+        except (ValueError, TypeError):
+            pass
+        try:
+            v = float(row.get('price', 0))
+            last_p = v if v > 0 else None
+        except (ValueError, TypeError):
+            pass
+        return open_p, last_p
+    except Exception as e:
+        print(f"⚠️ 实时行情兜底查询失败 [{ticker}]: {e}")
+        return None, None
+
+
+def _migrate_trade_history_add_open_price(log_file):
+    """
+    trade_history.csv 表头升级：老数据没有 Open_Price 列。只把表头文字换掉、
+    不管数据行的话，新表头有12列但老数据行还是11列，pandas 读取时列会错位
+    （这也是当年 Score 列升级时留下的老毛病，见下面 Score 列升级的注释）。
+    这里连每一行老数据都补一个空的 Open_Price 字段，保证列数和新表头对齐。
+    """
+    if not (os.path.exists(log_file) and os.path.getsize(log_file) > 0):
+        return
+    with open(log_file, "r", encoding="utf-8") as f:
+        old_lines = f.readlines()
+    if not old_lines or "Open_Price" in old_lines[0]:
+        return
+
+    old_cols = [c.strip() for c in old_lines[0].strip().split(",")]
+    close_idx = old_cols.index("Close_Price") if "Close_Price" in old_cols else 5
+
+    migrated = ["Date,Ticker,Name,Tag,Industry,Open_Price,Close_Price,Amount,Daily_Pct,Hold_Period,Stop_Loss,Score\n"]
+    for line in old_lines[1:]:
+        if not line.strip():
+            continue
+        fields = line.rstrip("\n").split(",")
+        fields = fields[:close_idx] + [""] + fields[close_idx:]
+        migrated.append(",".join(fields) + "\n")
+
+    with open(log_file, "w", encoding="utf-8") as f:
+        f.writelines(migrated)
+    print(f"⚠️ 检测到旧版trade_history.csv缺少Open_Price列，已自动升级表头并补齐 {len(migrated) - 1} 行历史数据（老数据Open_Price留空，不影响后续追踪）")
+
+
 def supplement_ashare_stocks_from_pending():
     """
     ✅ 【改动】A股版review.py特有函数
-    查找并读取盘前 scan_ashare.py 生成的A股待确认文件 ashare_stocks_pending_[YYYYMMDD].csv
-    用盘后的完整行情数据补充写入 trade_history.csv
-    
-    原因：确保有完整的收盘数据再记账
+    查找并读取盘前 scan.py 生成的A股待确认文件 ashare_stocks_pending_[YYYYMMDD].csv，
+    用盘后的完整行情数据（开盘价+收盘价）补充写入 trade_history.csv。
+
+    ✅ 【根因修复之二】原来只找"今天"日期的那一份待确认文件；如果哪天处理失败
+    （比如本次修复前 token 时序问题导致的失败），那份文件就会永远留在原地、
+    再也不会被后续任何一次运行捞起来重试——因为"明天"的 review.py 只认"明天"
+    的文件名。这里改成扫描所有还没带 .processed 后缀的待确认文件，不管是哪天的，
+    每次运行都会把历史上失败的一并补上，真正做到"新增的一定会写入"。
     """
     log_file = "trade_history.csv"
-    
-    today_date_str = get_bj_time().strftime('%Y-%m-%d')
-    today_date_file = get_bj_time().strftime('%Y%m%d')
-    
-    pending_file = f"ashare_stocks_pending_{today_date_file}.csv"
-    
-    if not os.path.exists(pending_file):
-        print(f"📋 [盘后补充] 未发现A股待确认文件 {pending_file}，跳过A股补充。")
+
+    pending_files = sorted(
+        f for f in glob.glob("ashare_stocks_pending_*.csv")
+        if not f.endswith(".processed")
+    )
+
+    if not pending_files:
+        print(f"📋 [盘后补充] 未发现任何A股待确认文件，跳过A股补充。")
         return
-    
-    print(f"📋 [盘后补充] 发现A股待确认文件 {pending_file}，开始用盘后完整数据补充...")
-    
-    try:
-        import tushare as ts
-        
-        # 读取待确认文件
-        df_pending = pd.read_csv(pending_file)
-        
-        if df_pending.empty:
-            print(f"⚠️ 待确认文件为空，跳过。")
-            return
-        
-        print(f"📡 [盘后补充] 正在拉取A股盘后完整行情数据...")
-        
-        # 拉取盘后完整数据
-        ts_pro = ts.pro_api()
-        today_trade_date = get_bj_time().strftime('%Y%m%d')
-        
-        # 尝试获取今日数据，如果没有则获取前一交易日
-        df_prices = None
-        for offset in range(0, 5):
-            try_date = (get_bj_time() - datetime.timedelta(days=offset)).strftime('%Y%m%d')
-            try:
-                df_prices = ts_pro.daily(trade_date=try_date)
-                if df_prices is not None and not df_prices.empty:
-                    today_trade_date = try_date
-                    break
-            except:
-                pass
-        
-        if df_prices is None or df_prices.empty:
-            print(f"⚠️ 无法获取行情数据，将使用推荐价格作为成交价")
-            df_prices = pd.DataFrame()
-        
-        # 构建价格映射
-        price_map = {}
-        if not df_prices.empty:
-            price_map = dict(zip(df_prices['ts_code'], df_prices['close']))
-        
-        # 读取现有账本
-        df_existing = pd.DataFrame()
-        if os.path.exists(log_file) and os.path.getsize(log_file) > 0:
-            df_existing = pd.read_csv(log_file, on_bad_lines='skip')
-            df_existing['Date'] = pd.to_datetime(df_existing['Date'])
-        
-        new_ashare_records = []
-        
-        for _, row in df_pending.iterrows():
-            ticker = row['Ticker']
-            
-            # 检查重复
-            if not df_existing.empty:
-                existing = df_existing[
-                    (df_existing['Date'] == pd.to_datetime(today_date_str)) &
-                    (df_existing['Ticker'] == ticker)
-                ]
-                if not existing.empty:
-                    print(f"⏭️ {ticker} 已在账本中，跳过重复")
-                    continue
-            
-            # 使用盘后收盘价
-            close_price = price_map.get(ticker, row['Recommended_Price'])
-            
-            try:
-                rec_price = float(row['Recommended_Price'])
-                pct_chg = round((close_price - rec_price) / rec_price * 100, 2)
-            except:
-                pct_chg = 0.0
-            
-            new_ashare_records.append({
-                'Date': today_date_str,
-                'Ticker': ticker,
-                'Name': row['Name'],
-                'Tag': row['Tag'],
-                'Industry': row['Industry'],
-                'Close_Price': close_price,
-                'Amount': row['Amount'],
-                'Daily_Pct': pct_chg,
-                'Hold_Period': row['Hold_Period'],
-                'Stop_Loss': row['Stop_Loss'],
-                'Score': row['Score']
-            })
-        
-        if new_ashare_records:
-            # 新建或追加写入
-            new_header = "Date,Ticker,Name,Tag,Industry,Close_Price,Amount,Daily_Pct,Hold_Period,Stop_Loss,Score\n"
-            need_header = not os.path.exists(log_file) or os.path.getsize(log_file) == 0
-            
-            with open(log_file, "a", encoding="utf-8") as f:
-                if need_header:
-                    f.write(new_header)
-                for record in new_ashare_records:
-                    f.write(f"{record['Date']},{record['Ticker']},{record['Name']},{record['Tag']},{record['Industry']},{record['Close_Price']},{record['Amount']},{record['Daily_Pct']},{record['Hold_Period']},{record['Stop_Loss']},{record['Score']}\n")
-            
-            print(f"✅ [盘后补充] 成功补充A股成交记录 {len(new_ashare_records)} 条（使用盘后收盘价）")
-            
-            # 备份待确认文件
+
+    print(f"📋 [盘后补充] 发现 {len(pending_files)} 份A股待确认文件（含历史遗留未处理的）：{pending_files}")
+
+    _migrate_trade_history_add_open_price(log_file)
+    new_header = "Date,Ticker,Name,Tag,Industry,Open_Price,Close_Price,Amount,Daily_Pct,Hold_Period,Stop_Loss,Score\n"
+    new_header_cols = [c.strip() for c in new_header.strip().split(",")]
+
+    for pending_file in pending_files:
+        m = re.search(r"ashare_stocks_pending_(\d{8})\.csv", pending_file)
+        if not m:
+            print(f"⚠️ 无法从文件名解析交易日期，跳过: {pending_file}")
+            continue
+        file_date_str = m.group(1)
+        target_date_str = f"{file_date_str[:4]}-{file_date_str[4:6]}-{file_date_str[6:]}"
+        is_today = (target_date_str == get_bj_time().strftime('%Y-%m-%d'))
+
+        print(f"📡 [盘后补充] 正在处理 {pending_file}（交易日 {target_date_str}）...")
+
+        try:
+            df_pending = pd.read_csv(pending_file)
+
+            if df_pending.empty:
+                print(f"⚠️ {pending_file} 为空，直接标记为已处理。")
+                os.rename(pending_file, f"{pending_file}.processed")
+                continue
+
+            # 拉取该交易日全市场快照（找不到就往前找，兼容节假日/数据延迟发布）
+            df_prices = None
+            for offset in range(0, 5):
+                try_date = (datetime.datetime.strptime(file_date_str, "%Y%m%d") - datetime.timedelta(days=offset)).strftime('%Y%m%d')
+                try:
+                    df_try = pro.daily(trade_date=try_date)
+                    if df_try is not None and not df_try.empty:
+                        df_prices = df_try
+                        break
+                except Exception as e:
+                    print(f"⚠️ 拉取 {try_date} 全市场快照失败: {e}")
+
+            open_map, close_map = {}, {}
+            if df_prices is not None and not df_prices.empty:
+                open_map = dict(zip(df_prices['ts_code'], df_prices['open']))
+                close_map = dict(zip(df_prices['ts_code'], df_prices['close']))
+            else:
+                print(f"⚠️ 无法获取 {target_date_str} 附近的全市场快照，逐个标的尝试兜底查询。")
+
+            df_existing = pd.DataFrame()
+            if os.path.exists(log_file) and os.path.getsize(log_file) > 0:
+                df_existing = pd.read_csv(log_file, on_bad_lines='skip')
+                df_existing['Date'] = pd.to_datetime(df_existing['Date'])
+
+            new_records = []
+            missing_price_tickers = []
+
+            for _, row in df_pending.iterrows():
+                ticker = row['Ticker']
+
+                if not df_existing.empty:
+                    existing = df_existing[
+                        (df_existing['Date'] == pd.to_datetime(target_date_str)) &
+                        (df_existing['Ticker'] == ticker)
+                    ]
+                    if not existing.empty:
+                        print(f"⏭️ {ticker} 已在账本中，跳过重复")
+                        continue
+
+                open_price = open_map.get(ticker)
+                close_price = close_map.get(ticker)
+
+                # 全市场快照里没有（新股/停牌/数据未发布完整等），单独查一次该标的当天行情
+                if open_price is None or close_price is None:
+                    try:
+                        df_single = pro.daily(ts_code=ticker, start_date=file_date_str, end_date=file_date_str)
+                        if df_single is not None and not df_single.empty:
+                            if open_price is None:
+                                open_price = float(df_single.iloc[0]['open'])
+                            if close_price is None:
+                                close_price = float(df_single.iloc[0]['close'])
+                    except Exception as e:
+                        print(f"⚠️ 单独查询 {ticker} 当日行情失败: {e}")
+
+                # 仍然缺数据、且这份文件正好是"今天"的，用实时行情接口做最后兜底
+                if (open_price is None or close_price is None) and is_today:
+                    live_open, live_last = get_live_quote(ticker)
+                    if open_price is None:
+                        open_price = live_open
+                    if close_price is None:
+                        close_price = live_last or live_open
+
+                if open_price is None or close_price is None:
+                    missing_price_tickers.append(ticker)
+
+                if open_price is not None and close_price is not None:
+                    try:
+                        pct_chg = round((float(close_price) - float(open_price)) / float(open_price) * 100, 2)
+                    except (ValueError, ZeroDivisionError):
+                        pct_chg = row.get('Daily_Pct', '')
+                else:
+                    # 拿不到真实开收盘价时，退回盘前的动量指标，好过整列空着
+                    pct_chg = row.get('Daily_Pct', '')
+
+                new_records.append({
+                    'Date': target_date_str,
+                    'Ticker': ticker,
+                    'Name': row['Name'],
+                    'Tag': row['Tag'],
+                    'Industry': row['Industry'],
+                    'Open_Price': '' if open_price is None else open_price,
+                    'Close_Price': '' if close_price is None else close_price,
+                    'Amount': row['Amount'],
+                    'Daily_Pct': pct_chg,
+                    'Hold_Period': row['Hold_Period'],
+                    'Stop_Loss': row['Stop_Loss'],
+                    'Score': row['Score']
+                })
+
+            if missing_price_tickers:
+                print(f"⚠️ 以下标的未取到开盘价/收盘价，已按空值写入账本，建议后续手动核对: {missing_price_tickers}")
+
+            if new_records:
+                need_header = not os.path.exists(log_file) or os.path.getsize(log_file) == 0
+                with open(log_file, "a", encoding="utf-8") as f:
+                    if need_header:
+                        f.write(new_header)
+                    for record in new_records:
+                        f.write(",".join(str(record[c]) for c in new_header_cols) + "\n")
+
+                print(f"✅ [盘后补充] {pending_file} 成功补充 {len(new_records)} 条A股成交记录（含开盘价+收盘价）")
+            else:
+                print(f"⚠️ {pending_file} 中的A股都已在账本，无新增")
+
             processed_file = f"{pending_file}.processed"
-            try:
-                os.rename(pending_file, processed_file)
-                print(f"📦 待确认文件已备份为 {processed_file}")
-            except:
-                pass
-        else:
-            print(f"⚠️ 待确认文件中的A股都已在账本，无新增")
-    
-    except Exception as e:
-        print(f"❌ 补充A股成交记录出错: {e}")
+            os.rename(pending_file, processed_file)
+            print(f"📦 {pending_file} 已处理，备份为 {processed_file}")
+
+        except Exception as e:
+            print(f"❌ 处理 {pending_file} 出错，保留原文件以便下次自动重试: {e}")
 
 # 盘后程序启动时自动执行
 supplement_ashare_stocks_from_pending()
@@ -213,11 +317,6 @@ if recent_picks.empty:
     print("⚠️ 过滤后无有效新版本记录，跳过复盘。")
     import sys; sys.exit(0)
 
-import tushare as ts
-import re
-ts.set_token(os.environ.get("TUSHARE_TOKEN"))
-pro = ts.pro_api()
-
 start_hist = (get_bj_time() - datetime.timedelta(days=60)).strftime('%Y%m%d')
 end_hist = get_bj_time().strftime('%Y%m%d')
 all_tickers = recent_picks['Ticker'].unique().tolist()
@@ -261,36 +360,6 @@ def get_price_on_date(ticker, target_date_str):
     if valid.empty:
         return None
     return float(valid.iloc[-1]['close'])
-
-
-def get_live_quote(ticker):
-    """
-    实时行情兜底：今日刚入账的新推荐，pro.daily 的全市场当日快照有时会因为
-    数据尚未发布完整而查不到该标的，导致它在后面被 continue 跳过、从复盘
-    报告里"消失"。这里对单个标的调用 tushare 实时行情接口兜底，取开盘价/最新价。
-    与 scan.py 的 get_latest_price_map 用的是同一套实时行情接口，保持口径一致。
-    """
-    try:
-        bare_code = ticker.split('.')[0] if '.' in ticker else ticker
-        df_rt = ts.get_realtime_quotes(bare_code)
-        if df_rt is None or df_rt.empty:
-            return None, None
-        row = df_rt.iloc[0]
-        open_p, last_p = None, None
-        try:
-            v = float(row.get('open', 0))
-            open_p = v if v > 0 else None
-        except (ValueError, TypeError):
-            pass
-        try:
-            v = float(row.get('price', 0))
-            last_p = v if v > 0 else None
-        except (ValueError, TypeError):
-            pass
-        return open_p, last_p
-    except Exception as e:
-        print(f"⚠️ 实时行情兜底查询失败 [{ticker}]: {e}")
-        return None, None
 
 
 already_archived = set()
