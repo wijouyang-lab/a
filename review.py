@@ -414,7 +414,18 @@ for ticker, group in recent_picks.groupby('Ticker'):
         print(f"⏭️ {ticker} Hold_Period=N/A，按要求从复盘列表中剔除。")
         continue
 
-    rec_price = float(first_row['Close_Price'])
+    # ✅ 【补上遗漏的一步】之前只加了 Open_Price 这一列、把数据存对了，但这里读
+    # 首次推荐价用的还是 Close_Price——等于数据修好了，却没接到真正用它的地方。
+    # first_row 现在应该已经有准确的 Open_Price（由 review.py 自己的 supplement
+    # 函数在创建这一行时用盘后真实开盘价写入），优先用它；只有老数据（这次升级前
+    # 就存在、Open_Price 留空的行）才退回 Close_Price。
+    _open_price_raw = first_row.get('Open_Price', None)
+    try:
+        rec_price = float(_open_price_raw)
+        if not (rec_price > 0):   # 同时挡掉 <=0 和 NaN（NaN 的任何比较都是 False，写成 <=0 会漏判）
+            raise ValueError
+    except (TypeError, ValueError):
+        rec_price = float(first_row['Close_Price'])
     rec_date_str = first_row['Date'].strftime('%Y-%m-%d')
     maturity_date_dt = first_row['Date'] + datetime.timedelta(days=hold_days)
     maturity_date = maturity_date_dt.strftime('%Y-%m-%d')
@@ -451,7 +462,7 @@ for ticker, group in recent_picks.groupby('Ticker'):
         if not cur_price:
             cur_price = get_price_on_date(ticker, get_bj_time().strftime('%Y-%m-%d'))
 
-        if not cur_price or is_new_today:
+        if not cur_price or (is_new_today and rec_price == float(first_row['Close_Price'])):
             # 全市场当日快照可能还没收录"今天"这只标的（新入账推荐尤其常见）：
             # 单独发起实时查询，拿到当天的开盘价/最新价兜底。
             live_open, live_last = get_live_quote(ticker)
@@ -459,12 +470,10 @@ for ticker, group in recent_picks.groupby('Ticker'):
             if not cur_price:
                 cur_price = live_last or live_open
 
-        # 修复：trade_history.csv 里 Close_Price 列在盘前扫描时写入的是能拿到的最近一次
-        # 收盘价（不是真正的"今天买入价"，因为扫描发生在开盘前）。今天新增的推荐，如果
-        # 这里成功拿到了当天真实开盘价，就用它覆盖 rec_price——否则"首次推荐价"和盈亏
-        # 都是拿旧收盘价当买入价在算，会算出跟实际持仓完全对不上的盈亏结果（比如深信服
-        # 那种"显示涨14%实际跌了"的情况）。
-        if is_new_today and today_open_price:
+        # 这里只在"今天新增、且上面从 Open_Price 拿不到数（大概率是 supplement 函数
+        # 那批还没跑完，或者那天数据源缺失）"时才用实时行情兜底覆盖 rec_price；
+        # 正常情况下 rec_price 已经是 supplement 函数写入的准确开盘价，不需要这层兜底。
+        if is_new_today and today_open_price and rec_price == float(first_row['Close_Price']):
             rec_price = today_open_price
 
         if not cur_price:
