@@ -283,8 +283,15 @@ def pre_scan_portfolio_review(macro_news_text, macro_data_text, price_map):
 
     try:
         df_orig = pd.read_csv(log_file)
+        # ✅ 【修复】原来按 Ticker 一个条件匹配、不管 Tag 是不是已经是终态——如果这只票
+        # 之前已经平仓过（比如3月止损过一次），现在这轮新的持仓又要强制清仓，会把3月那行
+        # 已经写死的历史标签也一起改写掉，等于连历史记录都被覆盖了（evolve.py 按 Tag 统计
+        # 胜率时也会把同一只票的好几行都算成"平仓"，虚增样本数）。加上"还不是终态"这个
+        # 条件，只改当前这一段还在追踪中的记录。
+        _terminal_tags = {'Stop_Loss_Hit', 'Period_Matured', 'Forced_Exit', 'Dropped', 'Trap_Warning'}
         for ticker in to_remove:
-            df_orig.loc[df_orig['Ticker'] == ticker, 'Tag'] = 'Forced_Exit'
+            _mask = (df_orig['Ticker'] == ticker) & (~df_orig['Tag'].isin(_terminal_tags))
+            df_orig.loc[_mask, 'Tag'] = 'Forced_Exit'
         df_orig.to_csv(log_file, index=False)
         print(f"🔒 [阶段0] 已在 trade_history.csv 中将 {to_remove} 的标签锁定为 'Forced_Exit'（暂停后续追踪）")
     except Exception as e:
@@ -459,9 +466,12 @@ def check_rule_based_sell_signals(price_map, exclude_tickers=None):
 
     try:
         df_orig = pd.read_csv(log_file)
+        # ✅ 【修复】同上：加终态判断，避免同一只票的历史已平仓行被本次更新连带覆盖。
+        _terminal_tags = {'Stop_Loss_Hit', 'Period_Matured', 'Forced_Exit', 'Dropped', 'Trap_Warning'}
         for s in sell_signals:
             tag_to_set = 'Stop_Loss_Hit' if s['signal_type'] == '止损触发' else 'Period_Matured'
-            df_orig.loc[df_orig['Ticker'] == s['ticker'], 'Tag'] = tag_to_set
+            _mask = (df_orig['Ticker'] == s['ticker']) & (~df_orig['Tag'].isin(_terminal_tags))
+            df_orig.loc[_mask, 'Tag'] = tag_to_set
         df_orig.to_csv(log_file, index=False)
         print(f"🔒 [阶段0b] 已锁定 {len(sell_signals)} 只标的标签（止损触发/持有到期），停止后续追踪")
     except Exception as e:
