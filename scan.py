@@ -1842,17 +1842,25 @@ if __name__ == "__main__":
         
         if chosen_to_write:
             pending_file = f"ashare_stocks_pending_{ts_date.replace('-', '')}.csv"
-            # ✅ 【改动】不再写入价格列：盘前这里能拿到的 Open/Close 只是"最近一个交易日"的参考价
+            # ✅ 【改动】不再写入"买入价"：盘前这里能拿到的 Open/Close 只是"最近一个交易日"的参考价
             # （见 get_top_300_pool），不是今天的真实开盘价，写进待确认文件容易被下游误当成
             # 买入价使用（历史上就因此出过"显示涨14%实际却是跌的"这类账算错的问题）。
             # 真正的开盘价/收盘价改由盘后 review.py 用完整行情数据统一补齐写入 trade_history.csv。
-            pending_header = "Date,Ticker,Name,Tag,Industry,Amount,Daily_Pct,Hold_Period,Stop_Loss,Score,Status\n"
+            #
+            # ✅ 【新增】Scan_Ref_Price 不是给人看的"价格"，是给 review.py 做止损位校准用的内部锚点：
+            # 止损位（Stop_Loss）本身也是在这里、用这同一个盘前参考价算出来的（AI 没给出具体止损
+            # 价时的兜底公式，见 match_pool_to_report 里 default_stop_loss_pct 那段）。参考价不准，
+            # 止损位这个"锚点"从一开始就偏了——即使止损检测逻辑本身完全正确，止损价也已经和真实
+            # 成本对不上。review.py 拿到真实开盘价后会按比例（真实开盘价/Scan_Ref_Price）平移止损位，
+            # 这个字段只用于那一次计算，不会被当作价格展示或用于任何盈亏计算。
+            pending_header = "Date,Ticker,Name,Tag,Industry,Amount,Daily_Pct,Hold_Period,Stop_Loss,Score,Status,Scan_Ref_Price\n"
             with open(pending_file, "w", encoding="utf-8") as f:
                 f.write(pending_header)
                 for i in chosen_to_write:
-                    f.write(f"{ts_date},{i['Ticker']},{i['Name']},{i['Tag']},{i.get('Industry','未知')},{i['Amount']},{i['Daily_Pct']},{i['Hold_Period']},{i['Stop_Loss']},{i.get('Score','N/A')},pending\n")
+                    scan_ref_price = i.get('Open', i.get('Close', ''))
+                    f.write(f"{ts_date},{i['Ticker']},{i['Name']},{i['Tag']},{i.get('Industry','未知')},{i['Amount']},{i['Daily_Pct']},{i['Hold_Period']},{i['Stop_Loss']},{i.get('Score','N/A')},pending,{scan_ref_price}\n")
             
-            print(f"✅ 共生成 {len(chosen_to_write)} 条A股推荐记录（已保存至 {pending_file}，不含价格）")
+            print(f"✅ 共生成 {len(chosen_to_write)} 条A股推荐记录（已保存至 {pending_file}，不含买入价，止损位随后会用真实开盘价校准）")
             print(f"⏳ 开盘价/收盘价将在盘后 review.py 执行时用完整行情数据补充写入 trade_history.csv")
 
         with open("report.html", "w", encoding="utf-8") as f:
