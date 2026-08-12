@@ -105,6 +105,34 @@ def _migrate_trade_history_add_open_price(log_file):
     print(f"⚠️ 检测到旧版trade_history.csv缺少Open_Price列，已自动升级表头并补齐 {len(migrated) - 1} 行历史数据（老数据Open_Price留空，不影响后续追踪）")
 
 
+def _recalibrate_stop_loss_ashare(stop_loss_str, scan_ref_price, real_open_price):
+    """
+    止损位校准：Stop_Loss 里的数字是 scan.py 在盘前用 Scan_Ref_Price（盘前参考价，可能是
+    昨收）算出来的（AI 没给具体止损价时的兜底公式：参考价*(1+默认止损百分比)）。参考价一旦
+    和真实开盘价有偏差，止损位这个"锚点"从一开始就偏了——即使止损检测逻辑完全正确，止损价
+    也已经和真实成本对不上，可能是"实际亏损远超-5%止损设定"的原因之一。这里按比例
+    （真实开盘价 / 盘前参考价）把止损位平移到真实开盘价上，同时保留原始的"XX.XX元"格式，
+    不影响后续 _parse_stop_loss_price 的解析。任何一步解析失败都原样返回，不做改动。
+    """
+    try:
+        s = str(stop_loss_str).strip()
+        if not s or s.lower() in ('n/a', 'nan') or s in ('坚决空仓', '绝对规避', '观望'):
+            return stop_loss_str
+        nums = re.findall(r'\d+\.?\d*', s)
+        if not nums:
+            return stop_loss_str
+        old_val = float(nums[0])
+        ref = float(scan_ref_price)
+        new_open = float(real_open_price)
+        if ref <= 0 or new_open <= 0 or old_val <= 0:
+            return stop_loss_str
+        new_val = round(old_val * (new_open / ref), 2)
+        suffix = s[s.index(nums[0]) + len(nums[0]):]  # 保留数字后面的原始后缀（通常是"元"）
+        return f"{new_val}{suffix}"
+    except (ValueError, TypeError, ZeroDivisionError):
+        return stop_loss_str
+
+
 def supplement_ashare_stocks_from_pending():
     """
     ✅ 【改动】A股版review.py特有函数
@@ -227,6 +255,12 @@ def supplement_ashare_stocks_from_pending():
                     # 拿不到真实开收盘价时，退回盘前的动量指标，好过整列空着
                     pct_chg = row.get('Daily_Pct', '')
 
+                calibrated_stop_loss = row['Stop_Loss']
+                if open_price is not None:
+                    calibrated_stop_loss = _recalibrate_stop_loss_ashare(
+                        row['Stop_Loss'], row.get('Scan_Ref_Price'), open_price
+                    )
+
                 new_records.append({
                     'Date': target_date_str,
                     'Ticker': ticker,
@@ -238,7 +272,7 @@ def supplement_ashare_stocks_from_pending():
                     'Amount': row['Amount'],
                     'Daily_Pct': pct_chg,
                     'Hold_Period': row['Hold_Period'],
-                    'Stop_Loss': row['Stop_Loss'],
+                    'Stop_Loss': calibrated_stop_loss,
                     'Score': row['Score']
                 })
 
