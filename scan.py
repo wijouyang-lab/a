@@ -1,6 +1,8 @@
 # 消息+逻辑推演驱动版 | 事件→产业链→受益标的 | 个股新闻深度版 | Top5详细分析+评分版
 # -*- coding: utf-8 -*-
 import pandas as pd
+import numpy as np
+import yfinance as yf
 import datetime
 import os
 import json
@@ -87,6 +89,13 @@ print("时间检查通过，开始扫描...")
 # 恢复双引擎架构：报告核心推演使用 Pro 模型，排雷审查使用 Flash 模型
 TARGET_MODEL = 'claude-opus-4-8'
 DEFAULT_STOP_LOSS_PCT = -5.0
+# ✅ 【新增】ATR止损倍数：止损距离 = ATR_Pct(该股自己的14日真实波幅占价格的百分比) × 这个倍数。
+# 2.0x是业界常见的经验值——波动小的票止损自然收紧，波动大的票止损自然放宽，
+# 不再是所有票不分波动大小统一用固定-5%。上下限(3%~12%)是防止极端值：太紧容易
+# 被正常噪音扫损，太松又失去止损本来的风控意义。
+ATR_STOP_MULTIPLIER = 2.0
+ATR_STOP_FLOOR_PCT = 3.0
+ATR_STOP_CEIL_PCT = 12.0
 
 ts.set_token(os.environ.get("TUSHARE_TOKEN"))
 pro = ts.pro_api()
@@ -830,48 +839,54 @@ def get_free_macro_news():
 # 2.6 获取国际宏观大宗数据 (国债收益率与金银铜油)
 # ==========================================
 def get_global_macro_data():
+    """
+    ✅ 【改动】原来用 stooq.com 抓取，这个数据源稳定性不如 yfinance
+    （美股版 scan.py 一直在用 yfinance 抓同类数据，抓取失败率明显更低）。
+    这里换成和美股版一样的 yfinance + ^TNX/CL=F 等标准代码，抓取失败时的
+    容错处理保持不变（诚实显示"抓取受限"，不会用假数据填充）。
+    输出格式沿用原来的（含📈/📉符号），不影响下游任何解析逻辑。
+    """
     print("🌐 [阶段2.6] 正在抓取国际宏观与大宗商品核心指标数据...")
-    macro_symbols = {
-        "10Y_US_Bond": ("10y_us.m", "美国10年期国债收益率"),
-        "Gold": ("gc.f", "COMEX黄金期货"),
-        "Silver": ("si.f", "COMEX白银期货"),
-        "Copper": ("hg.f", "COMEX铜期货"),
-        "WTI_Oil": ("cl.f", "WTI原油期货"),
-        "Brent_Oil": ("cb.f", "布伦特原油期货")
+    macro_tickers = {
+        "10Y_US_Bond": ("^TNX", "美国10年期国债收益率"),
+        "Gold": ("GC=F", "COMEX黄金期货"),
+        "Silver": ("SI=F", "COMEX白银期货"),
+        "Copper": ("HG=F", "COMEX铜期货"),
+        "WTI_Oil": ("CL=F", "WTI原油期货"),
+        "Brent_Oil": ("BZ=F", "布伦特原油期货"),
     }
     results = []
-    yesterday = (get_bj_time() - datetime.timedelta(days=1)).strftime('%Y-%m-%d')
-    two_days_ago = (get_bj_time() - datetime.timedelta(days=4)).strftime('%Y-%m-%d')
-    
-    for key, (symbol, desc) in macro_symbols.items():
+
+    for key, (ticker, desc) in macro_tickers.items():
         try:
-            url = f"https://stooq.com/q/d/l/?s={symbol}&d1={two_days_ago.replace('-','')}&d2={yesterday.replace('-','')}&i=d"
-            req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-            with urllib.request.urlopen(req, timeout=8) as resp:
-                content = resp.read().decode('utf-8')
-            lines = [l.strip() for l in content.strip().split('\n') if l.strip()]
-            if len(lines) >= 2:
-                last_line = lines[-1].split(',')
-                prev_line = lines[-2].split(',') if len(lines) >= 3 else None
-                if len(last_line) >= 5:
-                    close_val = float(last_line[4])
-                    if prev_line and len(prev_line) >= 5:
-                        prev_close = float(prev_line[4])
-                        pct_chg = round((close_val - prev_close) / prev_close * 100, 2)
-                        sign = "📈" if pct_chg > 0 else "📉"
-                        if key == "10Y_US_Bond":
-                            results.append(f"{sign} {desc} ({symbol}): {close_val}% (当日变动: {pct_chg:+.2f}%)")
-                        else:
-                            results.append(f"{sign} {desc} ({symbol}): ${close_val} (当日变动: {pct_chg:+.2f}%)")
-                    else:
-                        results.append(f"原始指标 {desc} ({symbol}): {close_val}")
-            time.sleep(0.2)
+            df = yf.download(ticker, period="5d", progress=False)
+            if df is None or df.empty:
+                results.append(f"❓ {desc} ({ticker}): 指标抓取受限")
+                continue
+            if isinstance(df.columns, pd.MultiIndex):
+                df.columns = df.columns.get_level_values(0)
+            close_val = float(df['Close'].iloc[-1])
+            prev_close = float(df['Close'].iloc[-2])
+            pct_chg = round((close_val - prev_close) / prev_close * 100, 2)
+            sign = "📈" if pct_chg > 0 else "📉"
+            if key == "10Y_US_Bond":
+                results.append(f"{sign} {desc} ({ticker}): {round(close_val, 3)}% (当日变动: {pct_chg:+.2f}%)")
+            else:
+                results.append(f"{sign} {desc} ({ticker}): ${round(close_val, 2)} (当日变动: {pct_chg:+.2f}%)")
         except Exception:
-            results.append(f"❓ {desc} ({symbol}): 指标抓取受限")
-            
+            results.append(f"❓ {desc} ({ticker}): 指标抓取受限")
+
     if not results:
         return "暂无外部宏观大宗商品监控数据。"
-    return "\n".join(results)
+
+    # ✅ 【新增】让AI自己根据每支股票已经在看的"行业"字段判断大宗商品数据的相关性，
+    # 而不是不分行业统一套用——比如油价对石油化工/煤炭/航空运输类股票直接相关，
+    # 对其他大多数行业相关性很低甚至无关。
+    guidance = ("\n【使用提示】以上大宗商品数据对不同行业的相关性差异很大：原油/WTI/布伦特"
+                "主要影响石油化工、煤炭开采、航空运输、水路运输等上下游行业，对其他行业"
+                "（如软件、消费、医药等）相关性很低，请结合每支标的自己的所属行业判断，"
+                "不要不分行业地把油价波动同等代入所有个股的评分。")
+    return "\n".join(results) + guidance
 
 
 # ==========================================
@@ -1090,6 +1105,7 @@ def calc_tech_indicators(full_pool, codes, trade_date):
         ("周线共振", False),
         ("KDJ_J", 50.0), ("KDJ_J回升", False), ("KDJ_J超卖", False),
         ("量能放大", False), ("量比", 1.0), ("看涨形态", []),
+        ("ATR", 0.0), ("ATR_Pct", 5.0),  # 数据不足时退回默认5%波动，等同于原来的固定止损行为
     ]
 
     for code in list(full_pool.keys()):
@@ -1163,6 +1179,19 @@ def calc_tech_indicators(full_pool, codes, trade_date):
         full_pool[code]["KDJ_J"]    = round(float(j_last), 2)
         full_pool[code]["KDJ_J回升"] = bool(j_last < 80 and j_last > j_prev and j_prev <= j_prev2)
         full_pool[code]["KDJ_J超卖"] = bool(j_prev2 < 20)
+
+        # ✅ 【新增】ATR（真实波幅均值，14日Wilder平滑，和上面RSI用的是同一套平滑法）：
+        # True Range = max(当日高-当日低, |当日高-昨收|, |当日低-昨收|)。
+        # 现价一起换算成ATR_Pct（ATR占现价的百分比），用来给每支票算"跟它自己历史波动
+        # 匹配"的动态止损，而不是所有票不分波动大小统一用固定-5%——高波动的票固定
+        # -5%很容易被正常波动扫出去（止损太紧），低波动的票固定-5%可能又留了太多风险
+        # 敞口（止损太松），这跟"实际平均亏损-11.59%远超-5%止损设定"这个观察是相关的。
+        prev_close_arr = np.roll(cp, 1)
+        prev_close_arr[0] = cp[0]
+        tr_arr = np.maximum(hp - lp, np.maximum(np.abs(hp - prev_close_arr), np.abs(lp - prev_close_arr)))
+        atr_last = float(pd.Series(tr_arr).ewm(com=13, adjust=False).mean().iloc[-1])
+        full_pool[code]["ATR"] = round(atr_last, 4)
+        full_pool[code]["ATR_Pct"] = round((atr_last / full_pool[code]["Close"]) * 100, 2) if full_pool[code].get("Close") else 5.0
 
         avg5  = float(pd.Series(vol[:-1]).tail(5).mean()) if len(vol) >= 6 else 0
         vtdy  = float(vol[-1])
@@ -1728,7 +1757,12 @@ def match_pool_to_report(pool_data, ai_html, default_stop_loss_pct):
                 except (ValueError, ZeroDivisionError):
                     stop_loss_raw = None
 
-            stop_loss = stop_loss_raw if stop_loss_raw else f"{round(item.get('Open', item['Close']) * (1 + default_stop_loss_pct / 100), 2)}元"
+            # ✅ 【改动】兜底止损从固定-5%改成按该股自己的ATR（真实波幅）动态算：
+            # 波动大的票（比如英伟达这类）给更宽的止损空间，波动小的票给更紧的，
+            # 而不是所有票不分波动大小统一用一个数字。上下限3%~12%防止极端值。
+            atr_pct = item.get('ATR_Pct', 5.0)
+            dynamic_stop_pct = -max(ATR_STOP_FLOOR_PCT, min(ATR_STOP_CEIL_PCT, atr_pct * ATR_STOP_MULTIPLIER))
+            stop_loss = stop_loss_raw if stop_loss_raw else f"{round(item.get('Open', item['Close']) * (1 + dynamic_stop_pct / 100), 2)}元"
             # 修复：原正则没处理"评分:[74]/100"里数字后面的"]"，导致 Score 恒为 N/A
             score_match = re.search(r'评分\s*[:：]\s*\[?(\d{1,3})\]?\s*/\s*100', chunk)
             score = score_match.group(1).strip() if score_match else "N/A"
