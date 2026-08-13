@@ -57,6 +57,66 @@ def safe_float(val, default=None):
         return default
 
 
+def _load_evolution_boundaries():
+    """
+    从 strategy_evolution.json 读取历次进化发生的时间点，作为"世代"分界线。
+    第0代 = 第一次进化之前的所有交易（原始策略，还没被任何规则调整过）
+    第N代 = 第N次进化生效之后、第N+1次进化之前产生的交易
+    """
+    if not os.path.exists(EVOLVE_LOG):
+        return []
+    try:
+        with open(EVOLVE_LOG, "r", encoding="utf-8") as f:
+            history = json.load(f)
+        dates = [entry.get("date", "")[:10] for entry in history if entry.get("date")]
+        return sorted(set(d for d in dates if d))
+    except Exception:
+        return []
+
+
+def _segment_by_generation(df_c, boundaries):
+    """
+    把已平仓交易按"进化世代"切段分别算胜率——这是回答"进化之后到底有没有变好"
+    的关键：如果只看一个把全部历史混在一起的总胜率，早期（可能很差的）原始策略
+    表现会和最近几轮进化后的表现混在一起，看不出规则调整到底有没有效果，对
+    "刚调整过规则"的这一段也不公平（它的样本会被历史其他世代的表现稀释）。
+    """
+    if not boundaries or "date" not in df_c.columns:
+        return {}, None
+
+    df_c = df_c.copy()
+    df_c["_dt"] = pd.to_datetime(df_c["date"], errors="coerce")
+    bounds_dt = [pd.to_datetime(b) for b in boundaries]
+    edges = [pd.Timestamp.min] + bounds_dt + [pd.Timestamp.max]
+
+    segments = {}
+    for i in range(len(edges) - 1):
+        label = "第0代-进化前(原始策略)" if i == 0 else f"第{i}代-进化后"
+        seg = df_c[(df_c["_dt"] >= edges[i]) & (df_c["_dt"] < edges[i + 1])]
+        if len(seg) >= 2:
+            segments[label] = {
+                "样本数":    int(len(seg)),
+                "胜率":      round(float((seg["pnl_pct"] > 0).sum() / len(seg) * 100), 1),
+                "平均盈亏%": round(float(seg["pnl_pct"].mean()), 2),
+            }
+
+    # 单独拎出来"最近一次进化之后"这一段——这是当前规则版本真正的战绩，
+    # 不该被进化之前、或者更早几轮规则的历史表现稀释。
+    since_last = None
+    if len(edges) > 2:
+        seg = df_c[df_c["_dt"] >= edges[-2]]
+        if len(seg) >= 2:
+            since_last = {
+                "样本数":    int(len(seg)),
+                "胜率":      round(float((seg["pnl_pct"] > 0).sum() / len(seg) * 100), 1),
+                "平均盈亏%": round(float(seg["pnl_pct"].mean()), 2),
+            }
+        elif len(seg) > 0:
+            since_last = {"样本数": int(len(seg)), "提示": "样本数不足2笔，暂不单独计算胜率"}
+
+    return segments, since_last
+
+
 def calculate_metrics(df: pd.DataFrame) -> dict | None:
     """
     从账本计算多维度绩效指标。
@@ -74,6 +134,20 @@ def calculate_metrics(df: pd.DataFrame) -> dict | None:
     if len(closed) < MIN_CLOSED:
         print(f"⚠️ 已平仓记录仅 {len(closed)} 条，不足 {MIN_CLOSED} 条，暂缓进化。")
         return None
+
+    # ✅ 【修复】A股账本是"只要还在追踪就每天新增一行"，一笔真实交易平仓前可能已经
+    # 累积了好几天的行——平仓时这几行会被打上同一个终态Tag（见 scan.py 阶段0/0b），
+    # 结果这里按行遍历会把同一笔交易算成好几笔，胜率的样本数被人为放大，平均盈亏也会
+    # 被"同一笔交易在不同日子的收盘价"稀释。按(Ticker, Tag)分组，每组只保留日期最新的
+    # 一行——同一支票如果先后有两段完全不同的持仓（比如3月止损过一次、8月又重新入选
+    # 再平仓），Tag分组不会把它们混在一起，两段还是分开算两笔。
+    if "Date" in closed.columns:
+        closed["_dt"] = pd.to_datetime(closed["Date"], errors="coerce")
+        before_dedup = len(closed)
+        closed = closed.sort_values("_dt").drop_duplicates(subset=["Ticker", "Tag"], keep="last")
+        deduped_count = before_dedup - len(closed)
+        if deduped_count > 0:
+            print(f"🗂️ 按(Ticker,Tag)去重：{before_dedup} 行平仓记录合并为 {len(closed)} 笔独立交易（同一笔交易在持仓期间产生的多行不再重复计入胜率）")
 
     # ── 从 review_history.csv 补充卖出价 ──
     # review_history.csv 字段：Ticker, Rec_Price(买入), Cur_Price(卖出), PnL_Pct 等
@@ -136,6 +210,7 @@ def calculate_metrics(df: pd.DataFrame) -> dict | None:
             "buy":      float(buy),
             "sell":     float(sell),
             "hold_period": str(row.get("Hold_Period", "")),
+            "date":     str(row.get("Date", "")),
         })
 
     if skipped_no_sell:
@@ -205,6 +280,9 @@ def calculate_metrics(df: pd.DataFrame) -> dict | None:
         for _, r in active.iterrows()
     ][:10]
 
+    generation_boundaries = _load_evolution_boundaries()
+    generation_stats, since_last_evolution = _segment_by_generation(df_c, generation_boundaries)
+
     return {
         "total_closed":    total,
         "overall_win_rate": wr,
@@ -214,6 +292,8 @@ def calculate_metrics(df: pd.DataFrame) -> dict | None:
         "sector_stats":    sector_stats,
         "score_stats":     score_stats,
         "exit_stats":      exit_stats,
+        "generation_stats": generation_stats,
+        "since_last_evolution": since_last_evolution,
         "active_count":    len(active),
         "active_summary":  active_summary,
         "prev_rules":      prev_rules,
@@ -237,10 +317,17 @@ def evolve_strategy(metrics: dict):
 
 【当前绩效报告】：
 - 已平仓交易总数：{metrics['total_closed']}
-- 总体胜率：{metrics['overall_win_rate']}%（及格线60%）
+- 总体胜率（全部历史混合，仅供参考）：{metrics['overall_win_rate']}%（及格线60%）
 - 平均盈亏：{metrics['avg_pnl_pct']}%
 - 最佳交易：{metrics['best_trade']}
 - 最差交易：{metrics['worst_trade']}
+
+【按进化世代拆分胜率】（重点看这个，而不是上面那个混合了所有历史的总胜率——
+这里能看出每一轮规则调整之后，胜率到底是变好了还是变差了）：
+{json.dumps(metrics['generation_stats'], ensure_ascii=False, indent=2) if metrics['generation_stats'] else "尚无进化历史，这是第一轮"}
+
+【最近一次进化之后的战绩】（当前生效规则的真实表现，样本量可能还小，仅供参考）：
+{json.dumps(metrics['since_last_evolution'], ensure_ascii=False, indent=2) if metrics['since_last_evolution'] else "尚无数据或样本不足"}
 
 【按行业板块拆分胜率】（识别哪些板块该超配/回避）：
 {json.dumps(metrics['sector_stats'], ensure_ascii=False, indent=2)}
@@ -256,6 +343,8 @@ def evolve_strategy(metrics: dict):
 
 【分析要求】：
 根据以上数据，用归纳法找出规律：
+- 优先看"按进化世代拆分胜率"：如果最近一代相比上一代胜率下降了，说明上一轮的规则
+  可能是错的或者用力过猛，这一轮应该考虑撤销或调整方向，而不是继续在错的方向加码。
 - 哪些板块持续亏损应该明确回避？哪些持续盈利应该加权？
 - 评分区间和实际收益是否正相关？如果低分区间胜率反而高，说明评分体系有问题，请指出。
 - 止损触发次数多 = 止损位太紧；到期清仓亏损多 = 持股周期太长或趋势判断有误。
@@ -412,8 +501,12 @@ if __name__ == "__main__":
         exit()
 
     print(f"\n📊 绩效概览：")
-    print(f"  已平仓 {metrics['total_closed']} 笔 | 总体胜率 {metrics['overall_win_rate']}% | 平均盈亏 {metrics['avg_pnl_pct']}%")
+    print(f"  已平仓 {metrics['total_closed']} 笔 | 总体胜率(全部历史) {metrics['overall_win_rate']}% | 平均盈亏 {metrics['avg_pnl_pct']}%")
     print(f"  当前持仓 {metrics['active_count']} 只")
+    if metrics["generation_stats"]:
+        print(f"  按进化世代拆分：{metrics['generation_stats']}")
+    if metrics["since_last_evolution"]:
+        print(f"  最近一次进化之后：{metrics['since_last_evolution']}")
     if metrics["sector_stats"]:
         print(f"  板块胜率 Top3：{list(metrics['sector_stats'].items())[:3]}")
     if metrics["score_stats"]:
