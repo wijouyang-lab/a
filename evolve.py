@@ -141,8 +141,13 @@ def calculate_metrics(df: pd.DataFrame) -> dict | None:
     # 被"同一笔交易在不同日子的收盘价"稀释。按(Ticker, Tag)分组，每组只保留日期最新的
     # 一行——同一支票如果先后有两段完全不同的持仓（比如3月止损过一次、8月又重新入选
     # 再平仓），Tag分组不会把它们混在一起，两段还是分开算两笔。
+    # 同时记录每组最早的日期(episode_start)——这是这一笔交易真正的建仓日，下面匹配
+    # review_history.csv 卖出价时要用，不能只按ticker匹配（否则同一支票的两段不同
+    # 持仓会被错误地都配上同一个、通常是最近一次的卖出价）。
     if "Date" in closed.columns:
         closed["_dt"] = pd.to_datetime(closed["Date"], errors="coerce")
+        episode_start = closed.groupby(["Ticker", "Tag"])["_dt"].min().rename("episode_start")
+        closed = closed.merge(episode_start, on=["Ticker", "Tag"], how="left")
         before_dedup = len(closed)
         closed = closed.sort_values("_dt").drop_duplicates(subset=["Ticker", "Tag"], keep="last")
         deduped_count = before_dedup - len(closed)
@@ -150,24 +155,47 @@ def calculate_metrics(df: pd.DataFrame) -> dict | None:
             print(f"🗂️ 按(Ticker,Tag)去重：{before_dedup} 行平仓记录合并为 {len(closed)} 笔独立交易（同一笔交易在持仓期间产生的多行不再重复计入胜率）")
 
     # ── 从 review_history.csv 补充卖出价 ──
-    # review_history.csv 字段：Ticker, Rec_Price(买入), Cur_Price(卖出), PnL_Pct 等
-    review_exit_map = {}   # Ticker → (sell_price, pnl_pct)
+    # review_history.csv 字段：Ticker, Rec_Date(建仓日), Rec_Price(买入), Cur_Price(卖出), PnL_Pct 等
+    # ✅ 【修复】原来按Ticker一个键取"最新一条"，如果同一支票先后有两段不同的持仓
+    # （比如3月止损过一次、8月重新入选再平仓），两段会被错误地都配上同一个（较新的
+    # 那次的）卖出价，导致3月那笔的盈亏算错。这里保留每只ticker的完整记录列表，
+    # 匹配时按 Rec_Date 找和这段持仓建仓日最接近的那一条，而不是无脑取最新的。
+    review_entries_by_ticker = {}   # Ticker → [(rec_date, cur_price, pnl_pct), ...]
     if os.path.exists(REVIEW_FILE):
         try:
             df_rv = pd.read_csv(REVIEW_FILE, keep_default_na=False)
-            # 每只 ticker 取最新一条（按 Review_Date 排序）
-            if "Review_Date" in df_rv.columns:
-                df_rv["Review_Date"] = pd.to_datetime(df_rv["Review_Date"], errors="coerce")
-                df_rv = df_rv.sort_values("Review_Date", ascending=False)
-            for _, r in df_rv.drop_duplicates(subset="Ticker", keep="first").iterrows():
+            if "Rec_Date" in df_rv.columns:
+                df_rv["_rec_dt"] = pd.to_datetime(df_rv["Rec_Date"], errors="coerce")
+            else:
+                df_rv["_rec_dt"] = pd.NaT
+            for _, r in df_rv.iterrows():
                 ticker = str(r.get("Ticker", "")).strip()
                 cur    = safe_float(r.get("Cur_Price"))
                 pnl    = safe_float(r.get("PnL_Pct"), default=None)
                 if ticker and cur is not None:
-                    review_exit_map[ticker] = (cur, pnl)
-            print(f"📋 从 review_history.csv 补充了 {len(review_exit_map)} 只标的的卖出价")
+                    review_entries_by_ticker.setdefault(ticker, []).append((r["_rec_dt"], cur, pnl))
+            print(f"📋 从 review_history.csv 读取了 {sum(len(v) for v in review_entries_by_ticker.values())} 条记录，覆盖 {len(review_entries_by_ticker)} 只标的")
         except Exception as e:
             print(f"⚠️ 读取 review_history.csv 失败: {e}")
+
+    def _find_review_exit(ticker, episode_start_dt):
+        """按(ticker, 建仓日最接近)匹配review_history.csv里对应这一段持仓的卖出价，
+        容许7天误差（两个文件的建仓日记录时点可能差一两天，但不该差太远）。"""
+        entries = review_entries_by_ticker.get(ticker)
+        if not entries:
+            return None, None
+        if pd.isna(episode_start_dt):
+            # 拿不到建仓日就退回旧逻辑：取最新一条
+            entries_sorted = sorted(entries, key=lambda x: (x[0] if pd.notna(x[0]) else pd.Timestamp.min), reverse=True)
+            return entries_sorted[0][1], entries_sorted[0][2]
+        best, best_diff = None, None
+        for rec_dt, cur, pnl in entries:
+            if pd.isna(rec_dt):
+                continue
+            diff = abs((rec_dt - episode_start_dt).days)
+            if diff <= 7 and (best_diff is None or diff < best_diff):
+                best, best_diff = (cur, pnl), diff
+        return best if best else (None, None)
 
     rows = []
     skipped_no_sell = []
@@ -178,11 +206,9 @@ def calculate_metrics(df: pd.DataFrame) -> dict | None:
 
         ticker = str(row.get("Ticker", "")).strip()
 
-        # 优先用 review_history.csv 的价格，次用 trade_history.csv 的 Exit_Price
-        sell = None
-        pnl_pct_direct = None
-        if ticker in review_exit_map:
-            sell, pnl_pct_direct = review_exit_map[ticker]
+        # 优先用 review_history.csv 的价格（按建仓日匹配到具体这一段持仓），
+        # 次用 trade_history.csv 的 Exit_Price
+        sell, pnl_pct_direct = _find_review_exit(ticker, row.get("episode_start"))
         if sell is None:
             sell = safe_float(row.get(EXIT_COL))
         if sell is None:
