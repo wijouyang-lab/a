@@ -849,6 +849,7 @@ def get_global_macro_data():
     print("🌐 [阶段2.6] 正在抓取国际宏观与大宗商品核心指标数据...")
     macro_tickers = {
         "10Y_US_Bond": ("^TNX", "美国10年期国债收益率"),
+        "VIX": ("^VIX", "美股恐慌指数VIX"),
         "Gold": ("GC=F", "COMEX黄金期货"),
         "Silver": ("SI=F", "COMEX白银期货"),
         "Copper": ("HG=F", "COMEX铜期货"),
@@ -856,6 +857,7 @@ def get_global_macro_data():
         "Brent_Oil": ("BZ=F", "布伦特原油期货"),
     }
     results = []
+    vix_value = None
 
     for key, (ticker, desc) in macro_tickers.items():
         try:
@@ -869,7 +871,10 @@ def get_global_macro_data():
             prev_close = float(df['Close'].iloc[-2])
             pct_chg = round((close_val - prev_close) / prev_close * 100, 2)
             sign = "📈" if pct_chg > 0 else "📉"
-            if key == "10Y_US_Bond":
+            if key == "VIX":
+                vix_value = close_val
+                results.append(f"{sign} {desc} ({ticker}): {round(close_val, 2)} (当日变动: {pct_chg:+.2f}%)")
+            elif key == "10Y_US_Bond":
                 results.append(f"{sign} {desc} ({ticker}): {round(close_val, 3)}% (当日变动: {pct_chg:+.2f}%)")
             else:
                 results.append(f"{sign} {desc} ({ticker}): ${round(close_val, 2)} (当日变动: {pct_chg:+.2f}%)")
@@ -886,6 +891,15 @@ def get_global_macro_data():
                 "主要影响石油化工、煤炭开采、航空运输、水路运输等上下游行业，对其他行业"
                 "（如软件、消费、医药等）相关性很低，请结合每支标的自己的所属行业判断，"
                 "不要不分行业地把油价波动同等代入所有个股的评分。")
+    # ✅ 【新增】VIX虽然是美股波动率指标，但作为全球风险情绪的参考信号，对A股（尤其是
+    # 高位股/成长股）也有一定溢出效应参考价值。VIX>25通常代表全球风险偏好转弱。
+    if vix_value is not None:
+        if vix_value >= 30:
+            guidance += (f"\n【VIX风控提示】当前VIX={round(vix_value,1)}，处于极度恐慌区间（>=30），"
+                         f"全球风险偏好明显转弱。请提高评分门槛，对纯逻辑推演、缺乏新闻验证的"
+                         f"高位追涨标的更加谨慎。")
+        elif vix_value >= 25:
+            guidance += f"\n【VIX风控提示】当前VIX={round(vix_value,1)}，处于偏高波动区间（>=25），请相应提高评分门槛。"
     return "\n".join(results) + guidance
 
 
@@ -1886,6 +1900,67 @@ if __name__ == "__main__":
         if skipped_frozen > 0:
             print(f"⏭️ 已跳过 {skipped_frozen} 只冻结标的，不写入新追踪记录。")
 
+        # ⚠️ 【新增，置信度低于美股那版，请务必实跑验证】财报日期风险检查：技术面/新闻面
+        # 再干净，财报本身是独立的二元事件风险。用的是tushare的 pro.disclosure_date()
+        # 接口——这个接口我没有实盘验证过返回字段是否确实是 ts_code/pre_date/actual_date
+        # 这几个名字，是根据tushare文档惯例写的，不是像yfinance那版一样有把握。整段包在
+        # try/except里，如果字段名不对最多是这个检查失效、打印一条警告，不会影响主流程。
+        # 建议你实跑一次看日志里有没有报错，确认没问题后再完全信任这个提示。
+        earnings_warnings = []
+        try:
+            for i in chosen_to_write:
+                ticker = i.get('Ticker', '')
+                hold_period_str = str(i.get('Hold_Period', ''))
+                days_match = re.findall(r'\d+', hold_period_str)
+                max_hold_days = max(int(d) for d in days_match) if days_match else 10
+                try:
+                    df_disc = pro.disclosure_date(ts_code=ticker)
+                    if df_disc is not None and not df_disc.empty and 'pre_date' in df_disc.columns:
+                        df_disc['pre_date_dt'] = pd.to_datetime(df_disc['pre_date'], errors='coerce')
+                        today_dt = pd.Timestamp(get_bj_time().date())
+                        upcoming = df_disc[
+                            (df_disc['pre_date_dt'] >= today_dt) &
+                            (df_disc['pre_date_dt'] <= today_dt + pd.Timedelta(days=max_hold_days))
+                        ]
+                        if not upcoming.empty:
+                            edate_str = upcoming.iloc[0]['pre_date_dt'].strftime('%Y-%m-%d')
+                            earnings_warnings.append(f"{i.get('Name','')}({ticker}) 预计{edate_str}公布财报")
+                except Exception as e:
+                    print(f"⚠️ 财报日期查询失败 [{ticker}]: {e}（不影响正常流程，仅跳过该项风险标注）")
+        except Exception as e:
+            print(f"⚠️ 财报日期风险检查整体出错，本轮跳过该功能: {e}")
+
+        if earnings_warnings:
+            print(f"⚠️ 财报期风险：{earnings_warnings}")
+            earnings_html = (
+                f"<div style='background:#fce4ec;border-left:5px solid #c2185b;padding:15px 20px;"
+                f"margin:15px 0;border-radius:8px;'>"
+                f"<b>📅 财报日期风险提示：</b>以下标的预计在建议持有期内披露财报，"
+                f"财报是独立于技术面的二元事件风险："
+                f"<br>{'<br>'.join(earnings_warnings)}</div>"
+            )
+            full_html = full_html.replace("</div></body></html>", f"{earnings_html}</div></body></html>")
+
+        # ✅ 【新增】板块集中度警示：用tushare的真实行业分类（比手写映射表更全更准），
+        # 不做硬性阻挡（有时候集中在一个主题是刻意判断），只是让集中度可见。
+        if len(chosen_to_write) >= 2:
+            sector_counts = {}
+            for i in chosen_to_write:
+                sec = i.get('Industry', '未知')
+                sector_counts.setdefault(sec, []).append(f"{i.get('Name','')}({i.get('Ticker','')})")
+            max_sector, max_list = max(sector_counts.items(), key=lambda kv: len(kv[1]))
+            concentration_pct = len(max_list) / len(chosen_to_write) * 100
+            if len(max_list) >= 3 or concentration_pct >= 60:
+                concentration_html = (
+                    f"<div style='background:#fff3e0;border-left:5px solid #f57c00;padding:15px 20px;"
+                    f"margin:15px 0;border-radius:8px;'>"
+                    f"<b>⚠️ 板块集中度提示：</b>今日 {len(chosen_to_write)} 支推荐中有 "
+                    f"{len(max_list)} 支（{round(concentration_pct)}%）集中在 <b>{max_sector}</b> 行业："
+                    f"{', '.join(max_list)}。这些仓位对同一行业利空的敞口是叠加的，请自行评估是否需要分散。</div>"
+                )
+                full_html = full_html.replace("</div></body></html>", f"{concentration_html}</div></body></html>")
+                print(f"⚠️ 板块集中度提示：{max_sector} 行业占今日推荐的 {round(concentration_pct)}%（{len(max_list)}/{len(chosen_to_write)}）")
+
         # ✅ 【改动】A股盘中写入待确认文件，盘后由 review_ashare.py 补充写入正式账本
         # 原因：确保盘后有完整的收盘数据再记账，避免盘中价格不准确
         ts_date = get_bj_time().strftime('%Y-%m-%d')
@@ -1903,12 +1978,16 @@ if __name__ == "__main__":
             # 止损位这个"锚点"从一开始就偏了——即使止损检测逻辑本身完全正确，止损价也已经和真实
             # 成本对不上。review.py 拿到真实开盘价后会按比例（真实开盘价/Scan_Ref_Price）平移止损位，
             # 这个字段只用于那一次计算，不会被当作价格展示或用于任何盈亏计算。
-            pending_header = "Date,Ticker,Name,Tag,Industry,Amount,Daily_Pct,Hold_Period,Stop_Loss,Score,Status,Scan_Ref_Price\n"
+            # ✅ 【新增】ATR_Pct 也带上——这是刚加的ATR动态止损用来算止损距离的波动率依据，
+            # 不带上的话，止损从固定-5%换成ATR动态算这件事本身对不对，就永远没法用
+            # evolve.py 验证（只能凭道理猜，跟一直在避免的"没数据支撑的判断"是同一个问题）。
+            pending_header = "Date,Ticker,Name,Tag,Industry,Amount,Daily_Pct,Hold_Period,Stop_Loss,Score,Status,Scan_Ref_Price,ATR_Pct\n"
             with open(pending_file, "w", encoding="utf-8") as f:
                 f.write(pending_header)
                 for i in chosen_to_write:
                     scan_ref_price = i.get('Open', i.get('Close', ''))
-                    f.write(f"{ts_date},{i['Ticker']},{i['Name']},{i['Tag']},{i.get('Industry','未知')},{i['Amount']},{i['Daily_Pct']},{i['Hold_Period']},{i['Stop_Loss']},{i.get('Score','N/A')},pending,{scan_ref_price}\n")
+                    atr_pct_val = i.get('ATR_Pct', '')
+                    f.write(f"{ts_date},{i['Ticker']},{i['Name']},{i['Tag']},{i.get('Industry','未知')},{i['Amount']},{i['Daily_Pct']},{i['Hold_Period']},{i['Stop_Loss']},{i.get('Score','N/A')},pending,{scan_ref_price},{atr_pct_val}\n")
             
             print(f"✅ 共生成 {len(chosen_to_write)} 条A股推荐记录（已保存至 {pending_file}，不含买入价，止损位随后会用真实开盘价校准）")
             print(f"⏳ 开盘价/收盘价将在盘后 review.py 执行时用完整行情数据补充写入 trade_history.csv")
