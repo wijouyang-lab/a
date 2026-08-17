@@ -77,32 +77,54 @@ def get_live_quote(ticker):
 
 def _migrate_trade_history_add_open_price(log_file):
     """
-    trade_history.csv 表头升级：老数据没有 Open_Price 列。只把表头文字换掉、
-    不管数据行的话，新表头有12列但老数据行还是11列，pandas 读取时列会错位
-    （这也是当年 Score 列升级时留下的老毛病，见下面 Score 列升级的注释）。
-    这里连每一行老数据都补一个空的 Open_Price 字段，保证列数和新表头对齐。
+    trade_history.csv 表头升级：
+    1. 老数据没有 Open_Price 列。只把表头文字换掉、不管数据行的话，新表头列数
+       和老数据行对不上，pandas 读取时列会错位（这也是当年 Score 列升级时留下的
+       老毛病）。这里把 Open_Price 插到 Close_Price 前面，同时给每行老数据补空值。
+    2. 顺带把 ATR_Pct 也加上（trailing，直接加在最后，迁移更简单）——这是新加的
+       ATR动态止损用来算止损距离的波动率依据，不带上的话没法用 evolve.py 验证
+       "止损从固定-5%换成ATR动态算"这件事到底有没有用。
     """
     if not (os.path.exists(log_file) and os.path.getsize(log_file) > 0):
         return
     with open(log_file, "r", encoding="utf-8") as f:
         old_lines = f.readlines()
-    if not old_lines or "Open_Price" in old_lines[0]:
+    if not old_lines:
+        return
+
+    needs_open_price = "Open_Price" not in old_lines[0]
+    needs_atr = "ATR_Pct" not in old_lines[0]
+    if not needs_open_price and not needs_atr:
         return
 
     old_cols = [c.strip() for c in old_lines[0].strip().split(",")]
-    close_idx = old_cols.index("Close_Price") if "Close_Price" in old_cols else 5
 
-    migrated = ["Date,Ticker,Name,Tag,Industry,Open_Price,Close_Price,Amount,Daily_Pct,Hold_Period,Stop_Loss,Score\n"]
+    if needs_open_price:
+        close_idx = old_cols.index("Close_Price") if "Close_Price" in old_cols else 5
+    else:
+        close_idx = None
+
+    migrated_header_cols = old_cols.copy()
+    if needs_open_price:
+        migrated_header_cols = migrated_header_cols[:close_idx] + ["Open_Price"] + migrated_header_cols[close_idx:]
+    if needs_atr:
+        migrated_header_cols = migrated_header_cols + ["ATR_Pct"]
+
+    migrated = [",".join(migrated_header_cols) + "\n"]
     for line in old_lines[1:]:
         if not line.strip():
             continue
         fields = line.rstrip("\n").split(",")
-        fields = fields[:close_idx] + [""] + fields[close_idx:]
+        if needs_open_price:
+            fields = fields[:close_idx] + [""] + fields[close_idx:]
+        if needs_atr:
+            fields = fields + [""]
         migrated.append(",".join(fields) + "\n")
 
     with open(log_file, "w", encoding="utf-8") as f:
         f.writelines(migrated)
-    print(f"⚠️ 检测到旧版trade_history.csv缺少Open_Price列，已自动升级表头并补齐 {len(migrated) - 1} 行历史数据（老数据Open_Price留空，不影响后续追踪）")
+    added = [c for c, need in [("Open_Price", needs_open_price), ("ATR_Pct", needs_atr)] if need]
+    print(f"⚠️ 检测到旧版trade_history.csv缺少 {added} 列，已自动升级表头并补齐 {len(migrated) - 1} 行历史数据（老数据这些列留空，不影响后续追踪）")
 
 
 def _recalibrate_stop_loss_ashare(stop_loss_str, scan_ref_price, real_open_price):
@@ -159,7 +181,7 @@ def supplement_ashare_stocks_from_pending():
     print(f"📋 [盘后补充] 发现 {len(pending_files)} 份A股待确认文件（含历史遗留未处理的）：{pending_files}")
 
     _migrate_trade_history_add_open_price(log_file)
-    new_header = "Date,Ticker,Name,Tag,Industry,Open_Price,Close_Price,Amount,Daily_Pct,Hold_Period,Stop_Loss,Score\n"
+    new_header = "Date,Ticker,Name,Tag,Industry,Open_Price,Close_Price,Amount,Daily_Pct,Hold_Period,Stop_Loss,Score,ATR_Pct\n"
     new_header_cols = [c.strip() for c in new_header.strip().split(",")]
 
     for pending_file in pending_files:
@@ -273,7 +295,8 @@ def supplement_ashare_stocks_from_pending():
                     'Daily_Pct': pct_chg,
                     'Hold_Period': row['Hold_Period'],
                     'Stop_Loss': calibrated_stop_loss,
-                    'Score': row['Score']
+                    'Score': row['Score'],
+                    'ATR_Pct': row.get('ATR_Pct', ''),
                 })
 
             if missing_price_tickers:
@@ -595,7 +618,7 @@ prompt = f'''
 ai_html = ""
 with client.messages.stream(
     model=TARGET_MODEL,
-    max_tokens=50000,
+    max_tokens=30000,
     temperature=0.1,
     messages=[{"role": "user", "content": prompt}]
 ) as stream:
