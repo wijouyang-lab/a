@@ -237,6 +237,7 @@ def calculate_metrics(df: pd.DataFrame) -> dict | None:
             "sell":     float(sell),
             "hold_period": str(row.get("Hold_Period", "")),
             "date":     str(row.get("Date", "")),
+            "atr_pct":  safe_float(row.get("ATR_Pct"), default=None),
         })
 
     if skipped_no_sell:
@@ -281,6 +282,19 @@ def calculate_metrics(df: pd.DataFrame) -> dict | None:
     df_c["score_bucket"] = df_c["score"].apply(score_bucket)
     score_stats = {bk: _stats(g) for bk, g in df_c.groupby("score_bucket") if len(g) >= 2}
 
+    # ✅ 【新增】按ATR波动率分层——这是用来验证"止损从固定-5%换成ATR动态算"这个
+    # 改动到底有没有用：如果高波动股票（本来固定-5%止损很容易被正常波动扫损）在
+    # ATR动态止损下胜率明显提升，说明这个改动方向是对的；如果没有区别甚至更差，
+    # 说明这个判断站不住脚，应该考虑调整倍数或者撤回。
+    def atr_bucket(a):
+        if a is None:  return "无ATR数据(旧记录)"
+        if a < 2.5:    return "低波动(ATR<2.5%)"
+        elif a < 4.5:  return "中波动(ATR 2.5%-4.5%)"
+        else:          return "高波动(ATR>4.5%)"
+
+    df_c["atr_bucket"] = df_c["atr_pct"].apply(atr_bucket)
+    atr_stats = {bk: _stats(g) for bk, g in df_c.groupby("atr_bucket") if len(g) >= 2 and bk != "无ATR数据(旧记录)"}
+
     # 按退出方式
     tag_map = {"Stop_Loss_Hit": "止损触发", "Period_Matured": "持有到期",
                "Forced_Exit": "突发强清", "Dropped": "主动斩仓"}
@@ -317,6 +331,7 @@ def calculate_metrics(df: pd.DataFrame) -> dict | None:
         "worst_trade":     f"{worst['name']}({worst['ticker']}) {worst['pnl_pct']}%",
         "sector_stats":    sector_stats,
         "score_stats":     score_stats,
+        "atr_stats":       atr_stats,
         "exit_stats":      exit_stats,
         "generation_stats": generation_stats,
         "since_last_evolution": since_last_evolution,
@@ -360,6 +375,11 @@ def evolve_strategy(metrics: dict):
 
 【按推荐评分区间拆分胜率】（验证评分体系是否有真正的预测力）：
 {json.dumps(metrics['score_stats'], ensure_ascii=False, indent=2)}
+
+【按ATR波动率分层拆分胜率】（验证止损从固定-5%改成ATR动态算这个改动有没有用——
+如果高波动分层的胜率明显高于历史上固定-5%止损时期的同类标的，说明改动方向正确；
+样本还太少时先别下结论）：
+{json.dumps(metrics['atr_stats'], ensure_ascii=False, indent=2) if metrics['atr_stats'] else "样本不足或还没有ATR数据的已平仓记录"}
 
 【按退出方式拆分】（判断止损位/持股周期是否合理）：
 {json.dumps(metrics['exit_stats'], ensure_ascii=False, indent=2)}
