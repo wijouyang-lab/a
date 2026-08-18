@@ -1,0 +1,5 @@
+Date,Ticker,Name,Tag,Industry,Amount,Daily_Pct,Hold_Period,Stop_Loss,Score,Status,Scan_Ref_Price,ATR_Pct
+2026-08-18,300017.SZ,网宿科技,Observation,软件服务,7317341.31766,1.3849,观望,观望,N/A,pending,17.0,6.33
+2026-08-18,000977.SZ,浪潮信息,Core_Dragon,IT设备,6747615.13345,2.3858,5-10天,73.50元,75,pending,78.82,6.32
+2026-08-18,300209.SZ,行云科技,Observation,互联网,5552840.15137,0.9504,观望,观望,N/A,pending,38.78,9.38
+2026-08-18,603019.SH,中科曙光,Core_Dragon,IT设备,3943630.989,1.3429,5-10天,84.00元,66,pending,89.5,5.29
