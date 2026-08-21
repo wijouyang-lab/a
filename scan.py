@@ -380,30 +380,48 @@ def check_rule_based_sell_signals(price_map, exclude_tickers=None):
         recent = df[df['Date'] >= cutoff.replace(tzinfo=None)].copy()
 
         active_tags = ['Core_Double_Dragon', 'Sub_Pioneer', 'Core_Dragon']
-        holdings = recent[recent['Tag'].isin(active_tags)].copy()
-        if holdings.empty:
+        holdings_latest = recent[recent['Tag'].isin(active_tags)].copy()
+        if holdings_latest.empty:
             print("📋 [阶段0b] 当前无有效持仓，跳过规则卖出信号检测。")
             return [], []
 
         _INVALID = {'', 'n/a', 'nan', 'none'}
         for _col in ['Hold_Period', 'Stop_Loss', 'Score']:
-            if _col not in holdings.columns:
-                holdings[_col] = ''
+            if _col not in holdings_latest.columns:
+                holdings_latest[_col] = ''
         _valid_mask = (
-            holdings['Hold_Period'].astype(str).str.strip().str.lower().map(lambda v: v not in _INVALID) &
-            holdings['Stop_Loss'].astype(str).str.strip().str.lower().map(lambda v: v not in _INVALID) &
-            holdings['Score'].astype(str).str.strip().str.lower().map(lambda v: v not in _INVALID)
+            holdings_latest['Hold_Period'].astype(str).str.strip().str.lower().map(lambda v: v not in _INVALID) &
+            holdings_latest['Stop_Loss'].astype(str).str.strip().str.lower().map(lambda v: v not in _INVALID) &
+            holdings_latest['Score'].astype(str).str.strip().str.lower().map(lambda v: v not in _INVALID)
         )
-        holdings = holdings[_valid_mask].copy()
-        if holdings.empty:
+        holdings_latest = holdings_latest[_valid_mask].copy()
+        if holdings_latest.empty:
             print("📋 [阶段0b] 过滤后无有效新版本持仓，跳过规则卖出信号检测。")
             return [], []
 
-        holdings = holdings.sort_values('Date', ascending=False).drop_duplicates(subset='Ticker', keep='first')
-        holdings = holdings[~holdings['Ticker'].astype(str).isin(exclude_tickers)]
-        if holdings.empty:
+        # ✅ 【修复】原来直接对 recent 按日期倒序去重，取的是"最新一行"，
+        # 然后把这一行的 Close_Price 当买入价用——但A股账本是"只要还在
+        # 追踪就每天新增一行"，同一支票如果被连续几天重复推荐，最新一行
+        # 的 Close_Price 只是最近一天的收盘价，不是真正的建仓价，会导致
+        # 这里算出来的盈亏、以及止损判断的分母，跟真实持仓成本对不上
+        # （这个和之前修过的 review.py 报表显示那个bug是同一个病根，
+        # 但这里是完全独立的一处代码，之前没有覆盖到）。
+        # 这里分开处理：Tag/Stop_Loss/Score这些"当前状态"用最新一行，
+        # buy_price/buy_date这些"建仓时"信息改成用同一支票在这批记录
+        # 里最早的一行——即真正的建仓日。
+        holdings_latest = holdings_latest.sort_values('Date', ascending=False).drop_duplicates(subset='Ticker', keep='first')
+        holdings_latest = holdings_latest[~holdings_latest['Ticker'].astype(str).isin(exclude_tickers)]
+        if holdings_latest.empty:
             print("📋 [阶段0b] 持仓已被阶段0a全部处理，跳过规则卖出信号检测。")
             return [], []
+
+        earliest_by_ticker = (
+            recent[recent['Ticker'].isin(holdings_latest['Ticker'])]
+            .sort_values('Date', ascending=True)
+            .drop_duplicates(subset='Ticker', keep='first')
+            .set_index('Ticker')
+        )
+        holdings = holdings_latest
     except Exception as e:
         print(f"⚠️ [阶段0b] 持仓读取失败: {e}")
         return [], []
@@ -427,47 +445,59 @@ def check_rule_based_sell_signals(price_map, exclude_tickers=None):
     removed_tickers = []
 
     for _, row in holdings.iterrows():
-        ticker = str(row['Ticker'])
-        buy_price = float(row['Close_Price'])
-        buy_date = row['Date']
-        orig_tag = row['Tag']
-        hold_days = _parse_hold_days(row.get('Hold_Period'))
-        stop_loss_val = _parse_stop_loss_price(row.get('Stop_Loss'))
-        cur_price = price_map.get(ticker, buy_price)
+        # ✅ 【新增】单只票处理失败（比如 Close_Price 缺失/格式异常，这在
+        # 之前的修复里是被允许的合法状态——拿不到真实价格时留空而不是
+        # 造假）不应该让其余所有持仓的止损/到期检测全部跟着失败——原来
+        # 这个循环体没有任何 try/except，一支票数据有问题就会让整个函数
+        # 抛出未捕获异常，而这个函数的调用处也没有包try/except，等于会
+        # 让整个 scan.py 主流程崩溃，导致当天所有本该触发的卖出信号
+        # 全部检测不到、也不会被写入 trade_history.csv。
+        try:
+            ticker = str(row['Ticker'])
+            earliest_row = earliest_by_ticker.loc[ticker] if ticker in earliest_by_ticker.index else row
+            buy_price = float(earliest_row['Close_Price'])
+            buy_date = earliest_row['Date']
+            orig_tag = row['Tag']
+            hold_days = _parse_hold_days(row.get('Hold_Period'))
+            stop_loss_val = _parse_stop_loss_price(row.get('Stop_Loss'))
+            cur_price = price_map.get(ticker, buy_price)
 
-        signal_type = None
-        reason = ""
-        if stop_loss_val is not None and cur_price <= stop_loss_val:
-            signal_type = "止损触发"
-            reason = f"现价{cur_price}已跌破止损位{stop_loss_val}元，按风控纪律应立即止损离场"
-        elif hold_days is not None:
-            maturity_date = buy_date + datetime.timedelta(days=hold_days)
-            if now >= maturity_date:
-                signal_type = "持有到期"
-                days_held_now = (now - buy_date).days
-                reason = f"已持有{days_held_now}天，达到/超过建议持股周期（{row.get('Hold_Period')}）上限，按纪律应清仓离场"
+            signal_type = None
+            reason = ""
+            if stop_loss_val is not None and cur_price <= stop_loss_val:
+                signal_type = "止损触发"
+                reason = f"现价{cur_price}已跌破止损位{stop_loss_val}元，按风控纪律应立即止损离场"
+            elif hold_days is not None:
+                maturity_date = buy_date + datetime.timedelta(days=hold_days)
+                if now >= maturity_date:
+                    signal_type = "持有到期"
+                    days_held_now = (now - buy_date).days
+                    reason = f"已持有{days_held_now}天，达到/超过建议持股周期（{row.get('Hold_Period')}）上限，按纪律应清仓离场"
 
-        if signal_type is None:
+            if signal_type is None:
+                continue
+
+            pnl_pct = round(((cur_price - buy_price) / buy_price) * 100, 2)
+            sell_signals.append({
+                "ticker": ticker,
+                "name": str(row.get('Name', ticker)),
+                "industry": str(row.get('Industry', '未知')),
+                "signal_type": signal_type,
+                "orig_tag": orig_tag,
+                "buy_price": buy_price,
+                "buy_date": buy_date.strftime('%Y-%m-%d'),
+                "current_price": cur_price,
+                "pnl_pct": pnl_pct,
+                "days_held": (now - buy_date).days,
+                "hold_period": row.get('Hold_Period', 'N/A'),
+                "stop_loss": row.get('Stop_Loss', 'N/A'),
+                "score": row.get('Score', 'N/A'),
+                "reason": reason.replace(",", "，"),
+            })
+            removed_tickers.append(ticker)
+        except Exception as e:
+            print(f"⚠️ [阶段0b] {row.get('Ticker','?')} 止损/到期检测出错，跳过该标的（不影响其余持仓的检测）: {e}")
             continue
-
-        pnl_pct = round(((cur_price - buy_price) / buy_price) * 100, 2)
-        sell_signals.append({
-            "ticker": ticker,
-            "name": str(row.get('Name', ticker)),
-            "industry": str(row.get('Industry', '未知')),
-            "signal_type": signal_type,
-            "orig_tag": orig_tag,
-            "buy_price": buy_price,
-            "buy_date": buy_date.strftime('%Y-%m-%d'),
-            "current_price": cur_price,
-            "pnl_pct": pnl_pct,
-            "days_held": (now - buy_date).days,
-            "hold_period": row.get('Hold_Period', 'N/A'),
-            "stop_loss": row.get('Stop_Loss', 'N/A'),
-            "score": row.get('Score', 'N/A'),
-            "reason": reason.replace(",", "，"),
-        })
-        removed_tickers.append(ticker)
 
     if not sell_signals:
         print("✅ [阶段0b] 规则审查：当前持仓无止损触发或持有到期信号。")
