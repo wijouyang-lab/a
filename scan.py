@@ -261,7 +261,7 @@ def pre_scan_portfolio_review(macro_news_text, macro_data_text, price_map):
     try:
         response = client.messages.create(
             model=TARGET_MODEL,
-            max_tokens=1000, 
+            max_tokens=80000, 
             temperature=0.1,
             messages=[{"role": "user", "content": review_prompt}]
         )
