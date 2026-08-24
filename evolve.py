@@ -304,6 +304,28 @@ def calculate_metrics(df: pd.DataFrame) -> dict | None:
         if len(g) >= 1
     }
 
+
+    # ========== 【新增】按技术信号拆分（周期共振是核心） ==========
+    signal_stats = {}
+    # 如果账本中有周期共振字段，单独分析
+    if "周期共振" in df_c.columns:
+        for val, grp in df_c.groupby("周期共振"):
+            if len(grp) < 2:
+                continue
+            key = f"周期共振={'是' if str(val).lower() in ('true','1','yes') else '否'}"
+            signal_stats[key] = _stats(grp)
+    # 分析其他技术信号（如果有）
+    for sig_col, label in [("MACD金叉", "MACD金叉"), ("周线共振", "周线共振"),
+                           ("KDJ_J回升", "KDJ回升"), ("量能放大", "量能放大")]:
+        if sig_col not in df_c.columns:
+            continue
+        for val, grp in df_c.groupby(sig_col):
+            if len(grp) < 2:
+                continue
+            key = f"{label}={'是' if str(val).lower() in ('true','1','yes') else '否'}"
+            signal_stats[key] = _stats(grp)
+    # ============================================================
+
     # 上一轮规则
     prev_rules = []
     if os.path.exists(EVOLVE_LOG):
@@ -338,6 +360,7 @@ def calculate_metrics(df: pd.DataFrame) -> dict | None:
         "active_count":    len(active),
         "active_summary":  active_summary,
         "prev_rules":      prev_rules,
+        "signal_stats":    signal_stats,  # 【新增】
     }
 
 
@@ -430,7 +453,7 @@ def evolve_strategy(metrics: dict):
     try:
         response = client.messages.create(
             model=EVOLVE_MODEL,
-            max_tokens=2000,
+            max_tokens=50000,
             temperature=0.3,
             messages=[{"role": "user", "content": prompt}],
         )
