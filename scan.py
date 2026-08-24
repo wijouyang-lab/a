@@ -1102,6 +1102,7 @@ def calc_tech_indicators(full_pool, codes, trade_date):
 
     for code in list(full_pool.keys()):
         weekly_bullish = False
+        weekly_macd_rising = False  # 【新增】初始化，防止 len(wk)<12 时 NameError
         if not df_weekly.empty and code in df_weekly['ts_code'].values:
             wk = df_weekly[df_weekly['ts_code'] == code].sort_values('trade_date')
             if len(wk) >= 12:
@@ -1111,7 +1112,6 @@ def calc_tech_indicators(full_pool, codes, trade_date):
                 w_exp1 = pd.Series(wc).ewm(span=12, adjust=False).mean()
                 w_exp2 = pd.Series(wc).ewm(span=26, adjust=False).mean()
                 w_hist = (w_exp1 - w_exp2 - (w_exp1 - w_exp2).ewm(span=9, adjust=False).mean()) * 2
-                weekly_bullish = bool(wma5 > wma10 and float(w_hist.iloc[-1]) > float(w_hist.iloc[-2]))
                 weekly_macd_rising = float(w_hist.iloc[-1]) > float(w_hist.iloc[-2])  # 【新增】回测核心因子
                 weekly_bullish = bool(wma5 > wma10 and weekly_macd_rising)
         full_pool[code]["周线共振"] = weekly_bullish
