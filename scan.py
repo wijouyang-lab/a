@@ -18,6 +18,7 @@ from email.mime.multipart import MIMEMultipart
 import anthropic
 import time
 import random
+import email.utils  # 【新增】解析RSS日期，过滤过期新闻
 
 # ==========================================
 # 启动前置校验：AI 凭证
@@ -796,6 +797,40 @@ def get_top_300_pool():
 # ==========================================
 # 2. 宏观新闻采集
 # ==========================================
+
+# ==========================================
+# 【新增】新闻日期过滤辅助函数
+# ==========================================
+def _parse_rss_date(date_str: str):
+    """解析RSS日期字符串，返回datetime对象（BJ时区）"""
+    if not date_str:
+        return None
+    try:
+        # RFC 822 格式: Mon, 15 Jan 2024 08:30:00 GMT
+        dt = email.utils.parsedate_to_datetime(date_str.strip())
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=datetime.timezone.utc)
+        return dt.astimezone(BEIJING_TZ)
+    except Exception:
+        pass
+    # 兜底：尝试常见格式
+    for fmt in ("%a, %d %b %Y %H:%M:%S", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
+        try:
+            dt = datetime.datetime.strptime(date_str.strip()[:25], fmt)
+            return dt.replace(tzinfo=BEIJING_TZ)
+        except Exception:
+            pass
+    return None
+
+def _is_recent_news(date_str: str, max_days: int = 2):
+    """判断新闻日期是否在允许范围内（默认2天）"""
+    dt = _parse_rss_date(date_str)
+    if dt is None:
+        return False
+    now_bj = get_bj_time()
+    delta = now_bj - dt
+    return delta.days <= max_days and delta.days >= -1  # 允许1天未来（时区误差）
+
 def get_free_macro_news():
     print("📡 [阶段2] 正在抓取全球财经与A股新闻...")
     news_lines = []
@@ -819,7 +854,7 @@ def get_free_macro_news():
                 pub_date = item.find('pubDate')
                 if title is not None:
                     time_str = pub_date.text[:25] if pub_date is not None else ""
-                    if current_year not in time_str:
+                    if not _is_recent_news(time_str, max_days=2):
                         continue
                     news_lines.append(f"[{source_name}] {time_str} - {title.text}")
             print(f"   ✅ {source_name} 节点抓取成功")
@@ -966,6 +1001,13 @@ def get_stock_news(ticker_code: str, ticker_name: str, max_items: int = 5) -> li
         for item in ann_list[:max_items]:
             title = str(item.get('title', '')).strip()
             date  = str(item.get('notice_date', ''))[:10]
+            # 【新增】过滤过期公告（7天）
+            try:
+                notice_dt = datetime.datetime.strptime(date, "%Y-%m-%d").replace(tzinfo=BEIJING_TZ)
+                if (get_bj_time() - notice_dt).days > 7:
+                    continue
+            except Exception:
+                pass
             if title:
                 news_items.append(f"[东财公告][{date}] {title}")
     except Exception as e:
@@ -1008,6 +1050,17 @@ def get_stock_news(ticker_code: str, ticker_name: str, max_items: int = 5) -> li
                     break
                 title    = str(item.get('title', '')).strip()
                 ctime    = str(item.get('ctime', ''))[:10]
+                # 【新增】过滤过期新闻（7天）
+                try:
+                    # ctime 可能是时间戳或日期字符串
+                    if ctime.isdigit() and len(ctime) == 10:
+                        ctime_dt = datetime.datetime.fromtimestamp(int(ctime), tz=BEIJING_TZ)
+                    else:
+                        ctime_dt = datetime.datetime.strptime(ctime, "%Y-%m-%d").replace(tzinfo=BEIJING_TZ)
+                    if (get_bj_time() - ctime_dt).days > 7:
+                        continue
+                except Exception:
+                    pass
                 media    = str(item.get('media_name', '新浪财经'))
                 is_relevant = bool(title) and (code in title or ticker_name[:2] in title)
                 is_junk = any(kw in title for kw in _JUNK_KEYWORDS)
