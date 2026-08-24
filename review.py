@@ -181,7 +181,7 @@ def supplement_ashare_stocks_from_pending():
     print(f"📋 [盘后补充] 发现 {len(pending_files)} 份A股待确认文件（含历史遗留未处理的）：{pending_files}")
 
     _migrate_trade_history_add_open_price(log_file)
-    new_header = "Date,Ticker,Name,Tag,Industry,Open_Price,Close_Price,Amount,Daily_Pct,Hold_Period,Stop_Loss,Score,ATR_Pct\n"
+    new_header = "Date,Ticker,Name,Tag,Industry,Open_Price,Close_Price,Amount,Daily_Pct,Hold_Period,Stop_Loss,Score,ATR_Pct,周期共振\n"
     new_header_cols = [c.strip() for c in new_header.strip().split(",")]
 
     for pending_file in pending_files:
@@ -297,6 +297,7 @@ def supplement_ashare_stocks_from_pending():
                     'Stop_Loss': calibrated_stop_loss,
                     'Score': row['Score'],
                     'ATR_Pct': row.get('ATR_Pct', ''),
+                    '周期共振': row.get('周期共振', ''),
                 })
 
             if missing_price_tickers:
@@ -618,7 +619,7 @@ prompt = f'''
 ai_html = ""
 with client.messages.stream(
     model=TARGET_MODEL,
-    max_tokens=30000,
+    max_tokens=50000,
     messages=[{"role": "user", "content": prompt}]
 ) as stream:
     for text in stream.text_stream:
