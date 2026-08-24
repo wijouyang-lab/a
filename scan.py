@@ -1112,8 +1112,10 @@ def calc_tech_indicators(full_pool, codes, trade_date):
                 w_exp2 = pd.Series(wc).ewm(span=26, adjust=False).mean()
                 w_hist = (w_exp1 - w_exp2 - (w_exp1 - w_exp2).ewm(span=9, adjust=False).mean()) * 2
                 weekly_bullish = bool(wma5 > wma10 and float(w_hist.iloc[-1]) > float(w_hist.iloc[-2]))
+                weekly_macd_rising = float(w_hist.iloc[-1]) > float(w_hist.iloc[-2])  # 【新增】回测核心因子
+                weekly_bullish = bool(wma5 > wma10 and weekly_macd_rising)
         full_pool[code]["周线共振"] = weekly_bullish
-
+        full_pool[code]["周线MACD上升"] = weekly_macd_rising  # 【新增】存储周线上升状态
         if df_hist.empty or code not in df_hist['ts_code'].values:
             for fld, dflt in FALLBACK:
                 full_pool[code].setdefault(fld, dflt)
@@ -1150,6 +1152,7 @@ def calc_tech_indicators(full_pool, codes, trade_date):
         full_pool[code]["MACD金叉"]       = bool(ml_last > sl_last and ml_prev <= sl_prev)
         full_pool[code]["MACD绿柱缩短"]   = bool(h_last < 0 and h_last > h_prev and h_prev < h_prev2)
 
+        full_pool[code]["日线MACD上升"]   = h_last > h_prev  # 【新增】回测核心因子
         delta = sc.diff()
         gain  = delta.clip(lower=0).ewm(com=13, adjust=False).mean()
         loss  = (-1 * delta.clip(upper=0)).ewm(com=13, adjust=False).mean()
@@ -1210,11 +1213,41 @@ def calc_tech_indicators(full_pool, codes, trade_date):
 # ==========================================
 # 5. AI 事件推演选股
 # ==========================================
+# ==========================================
+# 【新增】周期共振检测（回测验证：A股胜率57.43%）
+# 条件：日线MACD↑ + 周线MACD↑ + 看涨形态（吞没/启明星/锤子/刺穿）
+# ==========================================
+def check_period_resonance(stock):
+    """
+    检测单只股票是否满足周期共振
+    返回: (是否共振, 形态列表)
+    """
+    # 1. 检查MACD状态
+    daily_rising = stock.get("日线MACD上升", False)
+    weekly_rising = stock.get("周线MACD上升", False)
+    if not daily_rising or not weekly_rising:
+        return False, []
+    
+    # 2. 检查看涨形态
+    patterns = stock.get("看涨形态", [])
+    valid_patterns = ["看涨吞没", "启明星", "刺穿线", "锤子线"]
+    matched = [p for p in patterns if p in valid_patterns]
+    
+    if not matched:
+        return False, []
+    
+    return True, matched
+
 def screen_technical_setups(final_pool):
     sector_groups = {}
     for stock in final_pool[:100]:
         tech_score   = 0
         tech_reasons = []
+
+        # 【新增】周期共振检测（最高优先级）
+        is_resonance, resonance_patterns = check_period_resonance(stock)
+        stock["周期共振"] = is_resonance
+        stock["共振形态"] = resonance_patterns
 
         if stock.get("MACD金叉"):
             tech_score += 15
@@ -1258,6 +1291,11 @@ def screen_technical_setups(final_pool):
             tech_reasons.append("⚠️仅日线×0.6")
 
         stock["技术评分"] = min(tech_score, 40)
+
+        # 【新增】如果满足周期共振，直接加15分（不破坏40分上限）
+        if is_resonance:
+            tech_score = min(tech_score + 15, 40)
+            tech_reasons.append("🔥周期共振(+15)")
         stock["技术信号"] = tech_reasons
 
         industry = stock.get("Industry", "其他")
@@ -1381,9 +1419,11 @@ def generate_ai_report(pool_data, macro_news_text, macro_data_text, us_sector_te
 【今日A股交易额 Top 100（含技术评分+个股新闻）】：
 {json.dumps(compact_pool, ensure_ascii=False)}
 
-【你的核心工作流程】：
-... （省略中间 prompt 逻辑确保不超限，请参考原代码内容）
-... （由于字数原因完整 prompt 根据原文补齐即可）
+【核心工作流程】（基于回测验证，严格执行）：
+第一步（新闻定方向）：从宏观新闻中提炼出今日1-2条最强产业链主线（例如：AI算力→半导体、降息预期→有色、地缘冲突→油气）。
+第二步（板块锁定）：只在你提炼出的主线板块中寻找标的。严禁跳出主线去买"技术面好但没新闻"的票。
+第三步（技术选个股）：在主线板块内，**必须优先选择【周期共振】为 True 的标的**（即代码已自动标记满足：日线MACD↑ + 周线MACD↑ + 看涨吞没/启明星/刺穿线/锤子线）。
+第四步（评分确认）：如果存在周期共振标的，直接将其排入Top1-5，除非该标的有重大负面新闻。若无共振标的，再退而求其次选择技术评分≥20的票，但须在报告中明确警示"无共振信号"。
 '''
 
     # For script generation, keeping dummy implementation just to complete the python source execution
@@ -1601,4 +1641,3 @@ if __name__ == "__main__":
     final_email_html = build_email(ai_report_html)
     send_emails(final_email_html)
     print("🎉 今日早盘扫描与逻辑推演全部完成！")
-
