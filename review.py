@@ -619,7 +619,7 @@ prompt = f'''
 ai_html = ""
 with client.messages.stream(
     model=TARGET_MODEL,
-    max_tokens=50000,
+    max_tokens=30000,
     messages=[{"role": "user", "content": prompt}]
 ) as stream:
     for text in stream.text_stream:
