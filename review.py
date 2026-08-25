@@ -239,7 +239,27 @@ def supplement_ashare_stocks_from_pending():
                         (df_existing['Ticker'] == ticker)
                     ]
                     if not existing.empty:
-                        print(f"⏭️ {ticker} 已在账本中，跳过重复")
+                        # 【修复】用盘后真实价格更新 scan.py 写入的参考价
+                        _updated = False
+                        idx = existing.index[0]
+                        if open_price is not None:
+                            df_existing.loc[idx, 'Open_Price'] = open_price
+                            _updated = True
+                        if close_price is not None:
+                            df_existing.loc[idx, 'Close_Price'] = close_price
+                            _updated = True
+                        if _updated:
+                            try:
+                                _op = float(df_existing.loc[idx, 'Open_Price'])
+                                _cp = float(df_existing.loc[idx, 'Close_Price'])
+                                if _op > 0:
+                                    df_existing.loc[idx, 'Daily_Pct'] = round((_cp - _op) / _op * 100, 2)
+                            except Exception:
+                                pass
+                            df_existing.to_csv(log_file, index=False)
+                            print(f"🔄 {ticker} 已在账本中，已用真实开盘价/收盘价更新")
+                        else:
+                            print(f"⏭️ {ticker} 已在账本中，无新价格数据，跳过")
                         continue
 
                 open_price = open_map.get(ticker)
@@ -282,6 +302,16 @@ def supplement_ashare_stocks_from_pending():
                     calibrated_stop_loss = _recalibrate_stop_loss_ashare(
                         row['Stop_Loss'], row.get('Scan_Ref_Price'), open_price
                     )
+
+                # 【新增】检查该 ticker 在 trade_history 中是否已被标记为 terminal
+                # 如果是，同步将 pending 记录的 Tag 也改为 terminal，避免覆盖 scan 的止损/到期标记
+                if not df_existing.empty:
+                    ticker_latest = df_existing[df_existing['Ticker'] == ticker].sort_values('Date', ascending=False)
+                    if not ticker_latest.empty:
+                        latest_tag = str(ticker_latest.iloc[0].get('Tag', '')).strip()
+                        if latest_tag in {'Stop_Loss_Hit', 'Period_Matured', 'Forced_Exit', 'Dropped', 'Trap_Warning'}:
+                            row['Tag'] = latest_tag
+                            print(f"⏸️ {ticker} 在 trade_history 中已被标记为 {latest_tag}，pending 记录同步更新")
 
                 new_records.append({
                     'Date': target_date_str,
