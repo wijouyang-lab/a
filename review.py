@@ -232,6 +232,8 @@ def supplement_ashare_stocks_from_pending():
 
             for _, row in df_pending.iterrows():
                 ticker = row['Ticker']
+                open_price = open_map.get(ticker)
+                close_price = close_map.get(ticker)
 
                 if not df_existing.empty:
                     existing = df_existing[
@@ -261,9 +263,6 @@ def supplement_ashare_stocks_from_pending():
                         else:
                             print(f"⏭️ {ticker} 已在账本中，无新价格数据，跳过")
                         continue
-
-                open_price = open_map.get(ticker)
-                close_price = close_map.get(ticker)
 
                 # 全市场快照里没有（新股/停牌/数据未发布完整等），单独查一次该标的当天行情
                 if open_price is None or close_price is None:
