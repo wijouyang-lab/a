@@ -853,9 +853,48 @@ def _is_recent_news(date_str: str, max_days: int = 2):
     delta = now_bj - dt
     return delta.days <= max_days and delta.days >= -1  # 允许1天未来（时区误差）
 
+def _get_macro_news_time_tag(dt_obj):
+    """为宏观新闻打时效标签，返回 (标签文本, 权重描述)"""
+    if dt_obj is None:
+        return "[📑前日-低权重]", "20% → 5分"
+    now_bj = get_bj_time()
+    delta = now_bj - dt_obj
+    hours = delta.total_seconds() / 3600
+    if hours <= 6:
+        return "[🔥今日最新-权重最高]", "满分25分"
+    elif delta.days == 0 or (delta.days == 1 and hours <= 24):
+        return "[📰今日-高权重]", "80% → 20分"
+    elif delta.days <= 2 or (delta.days == 2 and hours <= 48):
+        return "[📄昨日-中等权重]", "50% → 12分"
+    elif delta.days <= 3 or (delta.days == 3 and hours <= 72):
+        return "[📑前日-低权重]", "20% → 5分"
+    else:
+        return "[📑前日-低权重]", "20% → 5分"
+
+
+def _get_stock_news_time_tag(dt_obj):
+    """为个股新闻打时效标签，返回标签文本"""
+    if dt_obj is None:
+        return "[📑前日]"
+    now_bj = get_bj_time()
+    delta = now_bj - dt_obj
+    hours = delta.total_seconds() / 3600
+    if hours <= 6:
+        return "[🔥最新]"
+    elif delta.days == 0 or (delta.days == 1 and hours <= 24):
+        return "[📰今日]"
+    elif delta.days <= 2 or (delta.days == 2 and hours <= 48):
+        return "[📄昨日]"
+    elif delta.days <= 3 or (delta.days == 3 and hours <= 72):
+        return "[📑前日]"
+    else:
+        return None  # 超过72小时丢弃
+
+
+
 def get_free_macro_news():
     print("📡 [阶段2] 正在抓取全球财经与A股新闻...")
-    news_lines = []
+    news_entries = []   # (datetime_obj, source_name, time_str, title_text, tag, weight_desc)
     current_year = str(get_bj_time().year)
 
     sources = [
@@ -870,23 +909,60 @@ def get_free_macro_news():
             with urllib.request.urlopen(req, timeout=10) as response:
                 xml_data = response.read()
             root = ET.fromstring(xml_data)
-            items = root.findall('.//item')[:8]
+            items = root.findall('.//item')[:20]
             for item in items:
                 title = item.find('title')
                 pub_date = item.find('pubDate')
                 if title is not None:
                     time_str = pub_date.text[:25] if pub_date is not None else ""
-                    if not _is_recent_news(time_str, max_days=2):
+                    dt_obj = _parse_rss_date(time_str)
+                    if dt_obj is None:
                         continue
-                    news_lines.append(f"[{source_name}] {time_str} - {title.text}")
+                    # 放宽到7天，让排序自然体现新旧
+                    if (get_bj_time() - dt_obj).days > 7:
+                        continue
+                    tag, weight_desc = _get_macro_news_time_tag(dt_obj)
+                    news_entries.append((dt_obj, source_name, time_str, title.text, tag, weight_desc))
             print(f"   ✅ {source_name} 节点抓取成功")
         except Exception as e:
             print(f"   ⚠️ {source_name} 节点抓取失败: {e}")
 
-    if news_lines:
-        print(f"✅ 盘前新闻矩阵组装完毕，共 {len(news_lines)} 条。")
-        return "\n".join(news_lines)
-    return "暂无实时新闻，请基于昨日收盘及底层产业逻辑推演。"
+    if not news_entries:
+        return "暂无实时新闻，请基于昨日收盘及底层产业逻辑推演。"
+
+    # 按日期从最新到最旧排序
+    news_entries.sort(key=lambda x: x[0], reverse=True)
+
+    # 按日期+时效标签分组输出：今日最新 → 今日 → 昨日 → 前日
+    today_str = get_bj_time().strftime('%Y-%m-%d')
+    yesterday_str = (get_bj_time() - datetime.timedelta(days=1)).strftime('%Y-%m-%d')
+    two_days_ago_str = (get_bj_time() - datetime.timedelta(days=2)).strftime('%Y-%m-%d')
+
+    grouped = {"今日最新": [], "今日": [], "昨日": [], "前日": []}
+    for dt_obj, source_name, time_str, title_text, tag, weight_desc in news_entries:
+        date_key = dt_obj.strftime('%Y-%m-%d')
+        if date_key == today_str:
+            if "🔥" in tag:
+                bucket = "今日最新"
+            else:
+                bucket = "今日"
+        elif date_key == yesterday_str:
+            bucket = "昨日"
+        elif date_key == two_days_ago_str:
+            bucket = "前日"
+        else:
+            bucket = "前日"
+        grouped[bucket].append(f"{tag} [{source_name}] {time_str} - {title.text}")
+
+    output_lines = []
+    for bucket in ["今日最新", "今日", "昨日", "前日"]:
+        if grouped[bucket]:
+            output_lines.append(f"\n【{bucket}】")
+            output_lines.extend(grouped[bucket])
+
+    news_lines = "\n".join(output_lines).strip()
+    print(f"✅ 盘前新闻矩阵组装完毕，共 {len(news_entries)} 条，已按时效递减排序。")
+    return news_lines
 
 
 # ==========================================
@@ -1007,7 +1083,9 @@ def get_us_sector_performance():
 # 3. 个股新闻抓取
 # ==========================================
 def get_stock_news(ticker_code: str, ticker_name: str, max_items: int = 5) -> list[str]:
-    news_items = []
+    """抓取个股新闻，带时效标签，超过72小时丢弃，按时间倒序排列"""
+    # 存储 (datetime_obj, formatted_string)
+    news_entries = []
     code = ticker_code.split('.')[0]
 
     _HEADERS = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
@@ -1023,75 +1101,82 @@ def get_stock_news(ticker_code: str, ticker_name: str, max_items: int = 5) -> li
         for item in ann_list[:max_items]:
             title = str(item.get('title', '')).strip()
             date  = str(item.get('notice_date', ''))[:10]
-            # 【新增】过滤过期公告（7天）
             try:
                 notice_dt = datetime.datetime.strptime(date, "%Y-%m-%d").replace(tzinfo=BEIJING_TZ)
-                if (get_bj_time() - notice_dt).days > 7:
+                # 超过72小时丢弃
+                if (get_bj_time() - notice_dt).days > 3:
+                    continue
+                tag = _get_stock_news_time_tag(notice_dt)
+                if tag is None:
                     continue
             except Exception:
-                pass
+                tag = "[📑前日]"
             if title:
-                news_items.append(f"[东财公告][{date}] {title}")
-    except Exception as e:
+                news_entries.append((notice_dt, f"{tag}[东财公告][{date}] {title}"))
+    except Exception:
         pass
 
-    if len(news_items) < max_items:
-        try:
-            if ticker_code.upper().endswith('.SH'):
-                yahoo_ticker = code + '.SS'
-            else:
-                yahoo_ticker = code + '.SZ'
-            cutoff_ts = time.time() - 14 * 86400
-            raw = yf.Ticker(yahoo_ticker).news or []
-            for item in raw:
-                if len(news_items) >= max_items:
-                    break
-                if item.get('providerPublishTime', 0) < cutoff_ts:
+    # Yahoo Finance 新闻
+    try:
+        if ticker_code.upper().endswith('.SH'):
+            yahoo_ticker = code + '.SS'
+        else:
+            yahoo_ticker = code + '.SZ'
+        cutoff_ts = time.time() - 3 * 86400  # 72小时
+        raw = yf.Ticker(yahoo_ticker).news or []
+        for item in raw:
+            pub_ts = item.get('providerPublishTime', 0)
+            if pub_ts < cutoff_ts:
+                continue
+            title     = str(item.get('title', '')).strip()
+            publisher = str(item.get('publisher', 'Yahoo'))
+            pub_dt    = datetime.datetime.fromtimestamp(pub_ts, tz=BEIJING_TZ)
+            tag       = _get_stock_news_time_tag(pub_dt)
+            if tag is None:
+                continue
+            date_str  = pub_dt.strftime('%m-%d %H:%M')
+            if title:
+                news_entries.append((pub_dt, f"{tag}[Yahoo/{publisher}][{date_str}] {title}"))
+    except Exception:
+        pass
+
+    # 新浪财经新闻
+    try:
+        sina_url = (f"https://feed.mix.sina.com.cn/api/roll/get"
+                    f"?pageid=153&lid=2512&k={code}&num={max_items}&page=1")
+        req = urllib.request.Request(sina_url, headers=_HEADERS)
+        with urllib.request.urlopen(req, timeout=6) as resp:
+            sina_content = resp.read().decode('utf-8')
+        sina_data = json.loads(sina_content)
+        _JUNK_KEYWORDS = ('盘口', '亚盘', '竞彩', '让球', '胜负彩', '比分',
+                          '欧冠', '英超', '西甲', '中超', 'NBA', 'CBA', '足彩', '首发阵容', '让分')
+        for item in sina_data.get('result', {}).get('data', []):
+            title = str(item.get('title', '')).strip()
+            ctime = str(item.get('ctime', ''))[:10]
+            try:
+                if ctime.isdigit() and len(ctime) == 10:
+                    ctime_dt = datetime.datetime.fromtimestamp(int(ctime), tz=BEIJING_TZ)
+                else:
+                    ctime_dt = datetime.datetime.strptime(ctime, "%Y-%m-%d").replace(tzinfo=BEIJING_TZ)
+                # 超过72小时丢弃
+                if (get_bj_time() - ctime_dt).days > 3:
                     continue
-                title     = str(item.get('title', '')).strip()
-                publisher = str(item.get('publisher', 'Yahoo'))
-                pub_ts    = item.get('providerPublishTime', 0)
-                date_str  = datetime.datetime.fromtimestamp(pub_ts).strftime('%m-%d') if pub_ts else ''
-                if title:
-                    news_items.append(f"[Yahoo/{publisher}][{date_str}] {title}")
-        except Exception:
-            pass
+                tag = _get_stock_news_time_tag(ctime_dt)
+                if tag is None:
+                    continue
+            except Exception:
+                tag = "[📑前日]"
+            media = str(item.get('media_name', '新浪财经'))
+            is_relevant = bool(title) and (code in title or ticker_name[:2] in title)
+            is_junk = any(kw in title for kw in _JUNK_KEYWORDS)
+            if is_relevant and not is_junk:
+                news_entries.append((ctime_dt, f"{tag}[新浪/{media}][{ctime}] {title}"))
+    except Exception:
+        pass
 
-    if len(news_items) < max_items:
-        try:
-            sina_url = (f"https://feed.mix.sina.com.cn/api/roll/get"
-                        f"?pageid=153&lid=2512&k={code}&num={max_items}&page=1")
-            req = urllib.request.Request(sina_url, headers=_HEADERS)
-            with urllib.request.urlopen(req, timeout=6) as resp:
-                content = resp.read().decode('utf-8')
-            sina_data = json.loads(content)
-            _JUNK_KEYWORDS = ('盘口', '亚盘', '竞彩', '让球', '胜负彩', '比分',
-                              '欧冠', '英超', '西甲', '中超', 'NBA', 'CBA', '足彩', '首发阵容', '让分')
-            for item in sina_data.get('result', {}).get('data', []):
-                if len(news_items) >= max_items:
-                    break
-                title    = str(item.get('title', '')).strip()
-                ctime    = str(item.get('ctime', ''))[:10]
-                # 【新增】过滤过期新闻（7天）
-                try:
-                    # ctime 可能是时间戳或日期字符串
-                    if ctime.isdigit() and len(ctime) == 10:
-                        ctime_dt = datetime.datetime.fromtimestamp(int(ctime), tz=BEIJING_TZ)
-                    else:
-                        ctime_dt = datetime.datetime.strptime(ctime, "%Y-%m-%d").replace(tzinfo=BEIJING_TZ)
-                    if (get_bj_time() - ctime_dt).days > 7:
-                        continue
-                except Exception:
-                    pass
-                media    = str(item.get('media_name', '新浪财经'))
-                is_relevant = bool(title) and (code in title or ticker_name[:2] in title)
-                is_junk = any(kw in title for kw in _JUNK_KEYWORDS)
-                if is_relevant and not is_junk:
-                    news_items.append(f"[新浪/{media}][{ctime}] {title}")
-        except Exception:
-            pass
-
-    return news_items[:max_items]
+    # 按时间倒序排列，取前 max_items 条
+    news_entries.sort(key=lambda x: x[0], reverse=True)
+    return [entry[1] for entry in news_entries[:max_items]]
 
 
 def enrich_pool_with_news(pool_data: list) -> list:
@@ -1511,11 +1596,28 @@ def generate_ai_report(pool_data, macro_news_text, macro_data_text, us_sector_te
 【今日A股交易额 Top 100（含技术评分+个股新闻）】：
 {json.dumps(compact_pool, ensure_ascii=False)}
 
+【新闻时效权重规则——必须严格遵守】：
+每条宏观新闻和个股新闻已自动打上时效标签，你必须根据标签调整消息面评分权重：
+- 宏观新闻：
+  · [🔥今日最新-权重最高] ≤6小时 → 消息面评分可给满分25分，可作为主线核心依据
+  · [📰今日-高权重] ≤24小时 → 给80%权重（20分），可作为主线核心依据
+  · [📄昨日-中等权重] ≤48小时 → 给50%权重（12分），需确认对应板块未大涨才能用
+  · [📑前日-低权重] ≤72小时 → 给20%权重（5分），仅辅助参考，绝对不能当主线
+- 个股新闻：
+  · [🔥最新] ≤6小时 → 消息面评分可给满分
+  · [📰今日] ≤24小时 → 给80%权重
+  · [📄昨日] ≤48小时 → 给50%权重，需确认个股未大涨
+  · [📑前日] ≤72小时 → 给20%权重，仅辅助参考
+- 超过72小时的新闻已被系统自动丢弃，不会出现在输入中。
+- 严禁将[📑前日-低权重]的新闻作为主线推荐依据，例如"上周的疫苗新闻"只能给5分消息分，不得排进Top1-5主线。
+- 今天早上刚出的重大新闻（如黄金暴涨、政策发布）是[🔥今日最新-权重最高]，应给满分25分，优先排进主线。
+
 【核心工作流程】（基于回测验证，严格执行）：
-第一步（新闻定方向）：从宏观新闻中提炼出今日1-2条最强产业链主线（例如：AI算力→半导体、降息预期→有色、地缘冲突→油气）。
+第一步（新闻定方向）：从宏观新闻中提炼出今日1-2条最强产业链主线。必须优先使用[🔥今日最新]和[📰今日]标签的新闻作为主线依据，[📄昨日]新闻仅作为辅助验证，[📑前日]新闻不得作为主线依据。
 第二步（板块锁定）：只在你提炼出的主线板块中寻找标的。严禁跳出主线去买"技术面好但没新闻"的票。
 第三步（技术选个股）：在主线板块内，**必须优先选择【周期共振】为 True 的标的**（即代码已自动标记满足：日线MACD↑ + 周线MACD↑ + 看涨吞没/启明星/刺穿线/锤子线）。
 第四步（评分确认）：如果存在周期共振标的，直接将其排入Top1-5，除非该标的有重大负面新闻。若无共振标的，再退而求其次选择技术评分≥20的票，但须在报告中明确警示"无共振信号"。
+第五步（新闻权重校验）：对每只入选Top1-5的标的，检查其个股新闻的时效标签。如果主要利好来自[📑前日]或[📄昨日]且个股已大涨，必须降级至观察池或排除。
 
 【输出格式要求】（严格按以下HTML骨架输出，不要输出任何其他文字）：
 
