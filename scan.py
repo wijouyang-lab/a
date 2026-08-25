@@ -1454,12 +1454,56 @@ def generate_ai_report(pool_data, macro_news_text, macro_data_text, us_sector_te
 第二步（板块锁定）：只在你提炼出的主线板块中寻找标的。严禁跳出主线去买"技术面好但没新闻"的票。
 第三步（技术选个股）：在主线板块内，**必须优先选择【周期共振】为 True 的标的**（即代码已自动标记满足：日线MACD↑ + 周线MACD↑ + 看涨吞没/启明星/刺穿线/锤子线）。
 第四步（评分确认）：如果存在周期共振标的，直接将其排入Top1-5，除非该标的有重大负面新闻。若无共振标的，再退而求其次选择技术评分≥20的票，但须在报告中明确警示"无共振信号"。
+
+【输出格式要求】（严格按以下HTML骨架输出，不要输出任何其他文字）：
+
+1. 今日产业链主线研判（用 <div class="header-card"> 包裹）：
+   - 提炼1-2条最强产业链主线
+   - 标注今日雷区（高乖离率+高RSI的高位票、大股东抛售、负面传闻等）
+
+2. 产业链主线优选 Top 1-5（每只用一个 <div class="card core-card"> 包裹，必须包含以下字段）：
+   <div class="card core-card">
+     <h3>股票名称 (代码) | RSI:xx | 乖离率:xx%</h3>
+     <p><b>产业链逻辑:</b> ...</p>
+     <p><b>个股新闻核查:</b> ...</p>
+     <p><b>技术确认:</b> ...</p>
+     <p><b>推荐评分:</b> 评分:[xx]/100 — ...</p>
+     <p><b>风控底线:</b> 周期:[x-x天] | 止损:[xx元或-x%]</p>
+   </div>
+
+3. 观察池（用 <div class="card obs-card"> 包裹，里面用 <li> 列出）：
+   技术评分≥20但新闻面不够强的标的，标注"观望"
+
+4. 新闻预警组（用 <div class="card trap-card"> 包裹，里面用 <li> 列出）：
+   有负面新闻或技术形态走坏的标的，标注"回避"
+
+【极其重要】：
+- Top 1-5 必须包含 class="card core-card"，否则系统无法解析入库
+- 观察池必须包含 class="card obs-card"
+- 新闻预警组必须包含 class="card trap-card"
+- 直接输出HTML代码，不要加 markdown 代码块（```html）
+- 第一个字符必须是 < 符号
 '''
 
-    # For script generation, keeping dummy implementation just to complete the python source execution
-    # In reality it should use the streaming code like original script.
-    ai_html = "<div class='header-card'><h2>🌍 今日全球宏观大宗与事件逻辑推演中心</h2>...</div>"
-    
+    # 【修复】调用 AI 生成报告（替换原来的 dummy 实现）
+    try:
+        response = client.messages.create(
+            model=TARGET_MODEL,
+            max_tokens=80000,
+            messages=[{"role": "user", "content": prompt}]
+        )
+        ai_html = response.content[0].text.strip()
+        # 清理可能的 markdown 代码块
+        ai_html = ai_html.replace("```html", "").replace("```", "").strip()
+        html_start = ai_html.find("<div")
+        if html_start > 0:
+            print(f"⚠️ 检测到AI输出前置了 {html_start} 字符的非HTML内容，已自动截断丢弃")
+            ai_html = ai_html[html_start:]
+        print(f"✅ AI 报告生成完成，共 {len(ai_html)} 字符")
+    except Exception as e:
+        print(f"🚨 AI 报告生成失败: {e}")
+        ai_html = "<div class='header-card'><h2>🌍 AI报告生成失败</h2><p>请检查API配置和网络连接</p></div>"
+
     return ai_html
 
 def build_email(ai_html):
