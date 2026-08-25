@@ -789,6 +789,30 @@ def get_top_300_pool():
         }
 
     print(f"✅ 成功圈定 {len(full_pool)} 只核心活跃标的（数据日期: {trade_date}）。")
+
+    # 【新增】获取板块资金流向（按行业汇总超大单+大单净流入）
+    try:
+        df_mf = pro.moneyflow(trade_date=trade_date)
+        if df_mf is not None and not df_mf.empty:
+            # 超大单+大单净流入（万元）作为主力资金流入指标
+            df_mf['main_net'] = df_mf.get('lg_amount', 0) + df_mf.get('net_mf_amount', 0)
+            mf_map = dict(zip(df_mf['ts_code'], df_mf['main_net']))
+            for ts_code in full_pool:
+                full_pool[ts_code]['主力净流入(万元)'] = mf_map.get(ts_code, 0)
+            # 按行业汇总板块资金流入
+            sector_flow = {}
+            for ts_code, data in full_pool.items():
+                sector = data.get('Industry', '其他')
+                sector_flow[sector] = sector_flow.get(sector, 0) + data.get('主力净流入(万元)', 0)
+            # 标记资金流入前5的板块为"热点板块"
+            top5_sectors = sorted(sector_flow.items(), key=lambda x: x[1], reverse=True)[:5]
+            hot_sectors = {s[0] for s in top5_sectors if s[1] > 0}
+            for ts_code in full_pool:
+                full_pool[ts_code]['热点板块'] = full_pool[ts_code].get('Industry', '其他') in hot_sectors
+            print(f"✅ 板块资金流向计算完成，热点板块: {list(hot_sectors)}")
+    except Exception as e:
+        print(f"⚠️ 板块资金流向获取失败: {e}")
+
     return full_pool, codes, trade_date
 
 
@@ -1300,16 +1324,33 @@ def screen_technical_setups(final_pool):
         stock["周期共振"] = is_resonance
         stock["共振形态"] = resonance_patterns
 
+        # 【修改】MACD 评分：优先低位回升，抑制追高
+        h_last = stock.get("MACD_HIST_LAST", 0)
         if stock.get("MACD金叉"):
-            tech_score += 15
-            tech_reasons.append("MACD金叉(+15)")
+            # 零轴下方金叉 = 底背离，最高优先级
+            if h_last < -0.5:
+                tech_score += 20
+                tech_reasons.append(f"MACD零轴下金叉底背离({h_last:.2f})(+20)")
+            elif abs(h_last) <= 0.5:
+                tech_score += 15
+                tech_reasons.append(f"MACD零轴附近金叉({h_last:.2f})(+15)")
+            else:
+                # 零轴上方高位金叉 = 追高风险，降低分数
+                tech_score += 5
+                tech_reasons.append(f"⚠️MACD高位金叉({h_last:.2f})(+5)")
         elif stock.get("MACD绿柱缩短"):
-            h_last = stock.get("MACD_HIST_LAST", 0)
             h_prev = stock.get("MACD_HIST_PREV", 0)
             pts = 12 if (h_last < 0 and abs(h_last) < abs(h_prev) * 0.85) else 8
             tech_score += pts
-            tech_reasons.append(f"MACD绿柱收敛(+{pts})")
-        elif stock.get("MACD趋势") == "走强" and stock.get("MACD_HIST_LAST", 0) > 0:
+            tech_reasons.append(f"MACD绿柱收敛({h_last:.2f})(+{pts})")
+        elif stock.get("MACD趋势") == "走强" and h_last > 0:
+            # 红柱已很高 = 追高风险
+            if h_last > 3:
+                tech_score += 2
+                tech_reasons.append(f"⚠️MACD红柱高位({h_last:.2f})(+2)")
+            else:
+                tech_score += 4
+                tech_reasons.append(f"MACD红柱走强({h_last:.2f})(+4)")
             tech_score += 4
             tech_reasons.append("MACD红柱走强(+4)")
 
@@ -1608,9 +1649,9 @@ def match_pool_to_report(pool_data, ai_html, default_stop_loss_pct):
     obs_zone_raw = ai_html[obs_start:trap_start]
     trap_zone_raw = ai_html[trap_start:]
 
-    core_cards = [clean_fragment(c) for c in re.split(r'(?=<div class="card core-card">)', core_zone_raw) if 'core-card' in c]
-    obs_items = [clean_fragment(c) for c in re.split(r'(?=<li>)', obs_zone_raw) if c.strip().startswith('<li>')]
-    trap_items = [clean_fragment(c) for c in re.split(r'(?=<li>)', trap_zone_raw) if c.strip().startswith('<li>')]
+    core_cards = [clean_fragment(c) for c in re.split(r'(?=<div[^>]*class="[^"]*core-card[^"]*")', core_zone_raw) if 'core-card' in c]
+    obs_items = [clean_fragment(c) for c in re.split(r'(?=<div[^>]*class="[^"]*obs-card[^"]*")', obs_zone_raw) if c.strip().startswith("<li>")]
+    trap_items = [clean_fragment(c) for c in re.split(r'(?=<div[^>]*class="[^"]*trap-card[^"]*")', trap_zone_raw) if c.strip().startswith("<li>")]
 
     chosen = []
     for item in pool_data:
