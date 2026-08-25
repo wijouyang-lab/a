@@ -343,6 +343,8 @@ def calculate_metrics(df: pd.DataFrame) -> dict | None:
     ][:10]
 
     generation_boundaries = _load_evolution_boundaries()
+    scan_version_boundaries = _load_scan_version_boundaries()
+    since_last_version = _segment_by_scan_version(df_c, scan_version_boundaries)
     generation_stats, since_last_evolution = _segment_by_generation(df_c, generation_boundaries)
 
     return {
@@ -361,6 +363,7 @@ def calculate_metrics(df: pd.DataFrame) -> dict | None:
         "active_summary":  active_summary,
         "prev_rules":      prev_rules,
         "signal_stats":    signal_stats,  # 【新增】
+        "since_last_version": since_last_version,  # 【新增】当前代码版本胜率
     }
 
 
@@ -392,6 +395,8 @@ def evolve_strategy(metrics: dict):
 
 【最近一次进化之后的战绩】（当前生效规则的真实表现，样本量可能还小，仅供参考）：
 {json.dumps(metrics['since_last_evolution'], ensure_ascii=False, indent=2) if metrics['since_last_evolution'] else "尚无数据或样本不足"}
+【最近一次代码更新之后的战绩】（当前 scan.py 版本的真实表现，不受旧代码拖累）：
+{json.dumps(metrics["since_last_version"], ensure_ascii=False, indent=2) if metrics.get("since_last_version") else "尚无数据或样本不足"}
 
 【按行业板块拆分胜率】（识别哪些板块该超配/回避）：
 {json.dumps(metrics['sector_stats'], ensure_ascii=False, indent=2)}
@@ -453,7 +458,7 @@ def evolve_strategy(metrics: dict):
     try:
         response = client.messages.create(
             model=EVOLVE_MODEL,
-            max_tokens=50000,
+            max_tokens=2000,
             temperature=0.3,
             messages=[{"role": "user", "content": prompt}],
         )
