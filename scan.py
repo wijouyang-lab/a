@@ -260,13 +260,15 @@ def pre_scan_portfolio_review(macro_news_text, macro_data_text, price_map):
 """
 
     try:
-        response = client.messages.create(
+        raw = ""
+        with client.messages.stream(
             model=TARGET_MODEL,
-            max_tokens=80000, 
-            temperature=0.1,
+            max_tokens=80000,
             messages=[{"role": "user", "content": review_prompt}]
-        )
-        raw = response.content[0].text.strip()
+        ) as stream:
+            for text in stream.text_stream:
+                raw += text
+        raw = raw.strip()
         json_match = re.search(r'\[.*\]', raw, re.DOTALL)
         if not json_match:
             print("⚠️ [阶段0] AI 返回格式异常，跳过持仓审查。")
@@ -1487,12 +1489,15 @@ def generate_ai_report(pool_data, macro_news_text, macro_data_text, us_sector_te
 
     # 【修复】调用 AI 生成报告（替换原来的 dummy 实现）
     try:
-        response = client.messages.create(
+        ai_html = ""
+        with client.messages.stream(
             model=TARGET_MODEL,
             max_tokens=80000,
             messages=[{"role": "user", "content": prompt}]
-        )
-        ai_html = response.content[0].text.strip()
+        ) as stream:
+            for text in stream.text_stream:
+                ai_html += text
+        ai_html = ai_html.strip()
         # 清理可能的 markdown 代码块
         ai_html = ai_html.replace("```html", "").replace("```", "").strip()
         html_start = ai_html.find("<div")
