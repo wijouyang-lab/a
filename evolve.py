@@ -57,21 +57,62 @@ def safe_float(val, default=None):
         return default
 
 
+def _load_scan_version_boundaries():
+    """读取 scan.py 版本标记文件，把代码逻辑变更日也视为世代分界"""
+    version_file = "scan_version.txt"
+    if not os.path.exists(version_file):
+        return []
+    try:
+        with open(version_file, "r", encoding="utf-8") as f:
+            content = f.read().strip()
+        if content and "," in content:
+            date_str = content.split(",")[1]
+            if date_str and len(date_str) == 10:
+                return [date_str]
+    except Exception:
+        pass
+    return []
+
+
 def _load_evolution_boundaries():
     """
     从 strategy_evolution.json 读取历次进化发生的时间点，作为"世代"分界线。
     第0代 = 第一次进化之前的所有交易（原始策略，还没被任何规则调整过）
-    第N代 = 第N次进化生效之后、第N+1次进化之前产生的交易
+    第N代 = 第N次进化生效之后、第N+1次进化之前产生的交易。
+    同时接入 scan.py 代码版本变更日，确保 scan 逻辑大改后产生的交易被独立评估。
     """
-    if not os.path.exists(EVOLVE_LOG):
-        return []
-    try:
-        with open(EVOLVE_LOG, "r", encoding="utf-8") as f:
-            history = json.load(f)
-        dates = [entry.get("date", "")[:10] for entry in history if entry.get("date")]
-        return sorted(set(d for d in dates if d))
-    except Exception:
-        return []
+    boundaries = []
+    if os.path.exists(EVOLVE_LOG):
+        try:
+            with open(EVOLVE_LOG, "r", encoding="utf-8") as f:
+                history = json.load(f)
+            dates = [entry.get("date", "")[:10] for entry in history if entry.get("date")]
+            boundaries.extend(dates)
+        except Exception:
+            pass
+    boundaries.extend(_load_scan_version_boundaries())
+    return sorted(set(d for d in boundaries if d))
+
+
+def _segment_by_scan_version(df_c, boundaries):
+    """返回最近一次 scan.py 代码更新之后的胜率"""
+    if not boundaries or "date" not in df_c.columns:
+        return None
+    df_c = df_c.copy()
+    df_c["_dt"] = pd.to_datetime(df_c["date"], errors="coerce")
+    latest_boundary = pd.to_datetime(boundaries[-1]) if boundaries else None
+    if latest_boundary is None:
+        return None
+    seg = df_c[df_c["_dt"] >= latest_boundary]
+    if len(seg) >= 2:
+        return {
+            "样本数": int(len(seg)),
+            "胜率": round(float((seg["pnl_pct"] > 0).sum() / len(seg) * 100), 1),
+            "平均盈亏%": round(float(seg["pnl_pct"].mean()), 2),
+        }
+    elif len(seg) > 0:
+        return {"样本数": int(len(seg)), "提示": "样本数不足2笔，暂不单独计算胜率"}
+    return None
 
 
 def _segment_by_generation(df_c, boundaries):
@@ -238,6 +279,11 @@ def calculate_metrics(df: pd.DataFrame) -> dict | None:
             "hold_period": str(row.get("Hold_Period", "")),
             "date":     str(row.get("Date", "")),
             "atr_pct":  safe_float(row.get("ATR_Pct"), default=None),
+            "period_resonance": str(row.get("周期共振", "")),
+            "macd_cross": str(row.get("MACD金叉", "")),
+            "weekly_sync": str(row.get("周线共振", "")),
+            "kdj_rising": str(row.get("KDJ_J回升", "")),
+            "vol_surge": str(row.get("量能放大", "")),
         })
 
     if skipped_no_sell:
