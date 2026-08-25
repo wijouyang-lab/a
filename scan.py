@@ -396,13 +396,13 @@ def check_rule_based_sell_signals(price_map, exclude_tickers=None):
             print("📋 [阶段0b] 持仓已被阶段0a全部处理，跳过规则卖出信号检测。")
             return [], []
 
-        earliest_by_ticker = (
+        # 【修复】取最近一行 active 记录作为买入参考，避免历史多行导致到期计算错误
+        latest_active_by_ticker = (
             recent[recent['Ticker'].isin(holdings_latest['Ticker'])]
-            .sort_values('Date', ascending=True)
+            .sort_values('Date', ascending=False)  # 【改】最近一行
             .drop_duplicates(subset='Ticker', keep='first')
             .set_index('Ticker')
         )
-        holdings = holdings_latest
     except Exception as e:
         print(f"⚠️ [阶段0b] 持仓读取失败: {e}")
         return [], []
@@ -428,7 +428,7 @@ def check_rule_based_sell_signals(price_map, exclude_tickers=None):
     for _, row in holdings.iterrows():
         try:
             ticker = str(row['Ticker'])
-            earliest_row = earliest_by_ticker.loc[ticker] if ticker in earliest_by_ticker.index else row
+            earliest_row = latest_active_by_ticker.loc[ticker] if ticker in latest_active_by_ticker.index else row
             buy_price = float(earliest_row['Close_Price'])
             buy_date = earliest_row['Date']
             orig_tag = row['Tag']
@@ -581,7 +581,7 @@ def build_sell_signal_card(macro_removed_tickers, rule_sell_signals):
 
     total = len(macro_removed_tickers) + len(rule_sell_signals)
     return f"""
-<div style="background:#fff3e0; border-left:6px solid #e65100; padding:20px; margin-bottom:25px; border-radius:8px;">
+<div style="background:#fff3e0; border-left:6px solid #e65100; padding:20px; margin-bottom:25px; border-radius:8px; max-height:380px; overflow-y:auto;">
     <h3 style="margin:0 0 12px 0; color:#bf360c;">🔔 今日卖出信号汇总（共{total}只 · 交易时段内可直接执行）</h3>
     <table style="width:100%; border-collapse:collapse; font-size:14px;">
         <tr style="text-align:left; color:#6d4c41; border-bottom:1px solid #ffb74d;">
@@ -657,7 +657,7 @@ def build_current_holdings_card(price_map):
 
         total = len(holdings)
         return f"""
-<div style="background:#e8f5e9; border-left:6px solid #2e7d32; padding:20px; margin-bottom:25px; border-radius:8px;">
+<div style="background:#e8f5e9; border-left:6px solid #2e7d32; padding:20px; margin-bottom:25px; border-radius:8px; max-height:320px; overflow-y:auto;">
     <h3 style="margin:0 0 12px 0; color:#1b5e20;">📦 当前持仓监控（共 {total} 只）</h3>
     <table style="width:100%; border-collapse:collapse; font-size:14px;">
         <tr style="text-align:left; color:#2e7d32; border-bottom:1px solid #a5d6a7;">
@@ -1675,21 +1675,39 @@ if __name__ == "__main__":
     if chosen:
         log_file = "trade_history.csv"
         df_new = pd.DataFrame(chosen)
-        df_new['Date'] = get_bj_time().strftime('%Y-%m-%d %H:%M:%S')
-        df_new['Close_Price'] = df_new['Close']
-        cols = ['Date', 'Ticker', 'Name', 'Industry', 'Tag', 'Close_Price', 'Hold_Period', 'Stop_Loss', 'Score', 'Daily_Pct']
-        for c in cols:
-            if c not in df_new.columns:
-                df_new[c] = ''
-        df_new = df_new[cols]
         
+        # 【新增】过滤：已在持仓中的标的不再重复追加，避免卖出信号每天重复触发
         if os.path.exists(log_file):
-            df_old = pd.read_csv(log_file)
-            df_final = pd.concat([df_old, df_new], ignore_index=True)
+            try:
+                df_old = pd.read_csv(log_file)
+                _active_tags = {'Core_Double_Dragon', 'Sub_Pioneer', 'Core_Dragon'}
+                _active_tickers = set(df_old[df_old['Tag'].isin(_active_tags)]['Ticker'].unique())
+                _before_filter = len(df_new)
+                df_new = df_new[~df_new['Ticker'].isin(_active_tickers)]
+                _skipped = _before_filter - len(df_new)
+                if _skipped > 0:
+                    print(f"📋 跳过 {_skipped} 只已在持仓中的标的，不重复追加")
+            except Exception as e:
+                print(f"⚠️ 持仓去重过滤失败，继续追加全部: {e}")
+        
+        if not df_new.empty:
+            df_new['Date'] = get_bj_time().strftime('%Y-%m-%d %H:%M:%S')
+            df_new['Close_Price'] = df_new['Close']
+            cols = ['Date', 'Ticker', 'Name', 'Industry', 'Tag', 'Close_Price', 'Hold_Period', 'Stop_Loss', 'Score', 'Daily_Pct']
+            for c in cols:
+                if c not in df_new.columns:
+                    df_new[c] = ''
+            df_new = df_new[cols]
+            
+            if os.path.exists(log_file):
+                df_old = pd.read_csv(log_file)
+                df_final = pd.concat([df_old, df_new], ignore_index=True)
+            else:
+                df_final = df_new
+            df_final.to_csv(log_file, index=False)
+            print(f"✅ 已将 {len(df_new)} 只精选标的入账 trade_history.csv")
         else:
-            df_final = df_new
-        df_final.to_csv(log_file, index=False)
-        print(f"✅ 已将 {len(chosen)} 只精选标的入账 trade_history.csv")
+            print("📋 今日无新入选标的，全部已在持仓中，跳过入账。")
 
     final_email_html = build_email(ai_report_html)
     send_emails(final_email_html)
