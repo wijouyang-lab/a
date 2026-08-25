@@ -549,34 +549,53 @@ def build_sell_signal_card(macro_removed_tickers, rule_sell_signals):
     if not macro_removed_tickers and not rule_sell_signals:
         return ""
 
+    rows_html = ""
+
+    if macro_removed_tickers:
+        reason_map = {}
+        try:
+            import csv
+            if os.path.exists("forced_exit_log.csv"):
+                with open("forced_exit_log.csv", "r", encoding="utf-8") as f:
+                    for row in csv.DictReader(f):
+                        if row.get("Ticker") in macro_removed_tickers:
+                            reason_map[row["Ticker"]] = row.get("Reason", "")
+        except Exception:
+            pass
+        for t in macro_removed_tickers:
+            reason_text = reason_map.get(t, "突发宏观/消息面利空，AI风控强平")
+            rows_html += f"""
+        <tr style="border-bottom:1px solid #ffe0b2;">
+            <td style="padding:8px 4px;"><b>{t}</b></td>
+            <td style="padding:8px 4px;"><span class="tag bg-red" style="margin:0;">突发利空强清</span></td>
+            <td style="padding:8px 4px;" colspan="2">{reason_text}</td>
+        </tr>"""
+
+    for s in rule_sell_signals:
+        pnl_color = "#d32f2f" if s['pnl_pct'] >= 0 else "#388e3c"
+        tag_color = "bg-orange" if s['signal_type'] == '止损触发' else "bg-gray"
+        rows_html += f"""
+        <tr style="border-bottom:1px solid #ffe0b2;">
+            <td style="padding:8px 4px;"><b>{s['name']}({s['ticker']})</b></td>
+            <td style="padding:8px 4px;"><span class="tag {tag_color}" style="margin:0;">{s['signal_type']}</span></td>
+            <td style="padding:8px 4px;">买入¥{s['buy_price']} → 现价¥{s['current_price']}，<span style="color:{pnl_color};font-weight:bold;">{s['pnl_pct']:+.2f}%</span></td>
+            <td style="padding:8px 4px;">{s['reason']}</td>
+        </tr>"""
+
     total = len(macro_removed_tickers) + len(rule_sell_signals)
-    stop_count = sum(1 for s in rule_sell_signals if s.get('signal_type') == '止损触发')
-    mature_count = sum(1 for s in rule_sell_signals if s.get('signal_type') == '持有到期')
-    forced_count = len(macro_removed_tickers)
-
-    detail_lines = []
-    if forced_count > 0:
-        detail_lines.append(f"突发强清 {forced_count} 只")
-    if stop_count > 0:
-        detail_lines.append(f"止损触发 {stop_count} 只")
-    if mature_count > 0:
-        detail_lines.append(f"持有到期 {mature_count} 只")
-
-    detail_text = " / ".join(detail_lines) if detail_lines else ""
-
     return f"""
-<div style="background:#fff3e0; border-left:6px solid #e65100; padding:12px 20px; margin-bottom:20px; border-radius:8px; font-size:14px;">
-    <span style="color:#bf360c; font-weight:bold;">🔔 今日卖出信号：共{total}只（{detail_text}）</span>
-    <span style="color:#8d6e63; margin-left:10px;">已自动清仓归档，详情见 review_history.csv</span>
+<div style="background:#fff3e0; border-left:6px solid #e65100; padding:20px; margin-bottom:25px; border-radius:8px; max-height:380px; overflow-y:auto;">
+    <h3 style="margin:0 0 12px 0; color:#bf360c;">🔔 今日卖出信号汇总（共{total}只 · 交易时段内可直接执行）</h3>
+    <table style="width:100%; border-collapse:collapse; font-size:14px;">
+        <tr style="text-align:left; color:#6d4c41; border-bottom:1px solid #ffb74d;">
+            <th style="padding:6px 4px;">标的</th><th style="padding:6px 4px;">触发类型</th><th style="padding:6px 4px;">价格/浮动盈亏</th><th style="padding:6px 4px;">理由</th>
+        </tr>
+        {rows_html}
+    </table>
+    <p style="margin:12px 0 0 0; font-size:13px; color:#6d4c41;">以上标的已在 trade_history.csv 中锁定标签并停止后续追踪，买入价/现价已归档至 review_history.csv 供胜率统计。本卡片仅给出系统信号，实际下单价格与时机仍需结合当时盘口自行判断。</p>
 </div>
 """
 
-
-
-# ==========================================
-# 0d. 渲染"当前持仓监控"卡片
-# ==========================================
-def build_current_holdings_card(price_map):
     log_file = "trade_history.csv"
     if not os.path.exists(log_file):
         return ""
