@@ -403,6 +403,7 @@ def check_rule_based_sell_signals(price_map, exclude_tickers=None):
             .drop_duplicates(subset='Ticker', keep='first')
             .set_index('Ticker')
         )
+        holdings = holdings_latest
     except Exception as e:
         print(f"⚠️ [阶段0b] 持仓读取失败: {e}")
         return [], []
