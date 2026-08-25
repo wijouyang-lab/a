@@ -437,7 +437,7 @@ def check_rule_based_sell_signals(price_map, exclude_tickers=None):
             orig_tag = row['Tag']
             hold_days = _parse_hold_days(row.get('Hold_Period'))
             stop_loss_val = _parse_stop_loss_price(row.get('Stop_Loss'))
-            cur_price = price_map.get(ticker, buy_price)
+            cur_price = latest_price_map.get(ticker, buy_price)
 
             signal_type = None
             reason = ""
@@ -595,84 +595,84 @@ def build_sell_signal_card(macro_removed_tickers, rule_sell_signals):
     <p style="margin:12px 0 0 0; font-size:13px; color:#6d4c41;">以上标的已在 trade_history.csv 中锁定标签并停止后续追踪，买入价/现价已归档至 review_history.csv 供胜率统计。本卡片仅给出系统信号，实际下单价格与时机仍需结合当时盘口自行判断。</p>
 </div>
 """
+def build_current_holdings_card(latest_price_map):
+log_file = "trade_history.csv"
+if not os.path.exists(log_file):
+return ""
 
-    log_file = "trade_history.csv"
-    if not os.path.exists(log_file):
-        return ""
+try:
+df = pd.read_csv(log_file)
+if df.empty or 'Tag' not in df.columns:
+    return ""
 
-    try:
-        df = pd.read_csv(log_file)
-        if df.empty or 'Tag' not in df.columns:
-            return ""
+df['Date'] = pd.to_datetime(df['Date'])
+cutoff = get_bj_time() - datetime.timedelta(days=30)
+recent = df[df['Date'] >= cutoff.replace(tzinfo=None)].copy()
 
-        df['Date'] = pd.to_datetime(df['Date'])
-        cutoff = get_bj_time() - datetime.timedelta(days=30)
-        recent = df[df['Date'] >= cutoff.replace(tzinfo=None)].copy()
+active_tags = {'Core_Double_Dragon', 'Sub_Pioneer', 'Core_Dragon'}
+holdings = recent[recent['Tag'].isin(active_tags)].copy()
 
-        active_tags = {'Core_Double_Dragon', 'Sub_Pioneer', 'Core_Dragon'}
-        holdings = recent[recent['Tag'].isin(active_tags)].copy()
+if holdings.empty:
+    return ""
 
-        if holdings.empty:
-            return ""
+_INVALID = {'', 'n/a', 'nan', 'none'}
+for _col in ['Hold_Period', 'Stop_Loss', 'Score']:
+    if _col not in holdings.columns:
+        holdings[_col] = ''
+_valid_mask = (
+    holdings['Hold_Period'].astype(str).str.strip().str.lower().map(lambda v: v not in _INVALID) &
+    holdings['Stop_Loss'].astype(str).str.strip().str.lower().map(lambda v: v not in _INVALID) &
+    holdings['Score'].astype(str).str.strip().str.lower().map(lambda v: v not in _INVALID)
+)
+holdings = holdings[_valid_mask].copy()
 
-        _INVALID = {'', 'n/a', 'nan', 'none'}
-        for _col in ['Hold_Period', 'Stop_Loss', 'Score']:
-            if _col not in holdings.columns:
-                holdings[_col] = ''
-        _valid_mask = (
-            holdings['Hold_Period'].astype(str).str.strip().str.lower().map(lambda v: v not in _INVALID) &
-            holdings['Stop_Loss'].astype(str).str.strip().str.lower().map(lambda v: v not in _INVALID) &
-            holdings['Score'].astype(str).str.strip().str.lower().map(lambda v: v not in _INVALID)
-        )
-        holdings = holdings[_valid_mask].copy()
+if holdings.empty:
+    return ""
 
-        if holdings.empty:
-            return ""
+holdings = holdings.sort_values('Date', ascending=False).drop_duplicates(subset='Ticker', keep='first')
 
-        holdings = holdings.sort_values('Date', ascending=False).drop_duplicates(subset='Ticker', keep='first')
+now = get_bj_time().replace(tzinfo=None)
+rows_html = ""
+for _, row in holdings.iterrows():
+    ticker = str(row['Ticker'])
+    name = str(row.get('Name', ticker))
+    buy_price = float(row['Close_Price'])
+    buy_date = pd.to_datetime(row['Date'])
+    days_held = (now - buy_date).days
+    cur_price = price_map.get(ticker, buy_price)
+    pnl_pct = round(((cur_price - buy_price) / buy_price) * 100, 2)
+    pnl_color = "#d32f2f" if pnl_pct >= 0 else "#388e3c"
 
-        now = get_bj_time().replace(tzinfo=None)
-        rows_html = ""
-        for _, row in holdings.iterrows():
-            ticker = str(row['Ticker'])
-            name = str(row.get('Name', ticker))
-            buy_price = float(row['Close_Price'])
-            buy_date = pd.to_datetime(row['Date'])
-            days_held = (now - buy_date).days
-            cur_price = price_map.get(ticker, buy_price)
-            pnl_pct = round(((cur_price - buy_price) / buy_price) * 100, 2)
-            pnl_color = "#d32f2f" if pnl_pct >= 0 else "#388e3c"
+    rows_html += f"""
+<tr style="border-bottom:1px solid #c8e6c9;">
+    <td style="padding:8px 4px;"><b>{name}({ticker})</b></td>
+    <td style="padding:8px 4px;">{str(buy_date)[:10]}（已持股{days_held}天）</td>
+    <td style="padding:8px 4px;">买入¥{buy_price:.2f} → 现价¥{cur_price:.2f}</td>
+    <td style="padding:8px 4px; color:{pnl_color}; font-weight:bold;">{pnl_pct:+.2f}%</td>
+    <td style="padding:8px 4px;">{row.get('Hold_Period', 'N/A')}</td>
+    <td style="padding:8px 4px;">{row.get('Stop_Loss', 'N/A')}</td>
+</tr>"""
 
-            rows_html += f"""
-        <tr style="border-bottom:1px solid #c8e6c9;">
-            <td style="padding:8px 4px;"><b>{name}({ticker})</b></td>
-            <td style="padding:8px 4px;">{str(buy_date)[:10]}（已持股{days_held}天）</td>
-            <td style="padding:8px 4px;">买入¥{buy_price:.2f} → 现价¥{cur_price:.2f}</td>
-            <td style="padding:8px 4px; color:{pnl_color}; font-weight:bold;">{pnl_pct:+.2f}%</td>
-            <td style="padding:8px 4px;">{row.get('Hold_Period', 'N/A')}</td>
-            <td style="padding:8px 4px;">{row.get('Stop_Loss', 'N/A')}</td>
-        </tr>"""
-
-        total = len(holdings)
-        return f"""
+total = len(holdings)
+return f"""
 <div style="background:#e8f5e9; border-left:6px solid #2e7d32; padding:20px; margin-bottom:25px; border-radius:8px; max-height:320px; overflow-y:auto;">
-    <h3 style="margin:0 0 12px 0; color:#1b5e20;">📦 当前持仓监控（共 {total} 只）</h3>
-    <table style="width:100%; border-collapse:collapse; font-size:14px;">
-        <tr style="text-align:left; color:#2e7d32; border-bottom:1px solid #a5d6a7;">
-            <th style="padding:6px 4px;">标的</th>
-            <th style="padding:6px 4px;">买入时间</th>
-            <th style="padding:6px 4px;">价格变动</th>
-            <th style="padding:6px 4px;">浮动盈亏</th>
-            <th style="padding:6px 4px;">建议周期</th>
-            <th style="padding:6px 4px;">止损位</th>
-        </tr>
-        {rows_html}
-    </table>
+<h3 style="margin:0 0 12px 0; color:#1b5e20;">📦 当前持仓监控（共 {total} 只）</h3>
+<table style="width:100%; border-collapse:collapse; font-size:14px;">
+<tr style="text-align:left; color:#2e7d32; border-bottom:1px solid #a5d6a7;">
+    <th style="padding:6px 4px;">标的</th>
+    <th style="padding:6px 4px;">买入时间</th>
+    <th style="padding:6px 4px;">价格变动</th>
+    <th style="padding:6px 4px;">浮动盈亏</th>
+    <th style="padding:6px 4px;">建议周期</th>
+    <th style="padding:6px 4px;">止损位</th>
+</tr>
+{rows_html}
+</table>
 </div>
 """
-    except Exception as e:
-        print(f"⚠️ 渲染当前持仓卡片失败: {e}")
-        return ""
+except Exception as e:
+print(f"⚠️ 渲染当前持仓卡片失败: {e}")
+return ""
 
 
 # ==========================================
@@ -1808,6 +1808,9 @@ def match_pool_to_report(pool_data, ai_html, default_stop_loss_pct):
         item['Stop_Loss'] = stop_loss
         item['Score'] = score
         item['Daily_Pct'] = item.get('pct_chg', 0)
+        item['Open_Price'] = item.get('Open', item['Close'])
+        item['ATR_Pct'] = item.get('ATR_Pct', '')
+        item['周期共振'] = item.get('周期共振', False)
         chosen.append(item)
 
     return chosen
@@ -1881,7 +1884,7 @@ if __name__ == "__main__":
         if not df_new.empty:
             df_new['Date'] = get_bj_time().strftime('%Y-%m-%d %H:%M:%S')
             df_new['Close_Price'] = df_new['Close']
-            cols = ['Date', 'Ticker', 'Name', 'Industry', 'Tag', 'Close_Price', 'Hold_Period', 'Stop_Loss', 'Score', 'Daily_Pct']
+            cols = ['Date', 'Ticker', 'Name', 'Industry', 'Tag', 'Open_Price', 'Close_Price', 'Amount', 'Daily_Pct', 'Hold_Period', 'Stop_Loss', 'Score', 'ATR_Pct', '周期共振']
             for c in cols:
                 if c not in df_new.columns:
                     df_new[c] = ''
