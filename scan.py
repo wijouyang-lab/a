@@ -437,7 +437,7 @@ def check_rule_based_sell_signals(price_map, exclude_tickers=None):
             orig_tag = row['Tag']
             hold_days = _parse_hold_days(row.get('Hold_Period'))
             stop_loss_val = _parse_stop_loss_price(row.get('Stop_Loss'))
-            cur_price = price_map.get(ticker, buy_price)
+            cur_price = latest_price_map.get(ticker, buy_price)
 
             signal_type = None
             reason = ""
@@ -1809,6 +1809,9 @@ def match_pool_to_report(pool_data, ai_html, default_stop_loss_pct):
         item['Stop_Loss'] = stop_loss
         item['Score'] = score
         item['Daily_Pct'] = item.get('pct_chg', 0)
+        item['Open_Price'] = item.get('Open', item['Close'])
+        item['ATR_Pct'] = item.get('ATR_Pct', '')
+        item['周期共振'] = item.get('周期共振', False)
         chosen.append(item)
 
     return chosen
@@ -1882,7 +1885,7 @@ if __name__ == "__main__":
         if not df_new.empty:
             df_new['Date'] = get_bj_time().strftime('%Y-%m-%d %H:%M:%S')
             df_new['Close_Price'] = df_new['Close']
-            cols = ['Date', 'Ticker', 'Name', 'Industry', 'Tag', 'Close_Price', 'Hold_Period', 'Stop_Loss', 'Score', 'Daily_Pct']
+            cols = ['Date', 'Ticker', 'Name', 'Industry', 'Tag', 'Open_Price', 'Close_Price', 'Amount', 'Daily_Pct', 'Hold_Period', 'Stop_Loss', 'Score', 'ATR_Pct', '周期共振']
             for c in cols:
                 if c not in df_new.columns:
                     df_new[c] = ''
