@@ -437,7 +437,7 @@ def check_rule_based_sell_signals(price_map, exclude_tickers=None):
             orig_tag = row['Tag']
             hold_days = _parse_hold_days(row.get('Hold_Period'))
             stop_loss_val = _parse_stop_loss_price(row.get('Stop_Loss'))
-            cur_price = latest_price_map.get(ticker, buy_price)
+            cur_price = price_map.get(ticker, buy_price)
 
             signal_type = None
             reason = ""
@@ -595,84 +595,85 @@ def build_sell_signal_card(macro_removed_tickers, rule_sell_signals):
     <p style="margin:12px 0 0 0; font-size:13px; color:#6d4c41;">以上标的已在 trade_history.csv 中锁定标签并停止后续追踪，买入价/现价已归档至 review_history.csv 供胜率统计。本卡片仅给出系统信号，实际下单价格与时机仍需结合当时盘口自行判断。</p>
 </div>
 """
+
 def build_current_holdings_card(latest_price_map):
-log_file = "trade_history.csv"
-if not os.path.exists(log_file):
-return ""
+    log_file = "trade_history.csv"
+    if not os.path.exists(log_file):
+        return ""
 
-try:
-df = pd.read_csv(log_file)
-if df.empty or 'Tag' not in df.columns:
-    return ""
+    try:
+        df = pd.read_csv(log_file)
+        if df.empty or 'Tag' not in df.columns:
+            return ""
 
-df['Date'] = pd.to_datetime(df['Date'])
-cutoff = get_bj_time() - datetime.timedelta(days=30)
-recent = df[df['Date'] >= cutoff.replace(tzinfo=None)].copy()
+        df['Date'] = pd.to_datetime(df['Date'])
+        cutoff = get_bj_time() - datetime.timedelta(days=30)
+        recent = df[df['Date'] >= cutoff.replace(tzinfo=None)].copy()
 
-active_tags = {'Core_Double_Dragon', 'Sub_Pioneer', 'Core_Dragon'}
-holdings = recent[recent['Tag'].isin(active_tags)].copy()
+        active_tags = {'Core_Double_Dragon', 'Sub_Pioneer', 'Core_Dragon'}
+        holdings = recent[recent['Tag'].isin(active_tags)].copy()
 
-if holdings.empty:
-    return ""
+        if holdings.empty:
+            return ""
 
-_INVALID = {'', 'n/a', 'nan', 'none'}
-for _col in ['Hold_Period', 'Stop_Loss', 'Score']:
-    if _col not in holdings.columns:
-        holdings[_col] = ''
-_valid_mask = (
-    holdings['Hold_Period'].astype(str).str.strip().str.lower().map(lambda v: v not in _INVALID) &
-    holdings['Stop_Loss'].astype(str).str.strip().str.lower().map(lambda v: v not in _INVALID) &
-    holdings['Score'].astype(str).str.strip().str.lower().map(lambda v: v not in _INVALID)
-)
-holdings = holdings[_valid_mask].copy()
+        _INVALID = {'', 'n/a', 'nan', 'none'}
+        for _col in ['Hold_Period', 'Stop_Loss', 'Score']:
+            if _col not in holdings.columns:
+                holdings[_col] = ''
+        _valid_mask = (
+            holdings['Hold_Period'].astype(str).str.strip().str.lower().map(lambda v: v not in _INVALID) &
+            holdings['Stop_Loss'].astype(str).str.strip().str.lower().map(lambda v: v not in _INVALID) &
+            holdings['Score'].astype(str).str.strip().str.lower().map(lambda v: v not in _INVALID)
+        )
+        holdings = holdings[_valid_mask].copy()
 
-if holdings.empty:
-    return ""
+        if holdings.empty:
+            return ""
 
-holdings = holdings.sort_values('Date', ascending=False).drop_duplicates(subset='Ticker', keep='first')
+        holdings = holdings.sort_values('Date', ascending=False).drop_duplicates(subset='Ticker', keep='first')
 
-now = get_bj_time().replace(tzinfo=None)
-rows_html = ""
-for _, row in holdings.iterrows():
-    ticker = str(row['Ticker'])
-    name = str(row.get('Name', ticker))
-    buy_price = float(row['Close_Price'])
-    buy_date = pd.to_datetime(row['Date'])
-    days_held = (now - buy_date).days
-    cur_price = price_map.get(ticker, buy_price)
-    pnl_pct = round(((cur_price - buy_price) / buy_price) * 100, 2)
-    pnl_color = "#d32f2f" if pnl_pct >= 0 else "#388e3c"
+        now = get_bj_time().replace(tzinfo=None)
+        rows_html = ""
+        for _, row in holdings.iterrows():
+            ticker = str(row['Ticker'])
+            name = str(row.get('Name', ticker))
+            buy_price = float(row['Close_Price'])
+            buy_date = pd.to_datetime(row['Date'])
+            days_held = (now - buy_date).days
+            cur_price = latest_price_map.get(ticker, buy_price)
+            pnl_pct = round(((cur_price - buy_price) / buy_price) * 100, 2)
+            pnl_color = "#d32f2f" if pnl_pct >= 0 else "#388e3c"
 
-    rows_html += f"""
-<tr style="border-bottom:1px solid #c8e6c9;">
-    <td style="padding:8px 4px;"><b>{name}({ticker})</b></td>
-    <td style="padding:8px 4px;">{str(buy_date)[:10]}（已持股{days_held}天）</td>
-    <td style="padding:8px 4px;">买入¥{buy_price:.2f} → 现价¥{cur_price:.2f}</td>
-    <td style="padding:8px 4px; color:{pnl_color}; font-weight:bold;">{pnl_pct:+.2f}%</td>
-    <td style="padding:8px 4px;">{row.get('Hold_Period', 'N/A')}</td>
-    <td style="padding:8px 4px;">{row.get('Stop_Loss', 'N/A')}</td>
-</tr>"""
+            rows_html += f"""
+        <tr style="border-bottom:1px solid #c8e6c9;">
+            <td style="padding:8px 4px;"><b>{name}({ticker})</b></td>
+            <td style="padding:8px 4px;">{str(buy_date)[:10]}（已持股{days_held}天）</td>
+            <td style="padding:8px 4px;">买入¥{buy_price:.2f} → 现价¥{cur_price:.2f}</td>
+            <td style="padding:8px 4px; color:{pnl_color}; font-weight:bold;">{pnl_pct:+.2f}%</td>
+            <td style="padding:8px 4px;">{row.get('Hold_Period', 'N/A')}</td>
+            <td style="padding:8px 4px;">{row.get('Stop_Loss', 'N/A')}</td>
+        </tr>"""
 
-total = len(holdings)
-return f"""
+        total = len(holdings)
+        return f"""
 <div style="background:#e8f5e9; border-left:6px solid #2e7d32; padding:20px; margin-bottom:25px; border-radius:8px; max-height:320px; overflow-y:auto;">
-<h3 style="margin:0 0 12px 0; color:#1b5e20;">📦 当前持仓监控（共 {total} 只）</h3>
-<table style="width:100%; border-collapse:collapse; font-size:14px;">
-<tr style="text-align:left; color:#2e7d32; border-bottom:1px solid #a5d6a7;">
-    <th style="padding:6px 4px;">标的</th>
-    <th style="padding:6px 4px;">买入时间</th>
-    <th style="padding:6px 4px;">价格变动</th>
-    <th style="padding:6px 4px;">浮动盈亏</th>
-    <th style="padding:6px 4px;">建议周期</th>
-    <th style="padding:6px 4px;">止损位</th>
-</tr>
-{rows_html}
-</table>
+    <h3 style="margin:0 0 12px 0; color:#1b5e20;">📦 当前持仓监控（共 {total} 只）</h3>
+    <table style="width:100%; border-collapse:collapse; font-size:14px;">
+        <tr style="text-align:left; color:#2e7d32; border-bottom:1px solid #a5d6a7;">
+            <th style="padding:6px 4px;">标的</th>
+            <th style="padding:6px 4px;">买入时间</th>
+            <th style="padding:6px 4px;">价格变动</th>
+            <th style="padding:6px 4px;">浮动盈亏</th>
+            <th style="padding:6px 4px;">建议周期</th>
+            <th style="padding:6px 4px;">止损位</th>
+        </tr>
+        {rows_html}
+    </table>
 </div>
 """
-except Exception as e:
-print(f"⚠️ 渲染当前持仓卡片失败: {e}")
-return ""
+    except Exception as e:
+        print(f"⚠️ 渲染当前持仓卡片失败: {e}")
+        return ""
 
 
 # ==========================================
@@ -692,43 +693,43 @@ US_SECTOR_TO_ASHARE = {
 EMBARGO_THRESHOLD_PCT = -1.5
 
 def parse_sector_embargo(us_sector_text):
-    if not us_sector_text or "暂无" in us_sector_text:
-        return [], ""
+if not us_sector_text or "暂无" in us_sector_text:
+    return [], ""
 
-    embargo_sectors = []
-    embargo_lines = []
+embargo_sectors = []
+embargo_lines = []
 
-    for line in us_sector_text.strip().split('\n'):
-        line = line.strip()
-        if not line or '📉' not in line:
-            continue
-        try:
-            parts = line.replace('📉', '').strip().split(':')
-            etf = parts[0].strip()
-            pct_str = parts[1].strip().split('%')[0].strip()
-            pct = float(pct_str)
-        except Exception:
-            continue
+for line in us_sector_text.strip().split('\n'):
+    line = line.strip()
+    if not line or '📉' not in line:
+        continue
+    try:
+        parts = line.replace('📉', '').strip().split(':')
+        etf = parts[0].strip()
+        pct_str = parts[1].strip().split('%')[0].strip()
+        pct = float(pct_str)
+    except Exception:
+        continue
 
-        if pct >= EMBARGO_THRESHOLD_PCT:
-            continue
+    if pct >= EMBARGO_THRESHOLD_PCT:
+        continue
 
-        a_share_labels = US_SECTOR_TO_ASHARE.get(etf, [])
-        if not a_share_labels:
-            continue
+    a_share_labels = US_SECTOR_TO_ASHARE.get(etf, [])
+    if not a_share_labels:
+        continue
 
-        embargo_sectors.extend(a_share_labels)
+    embargo_sectors.extend(a_share_labels)
 
-        strength = "⛔ 强封（跌幅≥3%，A股高度联动）" if pct <= -3.0 else "🚫 预警封禁（跌幅≥1.5%，情绪联动）"
-        embargo_lines.append(
-            f"  {strength} {etf} 昨日 {pct:+.2f}% → 今日禁止推荐A股相关板块：{'、'.join(a_share_labels)}"
-        )
+    strength = "⛔ 强封（跌幅≥3%，A股高度联动）" if pct <= -3.0 else "🚫 预警封禁（跌幅≥1.5%，情绪联动）"
+    embargo_lines.append(
+        f"  {strength} {etf} 昨日 {pct:+.2f}% → 今日禁止推荐A股相关板块：{'、'.join(a_share_labels)}"
+    )
 
-    if not embargo_lines:
-        return [], ""
+if not embargo_lines:
+    return [], ""
 
-    embargo_sectors = list(dict.fromkeys(embargo_sectors))
-    embargo_text = f"""
+embargo_sectors = list(dict.fromkeys(embargo_sectors))
+embargo_text = f"""
 🚨【美股板块联动封禁名单 —— 硬性纪律，不可违反】：
 根据昨夜美股板块涨跌数据，以下A股板块今日进入联动封禁区：
 
@@ -741,79 +742,79 @@ def parse_sector_embargo(us_sector_text):
 4. 今日精选方向应聚焦于：美股昨日涨幅为正的板块对应的A股方向 + 与美股相关性低的本土催化标的（政策催化、事件驱动、低位反转）。
 封禁板块关键词列表（只要股票所属行业/板块包含以下任一关键词，即触发封禁）：[{', '.join(embargo_sectors)}]
 """
-    print(f"🚫 [阶段2.6] 美股联动封禁触发：{len(embargo_lines)} 个板块受限，封禁关键词: {embargo_sectors}")
-    return embargo_sectors, embargo_text
+print(f"🚫 [阶段2.6] 美股联动封禁触发：{len(embargo_lines)} 个板块受限，封禁关键词: {embargo_sectors}")
+return embargo_sectors, embargo_text
 
 
 # ==========================================
 # 1. 获取交易额 Top 300
 # ==========================================
 def get_top_300_pool():
-    print(f"🔍 [阶段1] 正在拉取最近交易日的A股全市场数据，圈定 Top 300 主力资金池...")
-    df_daily = None
-    trade_date = None
+print(f"🔍 [阶段1] 正在拉取最近交易日的A股全市场数据，圈定 Top 300 主力资金池...")
+df_daily = None
+trade_date = None
 
-    for i in range(1, 8):
-        try_date = (get_bj_time() - datetime.timedelta(days=i)).strftime('%Y%m%d')
-        df_try = pro.daily(trade_date=try_date)
-        if df_try is not None and not df_try.empty:
-            df_daily = df_try
-            trade_date = try_date
-            print(f"   ✅ 找到最近交易日数据: {try_date}")
-            break
-        else:
-            print(f"   {try_date} 无数据（非交易日），继续往前找...")
+for i in range(1, 8):
+    try_date = (get_bj_time() - datetime.timedelta(days=i)).strftime('%Y%m%d')
+    df_try = pro.daily(trade_date=try_date)
+    if df_try is not None and not df_try.empty:
+        df_daily = df_try
+        trade_date = try_date
+        print(f"   ✅ 找到最近交易日数据: {try_date}")
+        break
+    else:
+        print(f"   {try_date} 无数据（非交易日），继续往前找...")
 
-    if df_daily is None:
-        print("🚨 连续7天都没有拉取到数据，返回空池。")
-        return {}, [], None
+if df_daily is None:
+    print("🚨 连续7天都没有拉取到数据，返回空池。")
+    return {}, [], None
 
-    basic = pro.stock_basic(exchange='', list_status='L', fields='ts_code,name,industry')
-    name_map = dict(zip(basic['ts_code'], basic['name']))
-    industry_map = dict(zip(basic['ts_code'], basic.get('industry', ['未知'] * len(basic))))
+basic = pro.stock_basic(exchange='', list_status='L', fields='ts_code,name,industry')
+name_map = dict(zip(basic['ts_code'], basic['name']))
+industry_map = dict(zip(basic['ts_code'], basic.get('industry', ['未知'] * len(basic))))
 
-    df_sorted = df_daily.sort_values(by='amount', ascending=False).head(300)
-    codes = [row['ts_code'] for _, row in df_sorted.iterrows()]
+df_sorted = df_daily.sort_values(by='amount', ascending=False).head(300)
+codes = [row['ts_code'] for _, row in df_sorted.iterrows()]
 
-    full_pool = {}
-    for _, row in df_sorted.iterrows():
-        ts_code = row['ts_code']
-        full_pool[ts_code] = {
-            "Ticker": ts_code,
-            "Name": name_map.get(ts_code, ts_code),
-            "Industry": industry_map.get(ts_code, "未知"),
-            "Open": row.get('open', row['close']),
-            "Close": row['close'],
-            "Amount": row['amount'],
-            "pct_chg": row.get('pct_chg', 0),
-        }
+full_pool = {}
+for _, row in df_sorted.iterrows():
+    ts_code = row['ts_code']
+    full_pool[ts_code] = {
+        "Ticker": ts_code,
+        "Name": name_map.get(ts_code, ts_code),
+        "Industry": industry_map.get(ts_code, "未知"),
+        "Open": row.get('open', row['close']),
+        "Close": row['close'],
+        "Amount": row['amount'],
+        "pct_chg": row.get('pct_chg', 0),
+    }
 
-    print(f"✅ 成功圈定 {len(full_pool)} 只核心活跃标的（数据日期: {trade_date}）。")
+print(f"✅ 成功圈定 {len(full_pool)} 只核心活跃标的（数据日期: {trade_date}）。")
 
-    # 【新增】获取板块资金流向（按行业汇总超大单+大单净流入）
-    try:
-        df_mf = pro.moneyflow(trade_date=trade_date)
-        if df_mf is not None and not df_mf.empty:
-            # 超大单+大单净流入（万元）作为主力资金流入指标
-            df_mf['main_net'] = df_mf.get('lg_amount', 0) + df_mf.get('net_mf_amount', 0)
-            mf_map = dict(zip(df_mf['ts_code'], df_mf['main_net']))
-            for ts_code in full_pool:
-                full_pool[ts_code]['主力净流入(万元)'] = mf_map.get(ts_code, 0)
-            # 按行业汇总板块资金流入
-            sector_flow = {}
-            for ts_code, data in full_pool.items():
-                sector = data.get('Industry', '其他')
-                sector_flow[sector] = sector_flow.get(sector, 0) + data.get('主力净流入(万元)', 0)
-            # 标记资金流入前5的板块为"热点板块"
-            top5_sectors = sorted(sector_flow.items(), key=lambda x: x[1], reverse=True)[:5]
-            hot_sectors = {s[0] for s in top5_sectors if s[1] > 0}
-            for ts_code in full_pool:
-                full_pool[ts_code]['热点板块'] = full_pool[ts_code].get('Industry', '其他') in hot_sectors
-            print(f"✅ 板块资金流向计算完成，热点板块: {list(hot_sectors)}")
-    except Exception as e:
-        print(f"⚠️ 板块资金流向获取失败: {e}")
+# 【新增】获取板块资金流向（按行业汇总超大单+大单净流入）
+try:
+    df_mf = pro.moneyflow(trade_date=trade_date)
+    if df_mf is not None and not df_mf.empty:
+        # 超大单+大单净流入（万元）作为主力资金流入指标
+        df_mf['main_net'] = df_mf.get('lg_amount', 0) + df_mf.get('net_mf_amount', 0)
+        mf_map = dict(zip(df_mf['ts_code'], df_mf['main_net']))
+        for ts_code in full_pool:
+            full_pool[ts_code]['主力净流入(万元)'] = mf_map.get(ts_code, 0)
+        # 按行业汇总板块资金流入
+        sector_flow = {}
+        for ts_code, data in full_pool.items():
+            sector = data.get('Industry', '其他')
+            sector_flow[sector] = sector_flow.get(sector, 0) + data.get('主力净流入(万元)', 0)
+        # 标记资金流入前5的板块为"热点板块"
+        top5_sectors = sorted(sector_flow.items(), key=lambda x: x[1], reverse=True)[:5]
+        hot_sectors = {s[0] for s in top5_sectors if s[1] > 0}
+        for ts_code in full_pool:
+            full_pool[ts_code]['热点板块'] = full_pool[ts_code].get('Industry', '其他') in hot_sectors
+        print(f"✅ 板块资金流向计算完成，热点板块: {list(hot_sectors)}")
+except Exception as e:
+    print(f"⚠️ 板块资金流向获取失败: {e}")
 
-    return full_pool, codes, trade_date
+return full_pool, codes, trade_date
 
 
 # ==========================================
@@ -824,550 +825,550 @@ def get_top_300_pool():
 # 【新增】新闻日期过滤辅助函数
 # ==========================================
 def _parse_rss_date(date_str: str):
-    """解析RSS日期字符串，返回datetime对象（BJ时区）"""
-    if not date_str:
-        return None
+"""解析RSS日期字符串，返回datetime对象（BJ时区）"""
+if not date_str:
+    return None
+try:
+    # RFC 822 格式: Mon, 15 Jan 2024 08:30:00 GMT
+    dt = email.utils.parsedate_to_datetime(date_str.strip())
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=datetime.timezone.utc)
+    return dt.astimezone(BEIJING_TZ)
+except Exception:
+    pass
+# 兜底：尝试常见格式
+for fmt in ("%a, %d %b %Y %H:%M:%S", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
     try:
-        # RFC 822 格式: Mon, 15 Jan 2024 08:30:00 GMT
-        dt = email.utils.parsedate_to_datetime(date_str.strip())
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=datetime.timezone.utc)
-        return dt.astimezone(BEIJING_TZ)
+        dt = datetime.datetime.strptime(date_str.strip()[:25], fmt)
+        return dt.replace(tzinfo=BEIJING_TZ)
     except Exception:
         pass
-    # 兜底：尝试常见格式
-    for fmt in ("%a, %d %b %Y %H:%M:%S", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
-        try:
-            dt = datetime.datetime.strptime(date_str.strip()[:25], fmt)
-            return dt.replace(tzinfo=BEIJING_TZ)
-        except Exception:
-            pass
-    return None
+return None
 
 def _is_recent_news(date_str: str, max_days: int = 2):
-    """判断新闻日期是否在允许范围内（默认2天）"""
-    dt = _parse_rss_date(date_str)
-    if dt is None:
-        return False
-    now_bj = get_bj_time()
-    delta = now_bj - dt
-    return delta.days <= max_days and delta.days >= -1  # 允许1天未来（时区误差）
+"""判断新闻日期是否在允许范围内（默认2天）"""
+dt = _parse_rss_date(date_str)
+if dt is None:
+    return False
+now_bj = get_bj_time()
+delta = now_bj - dt
+return delta.days <= max_days and delta.days >= -1  # 允许1天未来（时区误差）
 
 def _get_macro_news_time_tag(dt_obj):
-    """为宏观新闻打时效标签，返回 (标签文本, 权重描述)"""
-    if dt_obj is None:
-        return "[📑前日-低权重]", "20% → 5分"
-    now_bj = get_bj_time()
-    delta = now_bj - dt_obj
-    hours = delta.total_seconds() / 3600
-    if hours <= 6:
-        return "[🔥今日最新-权重最高]", "满分25分"
-    elif delta.days == 0 or (delta.days == 1 and hours <= 24):
-        return "[📰今日-高权重]", "80% → 20分"
-    elif delta.days <= 2 or (delta.days == 2 and hours <= 48):
-        return "[📄昨日-中等权重]", "50% → 12分"
-    elif delta.days <= 3 or (delta.days == 3 and hours <= 72):
-        return "[📑前日-低权重]", "20% → 5分"
-    else:
-        return "[📑前日-低权重]", "20% → 5分"
+"""为宏观新闻打时效标签，返回 (标签文本, 权重描述)"""
+if dt_obj is None:
+    return "[📑前日-低权重]", "20% → 5分"
+now_bj = get_bj_time()
+delta = now_bj - dt_obj
+hours = delta.total_seconds() / 3600
+if hours <= 6:
+    return "[🔥今日最新-权重最高]", "满分25分"
+elif delta.days == 0 or (delta.days == 1 and hours <= 24):
+    return "[📰今日-高权重]", "80% → 20分"
+elif delta.days <= 2 or (delta.days == 2 and hours <= 48):
+    return "[📄昨日-中等权重]", "50% → 12分"
+elif delta.days <= 3 or (delta.days == 3 and hours <= 72):
+    return "[📑前日-低权重]", "20% → 5分"
+else:
+    return "[📑前日-低权重]", "20% → 5分"
 
 
 def _get_stock_news_time_tag(dt_obj):
-    """为个股新闻打时效标签，返回标签文本"""
-    if dt_obj is None:
-        return "[📑前日]"
-    now_bj = get_bj_time()
-    delta = now_bj - dt_obj
-    hours = delta.total_seconds() / 3600
-    if hours <= 6:
-        return "[🔥最新]"
-    elif delta.days == 0 or (delta.days == 1 and hours <= 24):
-        return "[📰今日]"
-    elif delta.days <= 2 or (delta.days == 2 and hours <= 48):
-        return "[📄昨日]"
-    elif delta.days <= 3 or (delta.days == 3 and hours <= 72):
-        return "[📑前日]"
-    else:
-        return None  # 超过72小时丢弃
+"""为个股新闻打时效标签，返回标签文本"""
+if dt_obj is None:
+    return "[📑前日]"
+now_bj = get_bj_time()
+delta = now_bj - dt_obj
+hours = delta.total_seconds() / 3600
+if hours <= 6:
+    return "[🔥最新]"
+elif delta.days == 0 or (delta.days == 1 and hours <= 24):
+    return "[📰今日]"
+elif delta.days <= 2 or (delta.days == 2 and hours <= 48):
+    return "[📄昨日]"
+elif delta.days <= 3 or (delta.days == 3 and hours <= 72):
+    return "[📑前日]"
+else:
+    return None  # 超过72小时丢弃
 
 
 
 def get_free_macro_news():
-    print("📡 [阶段2] 正在抓取全球财经与A股新闻...")
-    news_entries = []   # (datetime_obj, source_name, time_str, title_text, tag, weight_desc)
-    current_year = str(get_bj_time().year)
+print("📡 [阶段2] 正在抓取全球财经与A股新闻...")
+news_entries = []   # (datetime_obj, source_name, time_str, title_text, tag, weight_desc)
+current_year = str(get_bj_time().year)
 
-    sources = [
-        ("新浪A股热点", "https://rss.sina.com.cn/roll/finance/hot_roll.xml"),
-        ("华尔街日报(宏观)", "https://feeds.a.dj.com/rss/RSSMarketsMain.xml"),
-        ("CNBC(宏观)", "https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss01&id=10000664"),
-    ]
+sources = [
+    ("新浪A股热点", "https://rss.sina.com.cn/roll/finance/hot_roll.xml"),
+    ("华尔街日报(宏观)", "https://feeds.a.dj.com/rss/RSSMarketsMain.xml"),
+    ("CNBC(宏观)", "https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss01&id=10000664"),
+]
 
-    for source_name, url in sources:
-        try:
-            req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-            with urllib.request.urlopen(req, timeout=10) as response:
-                xml_data = response.read()
-            root = ET.fromstring(xml_data)
-            items = root.findall('.//item')[:20]
-            for item in items:
-                title = item.find('title')
-                pub_date = item.find('pubDate')
-                if title is not None:
-                    time_str = pub_date.text[:25] if pub_date is not None else ""
-                    dt_obj = _parse_rss_date(time_str)
-                    if dt_obj is None:
-                        continue
-                    # 放宽到7天，让排序自然体现新旧
-                    if (get_bj_time() - dt_obj).days > 7:
-                        continue
-                    tag, weight_desc = _get_macro_news_time_tag(dt_obj)
-                    news_entries.append((dt_obj, source_name, time_str, title.text, tag, weight_desc))
-            print(f"   ✅ {source_name} 节点抓取成功")
-        except Exception as e:
-            print(f"   ⚠️ {source_name} 节点抓取失败: {e}")
+for source_name, url in sources:
+    try:
+        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+        with urllib.request.urlopen(req, timeout=10) as response:
+            xml_data = response.read()
+        root = ET.fromstring(xml_data)
+        items = root.findall('.//item')[:20]
+        for item in items:
+            title = item.find('title')
+            pub_date = item.find('pubDate')
+            if title is not None:
+                time_str = pub_date.text[:25] if pub_date is not None else ""
+                dt_obj = _parse_rss_date(time_str)
+                if dt_obj is None:
+                    continue
+                # 放宽到7天，让排序自然体现新旧
+                if (get_bj_time() - dt_obj).days > 7:
+                    continue
+                tag, weight_desc = _get_macro_news_time_tag(dt_obj)
+                news_entries.append((dt_obj, source_name, time_str, title.text, tag, weight_desc))
+        print(f"   ✅ {source_name} 节点抓取成功")
+    except Exception as e:
+        print(f"   ⚠️ {source_name} 节点抓取失败: {e}")
 
-    if not news_entries:
-        return "暂无实时新闻，请基于昨日收盘及底层产业逻辑推演。"
+if not news_entries:
+    return "暂无实时新闻，请基于昨日收盘及底层产业逻辑推演。"
 
-    # 按日期从最新到最旧排序
-    news_entries.sort(key=lambda x: x[0], reverse=True)
+# 按日期从最新到最旧排序
+news_entries.sort(key=lambda x: x[0], reverse=True)
 
-    # 按日期+时效标签分组输出：今日最新 → 今日 → 昨日 → 前日
-    today_str = get_bj_time().strftime('%Y-%m-%d')
-    yesterday_str = (get_bj_time() - datetime.timedelta(days=1)).strftime('%Y-%m-%d')
-    two_days_ago_str = (get_bj_time() - datetime.timedelta(days=2)).strftime('%Y-%m-%d')
+# 按日期+时效标签分组输出：今日最新 → 今日 → 昨日 → 前日
+today_str = get_bj_time().strftime('%Y-%m-%d')
+yesterday_str = (get_bj_time() - datetime.timedelta(days=1)).strftime('%Y-%m-%d')
+two_days_ago_str = (get_bj_time() - datetime.timedelta(days=2)).strftime('%Y-%m-%d')
 
-    grouped = {"今日最新": [], "今日": [], "昨日": [], "前日": []}
-    for dt_obj, source_name, time_str, title_text, tag, weight_desc in news_entries:
-        date_key = dt_obj.strftime('%Y-%m-%d')
-        if date_key == today_str:
-            if "🔥" in tag:
-                bucket = "今日最新"
-            else:
-                bucket = "今日"
-        elif date_key == yesterday_str:
-            bucket = "昨日"
-        elif date_key == two_days_ago_str:
-            bucket = "前日"
+grouped = {"今日最新": [], "今日": [], "昨日": [], "前日": []}
+for dt_obj, source_name, time_str, title_text, tag, weight_desc in news_entries:
+    date_key = dt_obj.strftime('%Y-%m-%d')
+    if date_key == today_str:
+        if "🔥" in tag:
+            bucket = "今日最新"
         else:
-            bucket = "前日"
-        grouped[bucket].append(f"{tag} [{source_name}] {time_str} - {title.text}")
+            bucket = "今日"
+    elif date_key == yesterday_str:
+        bucket = "昨日"
+    elif date_key == two_days_ago_str:
+        bucket = "前日"
+    else:
+        bucket = "前日"
+    grouped[bucket].append(f"{tag} [{source_name}] {time_str} - {title.text}")
 
-    output_lines = []
-    for bucket in ["今日最新", "今日", "昨日", "前日"]:
-        if grouped[bucket]:
-            output_lines.append(f"\n【{bucket}】")
-            output_lines.extend(grouped[bucket])
+output_lines = []
+for bucket in ["今日最新", "今日", "昨日", "前日"]:
+    if grouped[bucket]:
+        output_lines.append(f"\n【{bucket}】")
+        output_lines.extend(grouped[bucket])
 
-    news_lines = "\n".join(output_lines).strip()
-    print(f"✅ 盘前新闻矩阵组装完毕，共 {len(news_entries)} 条，已按时效递减排序。")
-    return news_lines
+news_lines = "\n".join(output_lines).strip()
+print(f"✅ 盘前新闻矩阵组装完毕，共 {len(news_entries)} 条，已按时效递减排序。")
+return news_lines
 
 
 # ==========================================
 # 2.6 获取国际宏观大宗数据
 # ==========================================
 def get_global_macro_data():
-    print("🌐 [阶段2.6] 正在抓取国际宏观与大宗商品核心指标数据...")
-    macro_tickers = {
-        "10Y_US_Bond": ("^TNX", "美国10年期国债收益率"),
-        "VIX": ("^VIX", "美股恐慌指数VIX"),
-        "Gold": ("GC=F", "COMEX黄金期货"),
-        "Silver": ("SI=F", "COMEX白银期货"),
-        "Copper": ("HG=F", "COMEX铜期货"),
-        "WTI_Oil": ("CL=F", "WTI原油期货"),
-        "Brent_Oil": ("BZ=F", "布伦特原油期货"),
-    }
-    results = []
-    vix_value = None
+print("🌐 [阶段2.6] 正在抓取国际宏观与大宗商品核心指标数据...")
+macro_tickers = {
+    "10Y_US_Bond": ("^TNX", "美国10年期国债收益率"),
+    "VIX": ("^VIX", "美股恐慌指数VIX"),
+    "Gold": ("GC=F", "COMEX黄金期货"),
+    "Silver": ("SI=F", "COMEX白银期货"),
+    "Copper": ("HG=F", "COMEX铜期货"),
+    "WTI_Oil": ("CL=F", "WTI原油期货"),
+    "Brent_Oil": ("BZ=F", "布伦特原油期货"),
+}
+results = []
+vix_value = None
 
-    for key, (ticker, desc) in macro_tickers.items():
-        try:
-            df = yf.download(ticker, period="5d", progress=False)
-            if df is None or df.empty:
-                results.append(f"❓ {desc} ({ticker}): 指标抓取受限")
-                continue
-            if isinstance(df.columns, pd.MultiIndex):
-                df.columns = df.columns.get_level_values(0)
-            close_val = float(df['Close'].iloc[-1])
-            prev_close = float(df['Close'].iloc[-2])
-            pct_chg = round((close_val - prev_close) / prev_close * 100, 2)
-            sign = "📈" if pct_chg > 0 else "📉"
-            if key == "VIX":
-                vix_value = close_val
-                results.append(f"{sign} {desc} ({ticker}): {round(close_val, 2)} (当日变动: {pct_chg:+.2f}%)")
-            elif key == "10Y_US_Bond":
-                results.append(f"{sign} {desc} ({ticker}): {round(close_val, 3)}% (当日变动: {pct_chg:+.2f}%)")
-            else:
-                results.append(f"{sign} {desc} ({ticker}): ${round(close_val, 2)} (当日变动: {pct_chg:+.2f}%)")
-        except Exception:
+for key, (ticker, desc) in macro_tickers.items():
+    try:
+        df = yf.download(ticker, period="5d", progress=False)
+        if df is None or df.empty:
             results.append(f"❓ {desc} ({ticker}): 指标抓取受限")
+            continue
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
+        close_val = float(df['Close'].iloc[-1])
+        prev_close = float(df['Close'].iloc[-2])
+        pct_chg = round((close_val - prev_close) / prev_close * 100, 2)
+        sign = "📈" if pct_chg > 0 else "📉"
+        if key == "VIX":
+            vix_value = close_val
+            results.append(f"{sign} {desc} ({ticker}): {round(close_val, 2)} (当日变动: {pct_chg:+.2f}%)")
+        elif key == "10Y_US_Bond":
+            results.append(f"{sign} {desc} ({ticker}): {round(close_val, 3)}% (当日变动: {pct_chg:+.2f}%)")
+        else:
+            results.append(f"{sign} {desc} ({ticker}): ${round(close_val, 2)} (当日变动: {pct_chg:+.2f}%)")
+    except Exception:
+        results.append(f"❓ {desc} ({ticker}): 指标抓取受限")
 
-    if not results:
-        return "暂无外部宏观大宗商品监控数据。"
+if not results:
+    return "暂无外部宏观大宗商品监控数据。"
 
-    guidance = ("\n【使用提示】以上大宗商品数据对不同行业的相关性差异很大：原油/WTI/布伦特"
-                "主要影响石油化工、煤炭开采、航空运输、水路运输等上下游行业，对其他行业"
-                "（如软件、消费、医药等）相关性很低，请结合每支标的自己的所属行业判断，"
-                "不要不分行业地把油价波动同等代入所有个股的评分。")
-    if vix_value is not None:
-        if vix_value >= 30:
-            guidance += (f"\n【VIX风控提示】当前VIX={round(vix_value,1)}，处于极度恐慌区间（>=30），"
-                         f"全球风险偏好明显转弱。请提高评分门槛，对纯逻辑推演、缺乏新闻验证的"
-                         f"高位追涨标的更加谨慎。")
-        elif vix_value >= 25:
-            guidance += f"\n【VIX风控提示】当前VIX={round(vix_value,1)}，处于偏高波动区间（>=25），请相应提高评分门槛。"
-    return "\n".join(results) + guidance
+guidance = ("\n【使用提示】以上大宗商品数据对不同行业的相关性差异很大：原油/WTI/布伦特"
+            "主要影响石油化工、煤炭开采、航空运输、水路运输等上下游行业，对其他行业"
+            "（如软件、消费、医药等）相关性很低，请结合每支标的自己的所属行业判断，"
+            "不要不分行业地把油价波动同等代入所有个股的评分。")
+if vix_value is not None:
+    if vix_value >= 30:
+        guidance += (f"\n【VIX风控提示】当前VIX={round(vix_value,1)}，处于极度恐慌区间（>=30），"
+                     f"全球风险偏好明显转弱。请提高评分门槛，对纯逻辑推演、缺乏新闻验证的"
+                     f"高位追涨标的更加谨慎。")
+    elif vix_value >= 25:
+        guidance += f"\n【VIX风控提示】当前VIX={round(vix_value,1)}，处于偏高波动区间（>=25），请相应提高评分门槛。"
+return "\n".join(results) + guidance
 
 
 # ==========================================
 # 2.5 昨日美股板块表现
 # ==========================================
 def get_us_sector_performance():
-    print("🇺🇸 [阶段2.5] 正在抓取昨日美股板块表现...")
-    sector_map = {
-        "XLK": "科技板块（半导体/软件/硬件）→ A股科技/半导体/AI板块",
-        "SOXX": "费城半导体指数 → A股半导体/芯片设计/封测板块",
-        "XLE": "能源板块（石油/天然气）→ A股石油/煤炭/新能源板块",
-        "XLF": "金融板块（银行/保险/券商）→ A股银行/保险/券商板块",
-        "XLV": "医疗健康板块 → A股医药/创新药/医疗器械板块",
-        "XLY": "非必需消费（零售/汽车）→ A股消费/汽车板块",
-        "XLI": "工业板块（航空/防务/制造）→ A股军工/制造/机器人板块",
-        "XLB": "材料板块（矿业/化工）→ A股有色金属/化工板块",
-        "ARKK": "创新科技（AI/基因/自动驾驶）→ A股AI/创新药/新能源汽车板块",
-    }
+print("🇺🇸 [阶段2.5] 正在抓取昨日美股板块表现...")
+sector_map = {
+    "XLK": "科技板块（半导体/软件/硬件）→ A股科技/半导体/AI板块",
+    "SOXX": "费城半导体指数 → A股半导体/芯片设计/封测板块",
+    "XLE": "能源板块（石油/天然气）→ A股石油/煤炭/新能源板块",
+    "XLF": "金融板块（银行/保险/券商）→ A股银行/保险/券商板块",
+    "XLV": "医疗健康板块 → A股医药/创新药/医疗器械板块",
+    "XLY": "非必需消费（零售/汽车）→ A股消费/汽车板块",
+    "XLI": "工业板块（航空/防务/制造）→ A股军工/制造/机器人板块",
+    "XLB": "材料板块（矿业/化工）→ A股有色金属/化工板块",
+    "ARKK": "创新科技（AI/基因/自动驾驶）→ A股AI/创新药/新能源汽车板块",
+}
 
-    results = []
-    try:
-        import urllib.request
-        yesterday = (get_bj_time() - datetime.timedelta(days=1)).strftime('%Y-%m-%d')
-        two_days_ago = (get_bj_time() - datetime.timedelta(days=3)).strftime('%Y-%m-%d')
+results = []
+try:
+    import urllib.request
+    yesterday = (get_bj_time() - datetime.timedelta(days=1)).strftime('%Y-%m-%d')
+    two_days_ago = (get_bj_time() - datetime.timedelta(days=3)).strftime('%Y-%m-%d')
 
-        for ticker, description in sector_map.items():
-            try:
-                url = f"https://stooq.com/q/d/l/?s={ticker.lower()}.us&d1={two_days_ago.replace('-','')}&d2={yesterday.replace('-','')}&i=d"
-                req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-                with urllib.request.urlopen(req, timeout=8) as resp:
-                    content = resp.read().decode('utf-8')
+    for ticker, description in sector_map.items():
+        try:
+            url = f"https://stooq.com/q/d/l/?s={ticker.lower()}.us&d1={two_days_ago.replace('-','')}&d2={yesterday.replace('-','')}&i=d"
+            req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+            with urllib.request.urlopen(req, timeout=8) as resp:
+                content = resp.read().decode('utf-8')
 
-                lines = [l.strip() for l in content.strip().split('\n') if l.strip()]
-                if len(lines) >= 2:
-                    last_line = lines[-1].split(',')
-                    prev_line = lines[-2].split(',') if len(lines) >= 3 else None
+            lines = [l.strip() for l in content.strip().split('\n') if l.strip()]
+            if len(lines) >= 2:
+                last_line = lines[-1].split(',')
+                prev_line = lines[-2].split(',') if len(lines) >= 3 else None
 
-                    if len(last_line) >= 5:
-                        close_price = float(last_line[4])
-                        if prev_line and len(prev_line) >= 5:
-                            prev_close = float(prev_line[4])
-                            pct_chg = round((close_price - prev_close) / prev_close * 100, 2)
-                            sign = "📈" if pct_chg > 0 else "📉"
-                            results.append(f"{sign} {ticker}: {pct_chg:+.2f}% — {description}")
-                        else:
-                            results.append(f"➖ {ticker}: 数据不足 — {description}")
-                time.sleep(0.3)
-            except Exception:
-                results.append(f"❓ {ticker}: 抓取失败 — {description}")
+                if len(last_line) >= 5:
+                    close_price = float(last_line[4])
+                    if prev_line and len(prev_line) >= 5:
+                        prev_close = float(prev_line[4])
+                        pct_chg = round((close_price - prev_close) / prev_close * 100, 2)
+                        sign = "📈" if pct_chg > 0 else "📉"
+                        results.append(f"{sign} {ticker}: {pct_chg:+.2f}% — {description}")
+                    else:
+                        results.append(f"➖ {ticker}: 数据不足 — {description}")
+            time.sleep(0.3)
+        except Exception:
+            results.append(f"❓ {ticker}: 抓取失败 — {description}")
 
-        if results:
-            print(f"✅ 美股板块数据获取完毕，共 {len(results)} 个板块。")
-            return "\n".join(results)
+    if results:
+        print(f"✅ 美股板块数据获取完毕，共 {len(results)} 个板块。")
+        return "\n".join(results)
 
-    except Exception as e:
-        print(f"⚠️ 美股板块数据抓取失败: {e}")
+except Exception as e:
+    print(f"⚠️ 美股板块数据抓取失败: {e}")
 
-    return "暂无美股板块数据，请基于宏观新闻推演A股跟随效应。"
+return "暂无美股板块数据，请基于宏观新闻推演A股跟随效应。"
 
 
 # ==========================================
 # 3. 个股新闻抓取
 # ==========================================
 def get_stock_news(ticker_code: str, ticker_name: str, max_items: int = 5) -> list[str]:
-    """抓取个股新闻，带时效标签，超过72小时丢弃，按时间倒序排列"""
-    # 存储 (datetime_obj, formatted_string)
-    news_entries = []
-    code = ticker_code.split('.')[0]
+"""抓取个股新闻，带时效标签，超过72小时丢弃，按时间倒序排列"""
+# 存储 (datetime_obj, formatted_string)
+news_entries = []
+code = ticker_code.split('.')[0]
 
-    _HEADERS = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
-                'Referer': 'https://www.eastmoney.com/'}
+_HEADERS = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
+            'Referer': 'https://www.eastmoney.com/'}
 
-    try:
-        url = (f"https://np-anotice-stock.eastmoney.com/api/security/ann"
-               f"?sr=-1&page=1&size={max_items}&s=&c={code}&t=1,2,9,22,40")
-        req = urllib.request.Request(url, headers=_HEADERS)
-        with urllib.request.urlopen(req, timeout=7) as resp:
-            data = json.loads(resp.read().decode('utf-8'))
-        ann_list = data.get('data', {}).get('list', [])
-        for item in ann_list[:max_items]:
-            title = str(item.get('title', '')).strip()
-            date  = str(item.get('notice_date', ''))[:10]
-            try:
-                notice_dt = datetime.datetime.strptime(date, "%Y-%m-%d").replace(tzinfo=BEIJING_TZ)
-                # 超过72小时丢弃
-                if (get_bj_time() - notice_dt).days > 3:
-                    continue
-                tag = _get_stock_news_time_tag(notice_dt)
-                if tag is None:
-                    continue
-            except Exception:
-                tag = "[📑前日]"
-            if title:
-                news_entries.append((notice_dt, f"{tag}[东财公告][{date}] {title}"))
-    except Exception:
-        pass
-
-    # Yahoo Finance 新闻
-    try:
-        if ticker_code.upper().endswith('.SH'):
-            yahoo_ticker = code + '.SS'
-        else:
-            yahoo_ticker = code + '.SZ'
-        cutoff_ts = time.time() - 3 * 86400  # 72小时
-        raw = yf.Ticker(yahoo_ticker).news or []
-        for item in raw:
-            pub_ts = item.get('providerPublishTime', 0)
-            if pub_ts < cutoff_ts:
+try:
+    url = (f"https://np-anotice-stock.eastmoney.com/api/security/ann"
+           f"?sr=-1&page=1&size={max_items}&s=&c={code}&t=1,2,9,22,40")
+    req = urllib.request.Request(url, headers=_HEADERS)
+    with urllib.request.urlopen(req, timeout=7) as resp:
+        data = json.loads(resp.read().decode('utf-8'))
+    ann_list = data.get('data', {}).get('list', [])
+    for item in ann_list[:max_items]:
+        title = str(item.get('title', '')).strip()
+        date  = str(item.get('notice_date', ''))[:10]
+        try:
+            notice_dt = datetime.datetime.strptime(date, "%Y-%m-%d").replace(tzinfo=BEIJING_TZ)
+            # 超过72小时丢弃
+            if (get_bj_time() - notice_dt).days > 3:
                 continue
-            title     = str(item.get('title', '')).strip()
-            publisher = str(item.get('publisher', 'Yahoo'))
-            pub_dt    = datetime.datetime.fromtimestamp(pub_ts, tz=BEIJING_TZ)
-            tag       = _get_stock_news_time_tag(pub_dt)
+            tag = _get_stock_news_time_tag(notice_dt)
             if tag is None:
                 continue
-            date_str  = pub_dt.strftime('%m-%d %H:%M')
-            if title:
-                news_entries.append((pub_dt, f"{tag}[Yahoo/{publisher}][{date_str}] {title}"))
-    except Exception:
-        pass
+        except Exception:
+            tag = "[📑前日]"
+        if title:
+            news_entries.append((notice_dt, f"{tag}[东财公告][{date}] {title}"))
+except Exception:
+    pass
 
-    # 新浪财经新闻
-    try:
-        sina_url = (f"https://feed.mix.sina.com.cn/api/roll/get"
-                    f"?pageid=153&lid=2512&k={code}&num={max_items}&page=1")
-        req = urllib.request.Request(sina_url, headers=_HEADERS)
-        with urllib.request.urlopen(req, timeout=6) as resp:
-            sina_content = resp.read().decode('utf-8')
-        sina_data = json.loads(sina_content)
-        _JUNK_KEYWORDS = ('盘口', '亚盘', '竞彩', '让球', '胜负彩', '比分',
-                          '欧冠', '英超', '西甲', '中超', 'NBA', 'CBA', '足彩', '首发阵容', '让分')
-        for item in sina_data.get('result', {}).get('data', []):
-            title = str(item.get('title', '')).strip()
-            ctime = str(item.get('ctime', ''))[:10]
-            try:
-                if ctime.isdigit() and len(ctime) == 10:
-                    ctime_dt = datetime.datetime.fromtimestamp(int(ctime), tz=BEIJING_TZ)
-                else:
-                    ctime_dt = datetime.datetime.strptime(ctime, "%Y-%m-%d").replace(tzinfo=BEIJING_TZ)
-                # 超过72小时丢弃
-                if (get_bj_time() - ctime_dt).days > 3:
-                    continue
-                tag = _get_stock_news_time_tag(ctime_dt)
-                if tag is None:
-                    continue
-            except Exception:
-                tag = "[📑前日]"
-            media = str(item.get('media_name', '新浪财经'))
-            is_relevant = bool(title) and (code in title or ticker_name[:2] in title)
-            is_junk = any(kw in title for kw in _JUNK_KEYWORDS)
-            if is_relevant and not is_junk:
-                news_entries.append((ctime_dt, f"{tag}[新浪/{media}][{ctime}] {title}"))
-    except Exception:
-        pass
+# Yahoo Finance 新闻
+try:
+    if ticker_code.upper().endswith('.SH'):
+        yahoo_ticker = code + '.SS'
+    else:
+        yahoo_ticker = code + '.SZ'
+    cutoff_ts = time.time() - 3 * 86400  # 72小时
+    raw = yf.Ticker(yahoo_ticker).news or []
+    for item in raw:
+        pub_ts = item.get('providerPublishTime', 0)
+        if pub_ts < cutoff_ts:
+            continue
+        title     = str(item.get('title', '')).strip()
+        publisher = str(item.get('publisher', 'Yahoo'))
+        pub_dt    = datetime.datetime.fromtimestamp(pub_ts, tz=BEIJING_TZ)
+        tag       = _get_stock_news_time_tag(pub_dt)
+        if tag is None:
+            continue
+        date_str  = pub_dt.strftime('%m-%d %H:%M')
+        if title:
+            news_entries.append((pub_dt, f"{tag}[Yahoo/{publisher}][{date_str}] {title}"))
+except Exception:
+    pass
 
-    # 按时间倒序排列，取前 max_items 条
-    news_entries.sort(key=lambda x: x[0], reverse=True)
-    return [entry[1] for entry in news_entries[:max_items]]
+# 新浪财经新闻
+try:
+    sina_url = (f"https://feed.mix.sina.com.cn/api/roll/get"
+                f"?pageid=153&lid=2512&k={code}&num={max_items}&page=1")
+    req = urllib.request.Request(sina_url, headers=_HEADERS)
+    with urllib.request.urlopen(req, timeout=6) as resp:
+        sina_content = resp.read().decode('utf-8')
+    sina_data = json.loads(sina_content)
+    _JUNK_KEYWORDS = ('盘口', '亚盘', '竞彩', '让球', '胜负彩', '比分',
+                      '欧冠', '英超', '西甲', '中超', 'NBA', 'CBA', '足彩', '首发阵容', '让分')
+    for item in sina_data.get('result', {}).get('data', []):
+        title = str(item.get('title', '')).strip()
+        ctime = str(item.get('ctime', ''))[:10]
+        try:
+            if ctime.isdigit() and len(ctime) == 10:
+                ctime_dt = datetime.datetime.fromtimestamp(int(ctime), tz=BEIJING_TZ)
+            else:
+                ctime_dt = datetime.datetime.strptime(ctime, "%Y-%m-%d").replace(tzinfo=BEIJING_TZ)
+            # 超过72小时丢弃
+            if (get_bj_time() - ctime_dt).days > 3:
+                continue
+            tag = _get_stock_news_time_tag(ctime_dt)
+            if tag is None:
+                continue
+        except Exception:
+            tag = "[📑前日]"
+        media = str(item.get('media_name', '新浪财经'))
+        is_relevant = bool(title) and (code in title or ticker_name[:2] in title)
+        is_junk = any(kw in title for kw in _JUNK_KEYWORDS)
+        if is_relevant and not is_junk:
+            news_entries.append((ctime_dt, f"{tag}[新浪/{media}][{ctime}] {title}"))
+except Exception:
+    pass
+
+# 按时间倒序排列，取前 max_items 条
+news_entries.sort(key=lambda x: x[0], reverse=True)
+return [entry[1] for entry in news_entries[:max_items]]
 
 
 def enrich_pool_with_news(pool_data: list) -> list:
-    print("📰 [阶段4] 正在逐只抓取个股新闻...")
-    enriched = 0
-    for idx, item in enumerate(pool_data[:100]):
-        ticker_code = item.get('Ticker', '')
-        ticker_name = item.get('Name', '')
+print("📰 [阶段4] 正在逐只抓取个股新闻...")
+enriched = 0
+for idx, item in enumerate(pool_data[:100]):
+    ticker_code = item.get('Ticker', '')
+    ticker_name = item.get('Name', '')
 
-        if idx < 30:
-            news = get_stock_news(ticker_code, ticker_name, max_items=5)
-            time.sleep(random.uniform(0.25, 0.55))
-        else:
-            code = ticker_code.split('.')[0]
-            news = []
-            try:
-                url = (f"https://np-anotice-stock.eastmoney.com/api/security/ann"
-                       f"?sr=-1&page=1&size=3&s=&c={code}&t=1,2,9,22,40")
-                req = urllib.request.Request(
-                    url,
-                    headers={'User-Agent': 'Mozilla/5.0', 'Referer': 'https://www.eastmoney.com/'})
-                with urllib.request.urlopen(req, timeout=5) as resp:
-                    data = json.loads(resp.read().decode('utf-8'))
-                for ann in data.get('data', {}).get('list', [])[:3]:
-                    title = str(ann.get('title', '')).strip()
-                    date  = str(ann.get('notice_date', ''))[:10]
-                    if title:
-                        news.append(f"[东财公告][{date}] {title}")
-            except Exception:
-                pass
-            time.sleep(random.uniform(0.08, 0.18))
+    if idx < 30:
+        news = get_stock_news(ticker_code, ticker_name, max_items=5)
+        time.sleep(random.uniform(0.25, 0.55))
+    else:
+        code = ticker_code.split('.')[0]
+        news = []
+        try:
+            url = (f"https://np-anotice-stock.eastmoney.com/api/security/ann"
+                   f"?sr=-1&page=1&size=3&s=&c={code}&t=1,2,9,22,40")
+            req = urllib.request.Request(
+                url,
+                headers={'User-Agent': 'Mozilla/5.0', 'Referer': 'https://www.eastmoney.com/'})
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                data = json.loads(resp.read().decode('utf-8'))
+            for ann in data.get('data', {}).get('list', [])[:3]:
+                title = str(ann.get('title', '')).strip()
+                date  = str(ann.get('notice_date', ''))[:10]
+                if title:
+                    news.append(f"[东财公告][{date}] {title}")
+        except Exception:
+            pass
+        time.sleep(random.uniform(0.08, 0.18))
 
-        item['个股新闻'] = news
-        if news:
-            enriched += 1
+    item['个股新闻'] = news
+    if news:
+        enriched += 1
 
-    print(f"✅ 个股新闻抓取完毕：{enriched}/100 只标的有新闻")
-    return pool_data
+print(f"✅ 个股新闻抓取完毕：{enriched}/100 只标的有新闻")
+return pool_data
 
 
 # ==========================================
 # 4. 定向计算技术指标
 # ==========================================
 def calc_tech_indicators(full_pool, codes, trade_date):
-    print("⚙️ [阶段3] 正在拉取日线+周线K线，分批计算技术指标...")
-    start_hist   = (get_bj_time() - datetime.timedelta(days=120)).strftime('%Y%m%d')
-    start_weekly = (get_bj_time() - datetime.timedelta(days=400)).strftime('%Y%m%d')
-    batch_size   = 40
+print("⚙️ [阶段3] 正在拉取日线+周线K线，分批计算技术指标...")
+start_hist   = (get_bj_time() - datetime.timedelta(days=120)).strftime('%Y%m%d')
+start_weekly = (get_bj_time() - datetime.timedelta(days=400)).strftime('%Y%m%d')
+batch_size   = 40
 
-    all_hist = []
-    for i in range(0, len(codes), batch_size):
-        try:
-            df_b = pro.daily(ts_code=",".join(codes[i:i+batch_size]),
-                             start_date=start_hist, end_date=trade_date)
-            if df_b is not None and not df_b.empty:
-                all_hist.append(df_b)
-            time.sleep(0.12)
-        except Exception as e:
-            pass
-    df_hist = pd.concat(all_hist, ignore_index=True) if all_hist else pd.DataFrame()
+all_hist = []
+for i in range(0, len(codes), batch_size):
+    try:
+        df_b = pro.daily(ts_code=",".join(codes[i:i+batch_size]),
+                         start_date=start_hist, end_date=trade_date)
+        if df_b is not None and not df_b.empty:
+            all_hist.append(df_b)
+        time.sleep(0.12)
+    except Exception as e:
+        pass
+df_hist = pd.concat(all_hist, ignore_index=True) if all_hist else pd.DataFrame()
 
-    all_weekly = []
-    for i in range(0, len(codes), batch_size):
-        try:
-            df_w = pro.weekly(ts_code=",".join(codes[i:i+batch_size]),
-                              start_date=start_weekly, end_date=trade_date)
-            if df_w is not None and not df_w.empty:
-                all_weekly.append(df_w)
-            time.sleep(0.15)
-        except Exception as e:
-            pass
-    df_weekly = pd.concat(all_weekly, ignore_index=True) if all_weekly else pd.DataFrame()
+all_weekly = []
+for i in range(0, len(codes), batch_size):
+    try:
+        df_w = pro.weekly(ts_code=",".join(codes[i:i+batch_size]),
+                          start_date=start_weekly, end_date=trade_date)
+        if df_w is not None and not df_w.empty:
+            all_weekly.append(df_w)
+        time.sleep(0.15)
+    except Exception as e:
+        pass
+df_weekly = pd.concat(all_weekly, ignore_index=True) if all_weekly else pd.DataFrame()
 
-    FALLBACK = [
-        ("乖离率(%)", 0.0), ("RSI", 50.0), ("MACD趋势", "N/A"),
-        ("MACD_HIST_LAST", 0.0), ("MACD_HIST_PREV", 0.0),
-        ("MACD金叉", False), ("MACD绿柱缩短", False),
-        ("周线共振", False),
-        ("KDJ_J", 50.0), ("KDJ_J回升", False), ("KDJ_J超卖", False),
-        ("量能放大", False), ("量比", 1.0), ("看涨形态", []),
-        ("ATR", 0.0), ("ATR_Pct", 5.0),
-    ]
+FALLBACK = [
+    ("乖离率(%)", 0.0), ("RSI", 50.0), ("MACD趋势", "N/A"),
+    ("MACD_HIST_LAST", 0.0), ("MACD_HIST_PREV", 0.0),
+    ("MACD金叉", False), ("MACD绿柱缩短", False),
+    ("周线共振", False),
+    ("KDJ_J", 50.0), ("KDJ_J回升", False), ("KDJ_J超卖", False),
+    ("量能放大", False), ("量比", 1.0), ("看涨形态", []),
+    ("ATR", 0.0), ("ATR_Pct", 5.0),
+]
 
-    for code in list(full_pool.keys()):
-        weekly_bullish = False
-        weekly_macd_rising = False  # 【新增】初始化，防止 len(wk)<12 时 NameError
-        if not df_weekly.empty and code in df_weekly['ts_code'].values:
-            wk = df_weekly[df_weekly['ts_code'] == code].sort_values('trade_date')
-            if len(wk) >= 12:
-                wc     = wk['close'].values.astype(float)
-                wma5   = float(pd.Series(wc).rolling(5).mean().iloc[-1])
-                wma10  = float(pd.Series(wc).rolling(10).mean().iloc[-1])
-                w_exp1 = pd.Series(wc).ewm(span=12, adjust=False).mean()
-                w_exp2 = pd.Series(wc).ewm(span=26, adjust=False).mean()
-                w_hist = (w_exp1 - w_exp2 - (w_exp1 - w_exp2).ewm(span=9, adjust=False).mean()) * 2
-                weekly_macd_rising = float(w_hist.iloc[-1]) > float(w_hist.iloc[-2])  # 【新增】回测核心因子
-                weekly_bullish = bool(wma5 > wma10 and weekly_macd_rising)
-        full_pool[code]["周线共振"] = weekly_bullish
-        full_pool[code]["周线MACD上升"] = weekly_macd_rising  # 【新增】存储周线上升状态
-        if df_hist.empty or code not in df_hist['ts_code'].values:
-            for fld, dflt in FALLBACK:
-                full_pool[code].setdefault(fld, dflt)
-            continue
+for code in list(full_pool.keys()):
+    weekly_bullish = False
+    weekly_macd_rising = False  # 【新增】初始化，防止 len(wk)<12 时 NameError
+    if not df_weekly.empty and code in df_weekly['ts_code'].values:
+        wk = df_weekly[df_weekly['ts_code'] == code].sort_values('trade_date')
+        if len(wk) >= 12:
+            wc     = wk['close'].values.astype(float)
+            wma5   = float(pd.Series(wc).rolling(5).mean().iloc[-1])
+            wma10  = float(pd.Series(wc).rolling(10).mean().iloc[-1])
+            w_exp1 = pd.Series(wc).ewm(span=12, adjust=False).mean()
+            w_exp2 = pd.Series(wc).ewm(span=26, adjust=False).mean()
+            w_hist = (w_exp1 - w_exp2 - (w_exp1 - w_exp2).ewm(span=9, adjust=False).mean()) * 2
+            weekly_macd_rising = float(w_hist.iloc[-1]) > float(w_hist.iloc[-2])  # 【新增】回测核心因子
+            weekly_bullish = bool(wma5 > wma10 and weekly_macd_rising)
+    full_pool[code]["周线共振"] = weekly_bullish
+    full_pool[code]["周线MACD上升"] = weekly_macd_rising  # 【新增】存储周线上升状态
+    if df_hist.empty or code not in df_hist['ts_code'].values:
+        for fld, dflt in FALLBACK:
+            full_pool[code].setdefault(fld, dflt)
+        continue
 
-        sd = df_hist[df_hist['ts_code'] == code].sort_values('trade_date')
-        if len(sd) < 30:
-            for fld, dflt in FALLBACK:
-                full_pool[code].setdefault(fld, dflt)
-            continue
+    sd = df_hist[df_hist['ts_code'] == code].sort_values('trade_date')
+    if len(sd) < 30:
+        for fld, dflt in FALLBACK:
+            full_pool[code].setdefault(fld, dflt)
+        continue
 
-        cp  = sd['close'].values.astype(float)
-        hp  = sd['high'].values.astype(float)
-        lp  = sd['low'].values.astype(float)
-        op  = sd['open'].values.astype(float)
-        vol = sd['vol'].values.astype(float)
-        sc  = pd.Series(cp)
+    cp  = sd['close'].values.astype(float)
+    hp  = sd['high'].values.astype(float)
+    lp  = sd['low'].values.astype(float)
+    op  = sd['open'].values.astype(float)
+    vol = sd['vol'].values.astype(float)
+    sc  = pd.Series(cp)
 
-        ma20 = float(sc.rolling(20).mean().iloc[-1])
-        full_pool[code]["乖离率(%)"] = round(((full_pool[code]["Close"] - ma20) / ma20) * 100, 2)
+    ma20 = float(sc.rolling(20).mean().iloc[-1])
+    full_pool[code]["乖离率(%)"] = round(((full_pool[code]["Close"] - ma20) / ma20) * 100, 2)
 
-        exp1   = sc.ewm(span=12, adjust=False).mean()
-        exp2   = sc.ewm(span=26, adjust=False).mean()
-        ml     = exp1 - exp2
-        sl     = ml.ewm(span=9, adjust=False).mean()
-        hist   = (ml - sl) * 2
-        h_last, h_prev, h_prev2 = float(hist.iloc[-1]), float(hist.iloc[-2]), float(hist.iloc[-3])
-        ml_last, ml_prev = float(ml.iloc[-1]), float(ml.iloc[-2])
-        sl_last, sl_prev = float(sl.iloc[-1]), float(sl.iloc[-2])
+    exp1   = sc.ewm(span=12, adjust=False).mean()
+    exp2   = sc.ewm(span=26, adjust=False).mean()
+    ml     = exp1 - exp2
+    sl     = ml.ewm(span=9, adjust=False).mean()
+    hist   = (ml - sl) * 2
+    h_last, h_prev, h_prev2 = float(hist.iloc[-1]), float(hist.iloc[-2]), float(hist.iloc[-3])
+    ml_last, ml_prev = float(ml.iloc[-1]), float(ml.iloc[-2])
+    sl_last, sl_prev = float(sl.iloc[-1]), float(sl.iloc[-2])
 
-        full_pool[code]["MACD趋势"]      = "走强" if h_last > h_prev else "走弱"
-        full_pool[code]["MACD_HIST_LAST"] = round(h_last, 4)
-        full_pool[code]["MACD_HIST_PREV"] = round(h_prev, 4)
-        full_pool[code]["MACD金叉"]       = bool(ml_last > sl_last and ml_prev <= sl_prev)
-        full_pool[code]["MACD绿柱缩短"]   = bool(h_last < 0 and h_last > h_prev and h_prev < h_prev2)
+    full_pool[code]["MACD趋势"]      = "走强" if h_last > h_prev else "走弱"
+    full_pool[code]["MACD_HIST_LAST"] = round(h_last, 4)
+    full_pool[code]["MACD_HIST_PREV"] = round(h_prev, 4)
+    full_pool[code]["MACD金叉"]       = bool(ml_last > sl_last and ml_prev <= sl_prev)
+    full_pool[code]["MACD绿柱缩短"]   = bool(h_last < 0 and h_last > h_prev and h_prev < h_prev2)
 
-        full_pool[code]["日线MACD上升"]   = h_last > h_prev  # 【新增】回测核心因子
-        delta = sc.diff()
-        gain  = delta.clip(lower=0).ewm(com=13, adjust=False).mean()
-        loss  = (-1 * delta.clip(upper=0)).ewm(com=13, adjust=False).mean()
-        full_pool[code]["RSI"] = round(float((100 - 100 / (1 + gain / (loss + 1e-9))).iloc[-1]), 2)
+    full_pool[code]["日线MACD上升"]   = h_last > h_prev  # 【新增】回测核心因子
+    delta = sc.diff()
+    gain  = delta.clip(lower=0).ewm(com=13, adjust=False).mean()
+    loss  = (-1 * delta.clip(upper=0)).ewm(com=13, adjust=False).mean()
+    full_pool[code]["RSI"] = round(float((100 - 100 / (1 + gain / (loss + 1e-9))).iloc[-1]), 2)
 
-        K, D = 50.0, 50.0
-        j_lst = []
-        for i_k in range(len(cp)):
-            if i_k < 8:
-                j_lst.append(3*K - 2*D)
-                continue
-            h9  = max(hp[i_k-8: i_k+1])
-            l9  = min(lp[i_k-8: i_k+1])
-            rsv = (cp[i_k] - l9) / (h9 - l9 + 1e-9) * 100
-            K   = 2/3*K + 1/3*rsv
-            D   = 2/3*D + 1/3*K
+    K, D = 50.0, 50.0
+    j_lst = []
+    for i_k in range(len(cp)):
+        if i_k < 8:
             j_lst.append(3*K - 2*D)
-        j_last, j_prev, j_prev2 = j_lst[-1], j_lst[-2], j_lst[-3]
-        full_pool[code]["KDJ_J"]    = round(float(j_last), 2)
-        full_pool[code]["KDJ_J回升"] = bool(j_last < 80 and j_last > j_prev and j_prev <= j_prev2)
-        full_pool[code]["KDJ_J超卖"] = bool(j_prev2 < 20)
+            continue
+        h9  = max(hp[i_k-8: i_k+1])
+        l9  = min(lp[i_k-8: i_k+1])
+        rsv = (cp[i_k] - l9) / (h9 - l9 + 1e-9) * 100
+        K   = 2/3*K + 1/3*rsv
+        D   = 2/3*D + 1/3*K
+        j_lst.append(3*K - 2*D)
+    j_last, j_prev, j_prev2 = j_lst[-1], j_lst[-2], j_lst[-3]
+    full_pool[code]["KDJ_J"]    = round(float(j_last), 2)
+    full_pool[code]["KDJ_J回升"] = bool(j_last < 80 and j_last > j_prev and j_prev <= j_prev2)
+    full_pool[code]["KDJ_J超卖"] = bool(j_prev2 < 20)
 
-        prev_close_arr = np.roll(cp, 1)
-        prev_close_arr[0] = cp[0]
-        tr_arr = np.maximum(hp - lp, np.maximum(np.abs(hp - prev_close_arr), np.abs(lp - prev_close_arr)))
-        atr_last = float(pd.Series(tr_arr).ewm(com=13, adjust=False).mean().iloc[-1])
-        full_pool[code]["ATR"] = round(atr_last, 4)
-        full_pool[code]["ATR_Pct"] = round((atr_last / full_pool[code]["Close"]) * 100, 2) if full_pool[code].get("Close") else 5.0
+    prev_close_arr = np.roll(cp, 1)
+    prev_close_arr[0] = cp[0]
+    tr_arr = np.maximum(hp - lp, np.maximum(np.abs(hp - prev_close_arr), np.abs(lp - prev_close_arr)))
+    atr_last = float(pd.Series(tr_arr).ewm(com=13, adjust=False).mean().iloc[-1])
+    full_pool[code]["ATR"] = round(atr_last, 4)
+    full_pool[code]["ATR_Pct"] = round((atr_last / full_pool[code]["Close"]) * 100, 2) if full_pool[code].get("Close") else 5.0
 
-        avg5  = float(pd.Series(vol[:-1]).tail(5).mean()) if len(vol) >= 6 else 0
-        vtdy  = float(vol[-1])
-        full_pool[code]["量能放大"] = bool(avg5 > 0 and vtdy >= avg5 * 1.3)
-        full_pool[code]["量比"]     = round(vtdy / (avg5 + 1e-9), 2)
+    avg5  = float(pd.Series(vol[:-1]).tail(5).mean()) if len(vol) >= 6 else 0
+    vtdy  = float(vol[-1])
+    full_pool[code]["量能放大"] = bool(avg5 > 0 and vtdy >= avg5 * 1.3)
+    full_pool[code]["量比"]     = round(vtdy / (avg5 + 1e-9), 2)
 
-        patterns = []
-        if len(op) >= 3:
-            o, c   = op[-1], cp[-1]
-            o1, c1 = op[-2], cp[-2]
-            rng    = hp[-1] - lp[-1] + 1e-9
-            body   = abs(c - o)
-            l_shd  = min(o, c) - lp[-1]
-            u_shd  = hp[-1] - max(o, c)
-            if c1 < o1 and c > o and o <= c1 and c >= o1:
-                patterns.append("看涨吞没")
-            if body/rng < 0.35 and l_shd >= 2*body and u_shd <= body*0.5:
-                patterns.append("锤子线")
-            if c1 < o1 and c > o and o < c1 and c > (o1+c1)/2 and c < o1:
-                patterns.append("刺穿线")
-            o2, c2 = op[-3], cp[-3]
-            if c2 < o2 and abs(c2-o2) > rng*0.3 and abs(c1-o1) < abs(c2-o2)*0.4 and c > o and c > (o2+c2)/2:
-                patterns.append("启明星")
-        full_pool[code]["看涨形态"] = patterns
+    patterns = []
+    if len(op) >= 3:
+        o, c   = op[-1], cp[-1]
+        o1, c1 = op[-2], cp[-2]
+        rng    = hp[-1] - lp[-1] + 1e-9
+        body   = abs(c - o)
+        l_shd  = min(o, c) - lp[-1]
+        u_shd  = hp[-1] - max(o, c)
+        if c1 < o1 and c > o and o <= c1 and c >= o1:
+            patterns.append("看涨吞没")
+        if body/rng < 0.35 and l_shd >= 2*body and u_shd <= body*0.5:
+            patterns.append("锤子线")
+        if c1 < o1 and c > o and o < c1 and c > (o1+c1)/2 and c < o1:
+            patterns.append("刺穿线")
+        o2, c2 = op[-3], cp[-3]
+        if c2 < o2 and abs(c2-o2) > rng*0.3 and abs(c1-o1) < abs(c2-o2)*0.4 and c > o and c > (o2+c2)/2:
+            patterns.append("启明星")
+    full_pool[code]["看涨形态"] = patterns
 
-    final_pool = sorted(list(full_pool.values()), key=lambda x: x.get("Amount", 0), reverse=True)
-    return final_pool
+final_pool = sorted(list(full_pool.values()), key=lambda x: x.get("Amount", 0), reverse=True)
+return final_pool
 
 
 # ==========================================
@@ -1378,200 +1379,200 @@ def calc_tech_indicators(full_pool, codes, trade_date):
 # 条件：日线MACD↑ + 周线MACD↑ + 看涨形态（吞没/启明星/锤子/刺穿）
 # ==========================================
 def check_period_resonance(stock):
-    """
-    检测单只股票是否满足周期共振
-    返回: (是否共振, 形态列表)
-    """
-    # 1. 检查MACD状态
-    daily_rising = stock.get("日线MACD上升", False)
-    weekly_rising = stock.get("周线MACD上升", False)
-    if not daily_rising or not weekly_rising:
-        return False, []
-    
-    # 2. 检查看涨形态
-    patterns = stock.get("看涨形态", [])
-    valid_patterns = ["看涨吞没", "启明星", "刺穿线", "锤子线"]
-    matched = [p for p in patterns if p in valid_patterns]
-    
-    if not matched:
-        return False, []
-    
-    return True, matched
+"""
+检测单只股票是否满足周期共振
+返回: (是否共振, 形态列表)
+"""
+# 1. 检查MACD状态
+daily_rising = stock.get("日线MACD上升", False)
+weekly_rising = stock.get("周线MACD上升", False)
+if not daily_rising or not weekly_rising:
+    return False, []
+
+# 2. 检查看涨形态
+patterns = stock.get("看涨形态", [])
+valid_patterns = ["看涨吞没", "启明星", "刺穿线", "锤子线"]
+matched = [p for p in patterns if p in valid_patterns]
+
+if not matched:
+    return False, []
+
+return True, matched
 
 def screen_technical_setups(final_pool):
-    sector_groups = {}
-    for stock in final_pool[:100]:
-        tech_score   = 0
-        tech_reasons = []
+sector_groups = {}
+for stock in final_pool[:100]:
+    tech_score   = 0
+    tech_reasons = []
 
-        # 【新增】周期共振检测（最高优先级）
-        is_resonance, resonance_patterns = check_period_resonance(stock)
-        stock["周期共振"] = is_resonance
-        stock["共振形态"] = resonance_patterns
+    # 【新增】周期共振检测（最高优先级）
+    is_resonance, resonance_patterns = check_period_resonance(stock)
+    stock["周期共振"] = is_resonance
+    stock["共振形态"] = resonance_patterns
 
-        # 【修改】MACD 评分：优先低位回升，抑制追高
-        h_last = stock.get("MACD_HIST_LAST", 0)
-        if stock.get("MACD金叉"):
-            # 零轴下方金叉 = 底背离，最高优先级
-            if h_last < -0.5:
-                tech_score += 20
-                tech_reasons.append(f"MACD零轴下金叉底背离({h_last:.2f})(+20)")
-            elif abs(h_last) <= 0.5:
-                tech_score += 15
-                tech_reasons.append(f"MACD零轴附近金叉({h_last:.2f})(+15)")
-            else:
-                # 零轴上方高位金叉 = 追高风险，降低分数
-                tech_score += 5
-                tech_reasons.append(f"⚠️MACD高位金叉({h_last:.2f})(+5)")
-        elif stock.get("MACD绿柱缩短"):
-            h_prev = stock.get("MACD_HIST_PREV", 0)
-            pts = 12 if (h_last < 0 and abs(h_last) < abs(h_prev) * 0.85) else 8
-            tech_score += pts
-            tech_reasons.append(f"MACD绿柱收敛({h_last:.2f})(+{pts})")
-        elif stock.get("MACD趋势") == "走强" and h_last > 0:
-            # 红柱已很高 = 追高风险
-            if h_last > 3:
-                tech_score += 2
-                tech_reasons.append(f"⚠️MACD红柱高位({h_last:.2f})(+2)")
-            else:
-                tech_score += 4
-                tech_reasons.append(f"MACD红柱走强({h_last:.2f})(+4)")
+    # 【修改】MACD 评分：优先低位回升，抑制追高
+    h_last = stock.get("MACD_HIST_LAST", 0)
+    if stock.get("MACD金叉"):
+        # 零轴下方金叉 = 底背离，最高优先级
+        if h_last < -0.5:
+            tech_score += 20
+            tech_reasons.append(f"MACD零轴下金叉底背离({h_last:.2f})(+20)")
+        elif abs(h_last) <= 0.5:
+            tech_score += 15
+            tech_reasons.append(f"MACD零轴附近金叉({h_last:.2f})(+15)")
+        else:
+            # 零轴上方高位金叉 = 追高风险，降低分数
+            tech_score += 5
+            tech_reasons.append(f"⚠️MACD高位金叉({h_last:.2f})(+5)")
+    elif stock.get("MACD绿柱缩短"):
+        h_prev = stock.get("MACD_HIST_PREV", 0)
+        pts = 12 if (h_last < 0 and abs(h_last) < abs(h_prev) * 0.85) else 8
+        tech_score += pts
+        tech_reasons.append(f"MACD绿柱收敛({h_last:.2f})(+{pts})")
+    elif stock.get("MACD趋势") == "走强" and h_last > 0:
+        # 红柱已很高 = 追高风险
+        if h_last > 3:
+            tech_score += 2
+            tech_reasons.append(f"⚠️MACD红柱高位({h_last:.2f})(+2)")
+        else:
             tech_score += 4
-            tech_reasons.append("MACD红柱走强(+4)")
+            tech_reasons.append(f"MACD红柱走强({h_last:.2f})(+4)")
+        tech_score += 4
+        tech_reasons.append("MACD红柱走强(+4)")
 
-        j_val = stock.get("KDJ_J", 50)
-        if stock.get("KDJ_J回升"):
-            if stock.get("KDJ_J超卖") or j_val < 20:
-                tech_score += 10; tech_reasons.append(f"KDJ超卖回头J={j_val:.0f}(+10)")
-            elif j_val < 50:
-                tech_score += 7;  tech_reasons.append(f"KDJ低位回升J={j_val:.0f}(+7)")
-            else:
-                tech_score += 3;  tech_reasons.append(f"KDJ中位回升J={j_val:.0f}(+3)")
+    j_val = stock.get("KDJ_J", 50)
+    if stock.get("KDJ_J回升"):
+        if stock.get("KDJ_J超卖") or j_val < 20:
+            tech_score += 10; tech_reasons.append(f"KDJ超卖回头J={j_val:.0f}(+10)")
+        elif j_val < 50:
+            tech_score += 7;  tech_reasons.append(f"KDJ低位回升J={j_val:.0f}(+7)")
+        else:
+            tech_score += 3;  tech_reasons.append(f"KDJ中位回升J={j_val:.0f}(+3)")
 
-        vr = stock.get("量比", 1.0)
-        if stock.get("量能放大"):
-            pts = 10 if vr >= 2.0 else 7
-            tech_score += pts; tech_reasons.append(f"量比{vr:.1f}倍(+{pts})")
+    vr = stock.get("量比", 1.0)
+    if stock.get("量能放大"):
+        pts = 10 if vr >= 2.0 else 7
+        tech_score += pts; tech_reasons.append(f"量比{vr:.1f}倍(+{pts})")
 
-        patterns = stock.get("看涨形态", [])
-        if patterns:
-            pm = {"看涨吞没": 5, "启明星": 5, "刺穿线": 4, "锤子线": 3}
-            base = min(max(pm.get(p, 2) for p in patterns) + (2 if len(patterns) > 1 else 0), 5)
-            tech_score += base; tech_reasons.append(f"{'&'.join(patterns)}(+{base})")
+    patterns = stock.get("看涨形态", [])
+    if patterns:
+        pm = {"看涨吞没": 5, "启明星": 5, "刺穿线": 4, "锤子线": 3}
+        base = min(max(pm.get(p, 2) for p in patterns) + (2 if len(patterns) > 1 else 0), 5)
+        tech_score += base; tech_reasons.append(f"{'&'.join(patterns)}(+{base})")
 
-        weekly = stock.get("周线共振", False)
-        if weekly:
-            tech_score = min(int(tech_score * 1.25), 40)
-            tech_reasons.append("✅周日共振×1.25")
-        elif tech_score > 0:
-            tech_score = int(tech_score * 0.6)
-            tech_reasons.append("⚠️仅日线×0.6")
+    weekly = stock.get("周线共振", False)
+    if weekly:
+        tech_score = min(int(tech_score * 1.25), 40)
+        tech_reasons.append("✅周日共振×1.25")
+    elif tech_score > 0:
+        tech_score = int(tech_score * 0.6)
+        tech_reasons.append("⚠️仅日线×0.6")
 
-        stock["技术评分"] = min(tech_score, 40)
+    stock["技术评分"] = min(tech_score, 40)
 
-        # 【新增】如果满足周期共振，直接加15分（不破坏40分上限）
-        if is_resonance:
-            tech_score = min(tech_score + 15, 40)
-            tech_reasons.append("🔥周期共振(+15)")
-        stock["技术信号"] = tech_reasons
+    # 【新增】如果满足周期共振，直接加15分（不破坏40分上限）
+    if is_resonance:
+        tech_score = min(tech_score + 15, 40)
+        tech_reasons.append("🔥周期共振(+15)")
+    stock["技术信号"] = tech_reasons
 
-        industry = stock.get("Industry", "其他")
-        sector_groups.setdefault(industry, []).append({
-            "名称": stock["Name"], "代码": stock["Ticker"],
-            "技术评分": tech_score, "技术信号": tech_reasons,
-        })
+    industry = stock.get("Industry", "其他")
+    sector_groups.setdefault(industry, []).append({
+        "名称": stock["Name"], "代码": stock["Ticker"],
+        "技术评分": tech_score, "技术信号": tech_reasons,
+    })
 
-    summary = {
-        sec: sorted(stks, key=lambda x: x["技术评分"], reverse=True)
-        for sec, stks in sector_groups.items()
-        if any(s["技术评分"] > 0 for s in stks)
-    }
-    return summary
+summary = {
+    sec: sorted(stks, key=lambda x: x["技术评分"], reverse=True)
+    for sec, stks in sector_groups.items()
+    if any(s["技术评分"] > 0 for s in stks)
+}
+return summary
 
 
 def load_evolved_rules() -> str:
-    rules_file = "evolved_rules.json"
-    if not os.path.exists(rules_file):
+rules_file = "evolved_rules.json"
+if not os.path.exists(rules_file):
+    return ""
+try:
+    with open(rules_file, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    patches      = data.get("prompt_patches", [])
+    active_rules = data.get("active_rules", [])
+    if not patches:
         return ""
-    try:
-        with open(rules_file, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        patches      = data.get("prompt_patches", [])
-        active_rules = data.get("active_rules", [])
-        if not patches:
-            return ""
-        last_updated = data.get("last_updated", "未知")
-        recent = data.get("recent_win_rate")
-        if recent and recent.get("胜率") is not None:
-            win_rate_display = f"{recent['胜率']}%（最近{recent.get('样本数','?')}笔，当前规则的真实表现）"
-        else:
-            win_rate_display = f"{data.get('overall_win_rate', '未知')}%（全部历史混合，仅供参考）"
-        lines = [
-            f"【📈 历史绩效驱动进化规则（上次更新: {last_updated} | 胜率: {win_rate_display}）】",
-            "以下规则由策略进化引擎基于真实交易数据自动生成，必须严格遵守：",
-            ""
-        ]
-        for i, (rule, patch) in enumerate(zip(active_rules, patches), 1):
-            lines.append(f"规则{i}【{rule.get('type','')}】{rule.get('description','')}")
-            if rule.get("evidence"):
-                lines.append(f"  数据依据: {rule['evidence']}")
-            lines.append(f"  执行要求: {patch}")
-            lines.append("")
-        lines.append("（以上规则优先级高于一般选股偏好，但低于今日突发事件强制封禁）")
-        return "\n".join(lines)
-    except Exception as e:
-        return ""
+    last_updated = data.get("last_updated", "未知")
+    recent = data.get("recent_win_rate")
+    if recent and recent.get("胜率") is not None:
+        win_rate_display = f"{recent['胜率']}%（最近{recent.get('样本数','?')}笔，当前规则的真实表现）"
+    else:
+        win_rate_display = f"{data.get('overall_win_rate', '未知')}%（全部历史混合，仅供参考）"
+    lines = [
+        f"【📈 历史绩效驱动进化规则（上次更新: {last_updated} | 胜率: {win_rate_display}）】",
+        "以下规则由策略进化引擎基于真实交易数据自动生成，必须严格遵守：",
+        ""
+    ]
+    for i, (rule, patch) in enumerate(zip(active_rules, patches), 1):
+        lines.append(f"规则{i}【{rule.get('type','')}】{rule.get('description','')}")
+        if rule.get("evidence"):
+            lines.append(f"  数据依据: {rule['evidence']}")
+        lines.append(f"  执行要求: {patch}")
+        lines.append("")
+    lines.append("（以上规则优先级高于一般选股偏好，但低于今日突发事件强制封禁）")
+    return "\n".join(lines)
+except Exception as e:
+    return ""
 
 
 def generate_ai_report(pool_data, macro_news_text, macro_data_text, us_sector_text, removed_tickers, embargo_text="", sector_tech_data=None):
-    print("🧠 [阶段4] 召唤 AI 大脑...")
-    client = anthropic.Anthropic(
-        api_key=os.environ.get("CLAWSOCKET_API_KEY"),
-        base_url=os.environ.get("CLAWSOCKET_BASE_URL")
-    )
-    today_str = get_bj_time().strftime('%Y年%m月%d日')
+print("🧠 [阶段4] 召唤 AI 大脑...")
+client = anthropic.Anthropic(
+    api_key=os.environ.get("CLAWSOCKET_API_KEY"),
+    base_url=os.environ.get("CLAWSOCKET_BASE_URL")
+)
+today_str = get_bj_time().strftime('%Y年%m月%d日')
 
-    compact_pool = []
-    for d in pool_data[:100]:
-        item = {
-            "名称": d["Name"], "代码": d["Ticker"], "行业": d["Industry"],
-            "收盘价": d["Close"], "今日涨跌(%)": d.get("pct_chg", 0),
-            "乖离率(%)": d.get("乖离率(%)", "N/A"), "RSI": d.get("RSI", "N/A"),
-            "MACD": d.get("MACD趋势", "N/A"),
-            "技术评分(满分40)": d.get("技术评分", 0),
-            "技术信号": d.get("技术信号", []),
-            "周线共振": "🟢是" if d.get("周线共振") else "🔴否",
-            "MACD金叉": "✅是" if d.get("MACD金叉") else "否",
-            "KDJ_J": d.get("KDJ_J", "N/A"), "量比": d.get("量比", "N/A"),
-            "看涨形态": d.get("看涨形态", []),
-        }
-        if d.get('个股新闻'):
-            item["个股新闻"] = d['个股新闻']
-        compact_pool.append(item)
+compact_pool = []
+for d in pool_data[:100]:
+    item = {
+        "名称": d["Name"], "代码": d["Ticker"], "行业": d["Industry"],
+        "收盘价": d["Close"], "今日涨跌(%)": d.get("pct_chg", 0),
+        "乖离率(%)": d.get("乖离率(%)", "N/A"), "RSI": d.get("RSI", "N/A"),
+        "MACD": d.get("MACD趋势", "N/A"),
+        "技术评分(满分40)": d.get("技术评分", 0),
+        "技术信号": d.get("技术信号", []),
+        "周线共振": "🟢是" if d.get("周线共振") else "🔴否",
+        "MACD金叉": "✅是" if d.get("MACD金叉") else "否",
+        "KDJ_J": d.get("KDJ_J", "N/A"), "量比": d.get("量比", "N/A"),
+        "看涨形态": d.get("看涨形态", []),
+    }
+    if d.get('个股新闻'):
+        item["个股新闻"] = d['个股新闻']
+    compact_pool.append(item)
 
-    tech_sector_block = ""
-    if sector_tech_data:
-        lines = []
-        for sec, stks in sorted(sector_tech_data.items(),
-                                 key=lambda x: max(s["技术评分"] for s in x[1]), reverse=True)[:8]:
-            top3 = [f"{s['名称']}({s['代码']})技{s['技术评分']}分"
-                    for s in stks[:3] if s["技术评分"] > 0]
-            if top3:
-                lines.append(f"  {sec}: {' / '.join(top3)}")
-        if lines:
-            tech_sector_block = "【今日技术形态板块共振（评分>0的标的按板块归类）】：\n" + "\n".join(lines)
+tech_sector_block = ""
+if sector_tech_data:
+    lines = []
+    for sec, stks in sorted(sector_tech_data.items(),
+                             key=lambda x: max(s["技术评分"] for s in x[1]), reverse=True)[:8]:
+        top3 = [f"{s['名称']}({s['代码']})技{s['技术评分']}分"
+                for s in stks[:3] if s["技术评分"] > 0]
+        if top3:
+            lines.append(f"  {sec}: {' / '.join(top3)}")
+    if lines:
+        tech_sector_block = "【今日技术形态板块共振（评分>0的标的按板块归类）】：\n" + "\n".join(lines)
 
-    evolved_rules_block = load_evolved_rules()
+evolved_rules_block = load_evolved_rules()
 
-    removed_notice = ""
-    if removed_tickers:
-        removed_notice = f"""
+removed_notice = ""
+if removed_tickers:
+    removed_notice = f"""
 ⚠️ 【今日盘前突发事件强制清仓暂停股】：
 以下股票今日已被风险控制强平暂停，今日选股策略中绝对禁止再次重新选入或推荐：
 {', '.join(removed_tickers)}
 """
 
-    prompt = f'''
+prompt = f'''
 你是顶级A股事件驱动型游资操盘手，擅长从全球宏观事件、美债大宗异动推演底层传导链条，并结合个股新闻做三重交叉验证。
 
 今天是{today_str}。
@@ -1627,12 +1628,12 @@ def generate_ai_report(pool_data, macro_news_text, macro_data_text, us_sector_te
 
 2. 产业链主线优选 Top 1-5（每只用一个 <div class="card core-card"> 包裹，必须包含以下字段）：
    <div class="card core-card">
-     <h3>股票名称 (代码) | RSI:xx | 乖离率:xx%</h3>
-     <p><b>产业链逻辑:</b> ...</p>
-     <p><b>个股新闻核查:</b> ...</p>
-     <p><b>技术确认:</b> ...</p>
-     <p><b>推荐评分:</b> 评分:[xx]/100 — ...</p>
-     <p><b>风控底线:</b> 周期:[x-x天] | 止损:[xx元或-x%]</p>
+ <h3>股票名称 (代码) | RSI:xx | 乖离率:xx%</h3>
+ <p><b>产业链逻辑:</b> ...</p>
+ <p><b>个股新闻核查:</b> ...</p>
+ <p><b>技术确认:</b> ...</p>
+ <p><b>推荐评分:</b> 评分:[xx]/100 — ...</p>
+ <p><b>风控底线:</b> 周期:[x-x天] | 止损:[xx元或-x%]</p>
    </div>
 
 3. 观察池（用 <div class="card obs-card"> 包裹，里面用 <li> 列出）：
@@ -1649,29 +1650,29 @@ def generate_ai_report(pool_data, macro_news_text, macro_data_text, us_sector_te
 - 第一个字符必须是 < 符号
 '''
 
-    # 【修复】调用 AI 生成报告（替换原来的 dummy 实现）
-    try:
-        ai_html = ""
-        with client.messages.stream(
-            model=TARGET_MODEL,
-            max_tokens=80000,
-            messages=[{"role": "user", "content": prompt}]
-        ) as stream:
-            for text in stream.text_stream:
-                ai_html += text
-        ai_html = ai_html.strip()
-        # 清理可能的 markdown 代码块
-        ai_html = ai_html.replace("```html", "").replace("```", "").strip()
-        html_start = ai_html.find("<div")
-        if html_start > 0:
-            print(f"⚠️ 检测到AI输出前置了 {html_start} 字符的非HTML内容，已自动截断丢弃")
-            ai_html = ai_html[html_start:]
-        print(f"✅ AI 报告生成完成，共 {len(ai_html)} 字符")
-    except Exception as e:
-        print(f"🚨 AI 报告生成失败: {e}")
-        ai_html = "<div class='header-card'><h2>🌍 AI报告生成失败</h2><p>请检查API配置和网络连接</p></div>"
+# 【修复】调用 AI 生成报告（替换原来的 dummy 实现）
+try:
+    ai_html = ""
+    with client.messages.stream(
+        model=TARGET_MODEL,
+        max_tokens=80000,
+        messages=[{"role": "user", "content": prompt}]
+    ) as stream:
+        for text in stream.text_stream:
+            ai_html += text
+    ai_html = ai_html.strip()
+    # 清理可能的 markdown 代码块
+    ai_html = ai_html.replace("```html", "").replace("```", "").strip()
+    html_start = ai_html.find("<div")
+    if html_start > 0:
+        print(f"⚠️ 检测到AI输出前置了 {html_start} 字符的非HTML内容，已自动截断丢弃")
+        ai_html = ai_html[html_start:]
+    print(f"✅ AI 报告生成完成，共 {len(ai_html)} 字符")
+except Exception as e:
+    print(f"🚨 AI 报告生成失败: {e}")
+    ai_html = "<div class='header-card'><h2>🌍 AI报告生成失败</h2><p>请检查API配置和网络连接</p></div>"
 
-    return ai_html
+return ai_html
 
 def build_email(ai_html):
     style = """
@@ -1808,9 +1809,6 @@ def match_pool_to_report(pool_data, ai_html, default_stop_loss_pct):
         item['Stop_Loss'] = stop_loss
         item['Score'] = score
         item['Daily_Pct'] = item.get('pct_chg', 0)
-        item['Open_Price'] = item.get('Open', item['Close'])
-        item['ATR_Pct'] = item.get('ATR_Pct', '')
-        item['周期共振'] = item.get('周期共振', False)
         chosen.append(item)
 
     return chosen
@@ -1884,7 +1882,7 @@ if __name__ == "__main__":
         if not df_new.empty:
             df_new['Date'] = get_bj_time().strftime('%Y-%m-%d %H:%M:%S')
             df_new['Close_Price'] = df_new['Close']
-            cols = ['Date', 'Ticker', 'Name', 'Industry', 'Tag', 'Open_Price', 'Close_Price', 'Amount', 'Daily_Pct', 'Hold_Period', 'Stop_Loss', 'Score', 'ATR_Pct', '周期共振']
+            cols = ['Date', 'Ticker', 'Name', 'Industry', 'Tag', 'Close_Price', 'Hold_Period', 'Stop_Loss', 'Score', 'Daily_Pct']
             for c in cols:
                 if c not in df_new.columns:
                     df_new[c] = ''
