@@ -1255,6 +1255,7 @@ def calc_tech_indicators(full_pool, codes, trade_date):
         ("乖离率(%)", 0.0), ("RSI", 50.0), ("MACD趋势", "N/A"),
         ("MACD_HIST_LAST", 0.0), ("MACD_HIST_PREV", 0.0),
         ("MACD金叉", False), ("MACD绿柱缩短", False),
+        ("MACD_V型反转", False), ("周线MACD_V型反转", False),
         ("周线共振", False),
         ("KDJ_J", 50.0), ("KDJ_J回升", False), ("KDJ_J超卖", False),
         ("量能放大", False), ("量比", 1.0), ("看涨形态", []),
@@ -1264,6 +1265,7 @@ def calc_tech_indicators(full_pool, codes, trade_date):
     for code in list(full_pool.keys()):
         weekly_bullish = False
         weekly_macd_rising = False  # 【新增】初始化，防止 len(wk)<12 时 NameError
+        weekly_macd_v_reverse = False  # 【新增】周线MACD柱线V型反转
         if not df_weekly.empty and code in df_weekly['ts_code'].values:
             wk = df_weekly[df_weekly['ts_code'] == code].sort_values('trade_date')
             if len(wk) >= 12:
@@ -1274,9 +1276,15 @@ def calc_tech_indicators(full_pool, codes, trade_date):
                 w_exp2 = pd.Series(wc).ewm(span=26, adjust=False).mean()
                 w_hist = (w_exp1 - w_exp2 - (w_exp1 - w_exp2).ewm(span=9, adjust=False).mean()) * 2
                 weekly_macd_rising = float(w_hist.iloc[-1]) > float(w_hist.iloc[-2])  # 【新增】回测核心因子
+                # 【新增】周线MACD柱线V型反转：T-2 > T-1 且 T-1 < T
+                w_hist_last  = float(w_hist.iloc[-1])
+                w_hist_prev  = float(w_hist.iloc[-2])
+                w_hist_prev2 = float(w_hist.iloc[-3]) if len(w_hist) >= 3 else w_hist_prev
+                weekly_macd_v_reverse = (len(w_hist) >= 3) and (w_hist_prev2 > w_hist_prev) and (w_hist_prev < w_hist_last)
                 weekly_bullish = bool(wma5 > wma10 and weekly_macd_rising)
         full_pool[code]["周线共振"] = weekly_bullish
         full_pool[code]["周线MACD上升"] = weekly_macd_rising  # 【新增】存储周线上升状态
+        full_pool[code]["周线MACD_V型反转"] = weekly_macd_v_reverse  # 【新增】存储周线V型反转
         if df_hist.empty or code not in df_hist['ts_code'].values:
             for fld, dflt in FALLBACK:
                 full_pool[code].setdefault(fld, dflt)
@@ -1312,6 +1320,8 @@ def calc_tech_indicators(full_pool, codes, trade_date):
         full_pool[code]["MACD_HIST_PREV"] = round(h_prev, 4)
         full_pool[code]["MACD金叉"]       = bool(ml_last > sl_last and ml_prev <= sl_prev)
         full_pool[code]["MACD绿柱缩短"]   = bool(h_last < 0 and h_last > h_prev and h_prev < h_prev2)
+        # 【新增】日线MACD柱线V型反转：T-2 > T-1 且 T-1 < T
+        full_pool[code]["MACD_V型反转"] = bool(len(hist) >= 3 and h_prev2 > h_prev and h_prev < h_last)
 
         full_pool[code]["日线MACD上升"]   = h_last > h_prev  # 【新增】回测核心因子
         delta = sc.diff()
@@ -1467,6 +1477,14 @@ def screen_technical_setups(final_pool):
         elif tech_score > 0:
             tech_score = int(tech_score * 0.6)
             tech_reasons.append("⚠️仅日线×0.6")
+
+        # 【新增】MACD柱线V型反转加分（日线+周线）
+        if stock.get("MACD_V型反转", False):
+            tech_score += 8
+            tech_reasons.append("MACD柱线V型反转(+8)")
+        if stock.get("周线MACD_V型反转", False):
+            tech_score += 8
+            tech_reasons.append("周线MACD柱线V型反转(+8)")
 
         stock["技术评分"] = min(tech_score, 40)
 
