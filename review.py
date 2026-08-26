@@ -517,6 +517,78 @@ for ticker, group in recent_picks.groupby('Ticker'):
     maturity_date_dt = first_row['Date'] + datetime.timedelta(days=hold_days)
     maturity_date = maturity_date_dt.strftime('%Y-%m-%d')
 
+    # ==========================================================
+    # 【关键修复】review.py 自己执行“止损优先”结算
+    # ----------------------------------------------------------
+    # 不能把“跌破止损位”的标的继续放进 active_list 等到期。
+    # 一旦当前价 <= Stop_Loss：
+    #   1) 立即视为已经清仓；
+    #   2) 交易记录价格统一记为“止损价”，而不是继续跟踪后的现价；
+    #   3) Maturity_PnL 留空，绝不再按到期日计算；
+    #   4) trade_history 全部未终止记录锁定为 Stop_Loss_Hit；
+    #   5) 本次运行后后续 review 通过 terminal tag 自动停止追踪。
+    # ==========================================================
+    stop_loss_val = None
+    try:
+        _sl_text = str(stop_loss).strip()
+        if _sl_text and _sl_text.lower() not in {'n/a', 'nan', 'none'} and _sl_text not in {'坚决空仓', '绝对规避', '观望'}:
+            _sl_nums = re.findall(r'\d+\.?\d*', _sl_text)
+            if _sl_nums:
+                stop_loss_val = float(_sl_nums[0])
+    except (TypeError, ValueError):
+        stop_loss_val = None
+
+    # 先取得当前价用于判断是否已经触发止损。
+    _check_price = price_map_today.get(ticker)
+    if not _check_price:
+        _check_price = get_price_on_date(ticker, get_bj_time().strftime('%Y-%m-%d'))
+    if not _check_price:
+        try:
+            _live_open, _live_last = get_live_quote(ticker)
+            _check_price = _live_last or _live_open
+        except Exception:
+            _check_price = None
+
+    # 止损优先级最高：即使同时已经超过 Hold_Period，也必须按止损结算。
+    if stop_loss_val is not None and _check_price is not None and float(_check_price) <= stop_loss_val:
+        if (str(ticker), rec_date_str) in already_archived:
+            # 历史已经归档过就不重复写，但仍不允许继续进入 active_list。
+            skipped_duplicate += 1
+            continue
+
+        stop_pnl = round(((stop_loss_val - rec_price) / rec_price) * 100, 2) if rec_price > 0 else 0.0
+        stop_days = max(0, (get_bj_time().replace(tzinfo=None) - first_row['Date']).days)
+
+        # 立即锁定 trade_history，防止后续 scan/review 再次把它当成持仓。
+        try:
+            _df_stop = pd.read_csv(log_file)
+            _terminal_tags_stop = {'Stop_Loss_Hit', 'Period_Matured', 'Forced_Exit', 'Dropped', 'Trap_Warning'}
+            _stop_mask = (_df_stop['Ticker'].astype(str) == ticker) & (~_df_stop['Tag'].astype(str).isin(_terminal_tags_stop))
+            _df_stop.loc[_stop_mask, 'Tag'] = 'Stop_Loss_Hit'
+            _df_stop.to_csv(log_file, index=False)
+            print(f"🛑 [review] {ticker} 触发止损：现价 {_check_price} <= 止损价 {stop_loss_val}，立即清仓，不再追踪到期")
+        except Exception as _e:
+            print(f"⚠️ [review] {ticker} 止损后锁定 trade_history 失败: {_e}")
+
+        # 只记录止损价。即使实际行情已经跌得更低，回测/策略结算仍以 Stop_Loss 为成交价。
+        expired_list.append({
+            "代码": ticker,
+            "名称": first_row['Name'],
+            "标签": "Stop_Loss_Hit",
+            "推荐评分": score_str,
+            "持股周期建议": hold_period_str,
+            "止损价": stop_loss,
+            "首次推荐日": rec_date_str,
+            "首次推荐价": rec_price,
+            "期满日": "",
+            "期满日价格": stop_loss_val,
+            "期满日盈亏(%)": stop_pnl,
+            "持仓天数": stop_days,
+            "系统连续推荐次数": len(group),
+            "结算类型": "止损触发清仓",
+        })
+        continue
+
     if maturity_date_dt.replace(tzinfo=None) <= get_bj_time().replace(tzinfo=None):
         if (str(ticker), rec_date_str) in already_archived:
             skipped_duplicate += 1
@@ -539,6 +611,7 @@ for ticker, group in recent_picks.groupby('Ticker'):
             "期满日盈亏(%)": maturity_pnl if maturity_pnl is not None else "无数据",
             "持仓天数": days_held,
             "系统连续推荐次数": len(group),
+            "结算类型": "周期到期清仓",
         })
     else:
         is_new_today = (rec_date_str == get_bj_time().strftime('%Y-%m-%d'))
@@ -610,7 +683,7 @@ prompt = f'''
 【持仓中（周期内，需要给出风控指令）】：
 {active_list}
 
-【已超期（本次新归档，只做策略复盘评价，不需要风控指令）】：
+【已关闭交易（本次新归档；其中“止损触发清仓”已经按止损价结算，绝不能继续追踪到期）】：
 {expired_list}
 
 在风控判断或策略复盘时，请结合推荐评分进行验证：高分票（80分以上）如果出现明显亏损，需要特别指出"高信心预期未兑现"；低分票（60分以下）如果反而盈利良好，也需要指出"评分体系可能过于保守"。
@@ -685,8 +758,13 @@ try:
             f.write(f"{review_date},{item['代码']},{item['名称']},{item['标签']},{item['首次推荐日']},{item['首次推荐价']},{item['现价']},{item['持仓天数']},{item['当前盈亏(%)']},,{item['持股周期建议']},{item['止损价']},{item['系统连续推荐次数']},持仓中,{item['推荐评分']}\n")
 
         for item in expired_list:
+            settlement_type = item.get('结算类型', '周期到期清仓')
             maturity_pnl = item['期满日盈亏(%)'] if item['期满日盈亏(%)'] != "无数据" else ""
-            f.write(f"{review_date},{item['代码']},{item['名称']},{item['标签']},{item['首次推荐日']},{item['首次推荐价']},{item['期满日价格']},{item['持仓天数']},{maturity_pnl},{maturity_pnl},{item['持股周期建议']},{item['止损价']},{item['系统连续推荐次数']},已超期归档,{item['推荐评分']}\n")
+            if settlement_type == "止损触发清仓":
+                # 止损交易只记录止损价和止损盈亏，Maturity_PnL 不代表“到期盈亏”
+                f.write(f"{review_date},{item['代码']},{item['名称']},{item['标签']},{item['首次推荐日']},{item['首次推荐价']},{item['期满日价格']},{item['持仓天数']},{maturity_pnl},,{item['持股周期建议']},{item['止损价']},{item['系统连续推荐次数']},止损触发清仓,{item['推荐评分']}\n")
+            else:
+                f.write(f"{review_date},{item['代码']},{item['名称']},{item['标签']},{item['首次推荐日']},{item['首次推荐价']},{item['期满日价格']},{item['持仓天数']},{maturity_pnl},{maturity_pnl},{item['持股周期建议']},{item['止损价']},{item['系统连续推荐次数']},周期到期清仓,{item['推荐评分']}\n")
 
     print("✅ 复盘结果已写入 review_history.csv")
 except Exception as e:
@@ -745,7 +823,7 @@ for item in expired_list:
         pnl = 0.0
     all_closed_trades.append({
         'ticker': item['代码'], 'name': item['名称'], 'pnl': pnl,
-        'prevented': 0.0, 'status': '已超期归档'
+        'prevented': 0.0, 'status': item.get('结算类型', '周期到期清仓')
     })
 
 active_count = len(active_list)
