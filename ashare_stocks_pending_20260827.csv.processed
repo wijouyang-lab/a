@@ -1,5 +1,0 @@
-Ticker,Name,Industry,Tag,Amount,Daily_Pct,Hold_Period,Stop_Loss,Score,ATR_Pct,周期共振,Scan_Ref_Price
-601899.SH,紫金矿业,铜,Core_Dragon,10924145.121,2.3456,3-5天,33.5元,83,4.06,False,33.7
-601318.SH,中国平安,保险,Core_Dragon,5886018.865,2.036,5-10天,52.65元,72,2.02,True,54.87
-601212.SH,白银有色,铜,Core_Dragon,4031968.824,10.0304,1-2天,6.8元,68,5.5,True,6.56
-000630.SZ,铜陵有色,铜,Core_Dragon,3252315.08632,4.9767,3-5天,6.5元,85,4.07,False,6.45
