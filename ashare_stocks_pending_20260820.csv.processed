@@ -1,6 +1,0 @@
-Date,Ticker,Name,Tag,Industry,Amount,Daily_Pct,Hold_Period,Stop_Loss,Score,Status,Scan_Ref_Price,ATR_Pct
-2026-08-20,002202.SZ,金风科技,Observation,电气设备,9464301.96027,0.0909,观望,观望,N/A,pending,24.21,5.22
-2026-08-20,600460.SH,士兰微,Observation,半导体,7079790.636,-1.1181,观望,观望,N/A,pending,33.59,6.3
-2026-08-20,600118.SH,中国卫星,Core_Dragon,航空,6378686.527,-2.1594,5-10天,64.50元,64,pending,72.0,6.26
-2026-08-20,600547.SH,山东黄金,Core_Dragon,黄金,5668465.653,6.5011,7-10天,29.80元,78,pending,29.74,4.67
-2026-08-20,600172.SH,黄河旋风,Observation,矿物制品,4652065.944,0.6983,观望,观望,N/A,pending,13.58,7.93
