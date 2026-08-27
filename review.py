@@ -2,7 +2,7 @@
 """
 A股盘后复盘与风控审查引擎（硬止损 + 触及即止损）
 - 使用当日最低价（Low_Price）判断是否触发止损
-- 自动升级表头，补充 Low_Price 列
+- 自动升级表头，补充 Low_Price 列（安全升级，不丢数据）
 - 止损优先于到期，结算价 = 止损价
 - 与 scan.py 生成的 ashare_stocks_pending_*.csv 联动
 - 今日新增标的纳入胜率统计
@@ -14,6 +14,7 @@ import os
 import glob
 import re
 import smtplib
+import csv
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 import anthropic
@@ -77,30 +78,37 @@ def get_live_quote(ticker):
 
 def _migrate_trade_history_add_columns(log_file):
     """
-    自动升级 trade_history.csv 表头：
+    安全升级 trade_history.csv 表头：
     增加 Open_Price, Low_Price, ATR_Pct 三列（如果缺失）。
-    同时补全老数据行的对应空值。
+    使用 csv 模块逐行处理，确保每行字段数严格与最终表头一致。
+    若某些行字段数异常，会进行补齐或截断（优先保持原数据）。
     """
     if not (os.path.exists(log_file) and os.path.getsize(log_file) > 0):
         return
+
+    # 读取所有行（保留原始内容）
     with open(log_file, "r", encoding="utf-8") as f:
-        old_lines = f.readlines()
-    if not old_lines:
+        lines = f.readlines()
+
+    if not lines:
         return
 
-    header = old_lines[0].strip()
-    cols = [c.strip() for c in header.split(",")]
+    # 解析原表头
+    header_line = lines[0].strip()
+    old_cols = [c.strip() for c in header_line.split(",")]
+    old_col_count = len(old_cols)
 
-    needs_open = "Open_Price" not in cols
-    needs_low = "Low_Price" not in cols
-    needs_atr = "ATR_Pct" not in cols
+    needs_open = "Open_Price" not in old_cols
+    needs_low = "Low_Price" not in old_cols
+    needs_atr = "ATR_Pct" not in old_cols
 
     if not (needs_open or needs_low or needs_atr):
-        return
+        return  # 无需升级
 
     # 构建新表头
-    new_cols = cols[:]
+    new_cols = old_cols[:]
     if needs_open:
+        # 插入到 Close_Price 前面
         if "Close_Price" in new_cols:
             idx = new_cols.index("Close_Price")
         else:
@@ -115,34 +123,50 @@ def _migrate_trade_history_add_columns(log_file):
     if needs_atr:
         new_cols.append("ATR_Pct")
 
-    migrated = [",".join(new_cols) + "\n"]
+    new_col_count = len(new_cols)
 
-    for line in old_lines[1:]:
+    # 处理数据行
+    data_lines = lines[1:]
+    fixed_data = []
+    for line in data_lines:
         if not line.strip():
             continue
-        fields = line.rstrip("\n").split(",")
-        while len(fields) < len(cols):
-            fields.append("")
-        if needs_open:
-            insert_pos = cols.index("Close_Price") if "Close_Price" in cols else len(fields)
-            fields.insert(insert_pos, "")
-        if needs_low:
-            close_pos = cols.index("Close_Price") if "Close_Price" in cols else len(fields)
-            if needs_open:
-                close_pos += 1
-            fields.insert(close_pos, "")
-        if needs_atr:
-            fields.append("")
-        migrated.append(",".join(fields) + "\n")
+        # 使用 csv.reader 解析，以正确处理引号和逗号
+        reader = csv.reader([line])
+        fields = next(reader)
+        # 补齐或截断到原表头列数
+        if len(fields) < old_col_count:
+            fields += [""] * (old_col_count - len(fields))
+        elif len(fields) > old_col_count:
+            fields = fields[:old_col_count]
 
+        # 插入新列的空值（顺序与 new_cols 对应）
+        new_fields = []
+        for col in new_cols:
+            if col in old_cols:
+                # 找到在原表头中的位置
+                idx_old = old_cols.index(col)
+                new_fields.append(fields[idx_old] if idx_old < len(fields) else "")
+            else:
+                # 新增列（Open_Price, Low_Price, ATR_Pct）
+                new_fields.append("")
+        # 确保长度与新表头一致
+        if len(new_fields) < new_col_count:
+            new_fields += [""] * (new_col_count - len(new_fields))
+        fixed_data.append(",".join(new_fields))
+
+    # 写回文件
     with open(log_file, "w", encoding="utf-8") as f:
-        f.writelines(migrated)
+        f.write(",".join(new_cols) + "\n")
+        f.write("\n".join(fixed_data))
+        if fixed_data:
+            f.write("\n")
 
     added = []
     if needs_open: added.append("Open_Price")
     if needs_low: added.append("Low_Price")
     if needs_atr: added.append("ATR_Pct")
-    print(f"⚠️ 账本表头升级：增加列 {added}，已补全历史数据空值。")
+    print(f"⚠️ 账本表头升级：增加列 {added}，已安全迁移 {len(fixed_data)} 行数据。")
 
 def _recalibrate_stop_loss_ashare(stop_loss_str, scan_ref_price, real_open_price):
     """止损位校准（按开盘价比例平移）"""
@@ -227,8 +251,11 @@ def supplement_ashare_stocks_from_pending():
 
             df_existing = pd.DataFrame()
             if os.path.exists(log_file) and os.path.getsize(log_file) > 0:
-                df_existing = pd.read_csv(log_file, keep_default_na=False)
-                df_existing['Date'] = pd.to_datetime(df_existing['Date'])
+                try:
+                    df_existing = pd.read_csv(log_file, keep_default_na=False, on_bad_lines='warn')
+                    df_existing['Date'] = pd.to_datetime(df_existing['Date'])
+                except Exception as e:
+                    print(f"⚠️ 读取现有账本失败: {e}，将重新创建")
 
             new_records = []
             missing_price_tickers = []
@@ -261,7 +288,6 @@ def supplement_ashare_stocks_from_pending():
                         open_price = live_open
                     if close_price is None:
                         close_price = live_last or live_open
-                    # 最低价：用 min(开盘，实时价) 近似
                     if low_price is None and live_open is not None and live_last is not None:
                         low_price = min(live_open, live_last)
 
@@ -335,7 +361,7 @@ def supplement_ashare_stocks_from_pending():
 supplement_ashare_stocks_from_pending()
 
 # ==========================================
-# 3. 加载账本，过滤有效持仓
+# 3. 加载账本，过滤有效持仓（增加容错）
 # ==========================================
 log_file = "trade_history.csv"
 if not os.path.exists(log_file):
@@ -343,7 +369,8 @@ if not os.path.exists(log_file):
     sys.exit(0)
 
 try:
-    df = pd.read_csv(log_file, keep_default_na=False)
+    # 使用 on_bad_lines='warn' 避免因个别行格式问题导致整体崩溃
+    df = pd.read_csv(log_file, keep_default_na=False, on_bad_lines='warn')
     df['Date'] = pd.to_datetime(df['Date'])
     cutoff_date = get_bj_time() - datetime.timedelta(days=30)
     recent_picks = df[df['Date'] >= cutoff_date.replace(tzinfo=None)].copy()
@@ -549,7 +576,7 @@ for ticker, group in recent_picks.groupby('Ticker'):
 
         # 锁定 trade_history 状态
         try:
-            df_stop = pd.read_csv(log_file, keep_default_na=False)
+            df_stop = pd.read_csv(log_file, keep_default_na=False, on_bad_lines='warn')
             # 【修复】确保 Exit_Price 和 Exit_Date 列为 object 类型
             for col in ['Exit_Price', 'Exit_Date']:
                 if col in df_stop.columns:
