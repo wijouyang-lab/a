@@ -152,6 +152,8 @@ def supplement_ashare_stocks_from_pending():
     3. 今天的 .csv 即使上一次被误标记为 .processed，只要 trade_history 中没有当天记录，
        仍会作为“今日恢复文件”重新导入，避免今天新增永久丢失。
     4. 写入前重新读取 trade_history，支持一次运行同时恢复多个遗漏标的。
+    5. 今日 pending 是 scan 当天新建仓的权威来源：只按 (Ticker, Date) 去重，不能因为历史仍有同 ticker 持仓就跳过。
+    6. 成功验证 trade_history 已写入当天记录后，同时删除 .csv 和 .csv.processed，避免残留。
     """
     log_file = "trade_history.csv"
     today_str = get_bj_time().strftime('%Y-%m-%d')
@@ -176,7 +178,7 @@ def supplement_ashare_stocks_from_pending():
 
     if not all_files:
         print("📋 无待确认A股文件，跳过补充。")
-        return
+        return set()
 
     print(f"📋 发现 {len(all_files)} 份待确认/恢复文件：{[x[0] for x in all_files]}")
 
@@ -185,6 +187,8 @@ def supplement_ashare_stocks_from_pending():
 
     # 与 scan.py 保持完全一致：这 3 个标签才算“真实活跃持仓”
     HOLDING_TAGS = {'Core_Double_Dragon', 'Core_Dragon', 'Sub_Pioneer'}
+
+    successfully_imported_tickers = set()
 
     for pending_file, is_recovery in all_files:
         m = re.search(r"ashare_stocks_pending_(\d{8})\.csv(?:\.processed)?$", pending_file)
@@ -279,21 +283,11 @@ def supplement_ashare_stocks_from_pending():
                     for _, r in valid_existing.iterrows()
                 }
 
-            # 当前真实持仓：只看 scan.py 认定的 3 类，不把 Observation 当作阻塞条件。
-            current_active_tickers = set()
-            if (
-                not df_existing.empty
-                and {'Ticker', 'Tag'}.issubset(df_existing.columns)
-            ):
-                current_active_tickers = set(
-                    df_existing[
-                        df_existing['Tag'].astype(str).str.strip().isin(HOLDING_TAGS)
-                    ]['Ticker'].astype(str).str.strip()
-                )
-
+            # 今日 pending 是 scan 当天新仓的权威来源。
+            # 这里绝不能用“Ticker 当前是否已经活跃”作为阻塞条件，
+            # 否则旧生命周期/旧推荐会把今天的新仓吞掉。只按 (Ticker, Date) 去重。
             new_records = []
             skipped_same_day = []
-            skipped_existing_active = []
             missing_price_tickers = []
 
             for _, row in df_pending.iterrows():
@@ -306,11 +300,9 @@ def supplement_ashare_stocks_from_pending():
                     skipped_same_day.append(ticker)
                     continue
 
-                # 2) 只有当前仍处于真实持仓状态才阻止重复；
-                #    Observation / 已止损 / 已到期 / 强平后的重新入选不阻止。
-                if ticker in current_active_tickers:
-                    skipped_existing_active.append(ticker)
-                    continue
+                # 2) 不因为历史同 ticker 记录而跳过。
+                #    scan 当天生成 pending 就代表今天是一次新的推荐/建仓事件；
+                #    是否属于新的生命周期由后续 review 的日期边界决定。
 
                 open_price = open_map.get(ticker)
                 low_price = low_map.get(ticker)
@@ -407,11 +399,6 @@ def supplement_ashare_stocks_from_pending():
 
             if skipped_same_day:
                 print(f"⏭️ 同日已存在，跳过 {len(skipped_same_day)} 条：{skipped_same_day}")
-            if skipped_existing_active:
-                print(
-                    f"⏭️ 当前真实持仓，跳过 {len(skipped_existing_active)} 条："
-                    f"{skipped_existing_active}"
-                )
             if missing_price_tickers:
                 print(f"⚠️ 以下标的无完整价格：{missing_price_tickers}")
 
@@ -446,21 +433,48 @@ def supplement_ashare_stocks_from_pending():
             else:
                 print(f"ℹ️ {pending_file} 无新记录需要追加")
 
-            # 只有原始 .csv 才需要转成 .processed；恢复文件保持原样，
-            # 方便人工核对，且下次仍会被精确去重保护。
-            if not is_recovery and os.path.exists(pending_file):
-                processed_path = f"{pending_file}.processed"
-                if os.path.exists(processed_path):
-                    # 不覆盖已有恢复证据
-                    os.remove(processed_path)
-                os.rename(pending_file, processed_path)
-                print(f"📦 {pending_file} 已标记为已处理")
+            # 写入后立刻以 trade_history 做二次核验；只有所有 ticker 都存在当天记录，
+            # 才删除 .csv / .processed。这样即使“无新记录”也是安全可删的，而写入失败绝不误删。
+            try:
+                if os.path.exists(log_file) and os.path.getsize(log_file) > 0:
+                    _verify = pd.read_csv(log_file, keep_default_na=False, on_bad_lines='skip')
+                    _verify['Ticker'] = _verify['Ticker'].astype(str).str.strip()
+                    _verify['Date'] = pd.to_datetime(_verify['Date'], errors='coerce')
+                    expected = {str(x).strip() for x in df_pending['Ticker'].tolist() if str(x).strip()}
+                    actual = set(
+                        _verify[_verify['Date'].dt.strftime('%Y-%m-%d') == target_date_str]['Ticker']
+                        .astype(str).str.strip().tolist()
+                    )
+                    missing_after_write = sorted(expected - actual)
+                    if not missing_after_write:
+                        successfully_imported_tickers.update(expected)
+                        # 同时清理正常 pending 和旧版遗留的 .processed。
+                        cleanup_targets = {pending_file}
+                        if is_today:
+                            cleanup_targets.add(f"ashare_stocks_pending_{file_date_str}.csv")
+                            cleanup_targets.add(f"ashare_stocks_pending_{file_date_str}.csv.processed")
+                        for cleanup_file in cleanup_targets:
+                            if os.path.exists(cleanup_file):
+                                try:
+                                    os.remove(cleanup_file)
+                                    print(f"🗑️ {cleanup_file} 已验证写入成功，自动删除")
+                                except Exception as cleanup_err:
+                                    print(f"⚠️ 删除 {cleanup_file} 失败：{cleanup_err}")
+                    else:
+                        print(f"🚨 写入后核验失败，暂不删除 pending：缺失 {missing_after_write}")
+                else:
+                    print("🚨 trade_history.csv 不存在或为空，暂不删除 pending。")
+            except Exception as verify_err:
+                print(f"⚠️ pending 写入后核验失败，暂不删除文件：{verify_err}")
 
         except Exception as e:
             print(f"❌ 处理 {pending_file} 失败: {e}")
 
+    return successfully_imported_tickers
 
-supplement_ashare_stocks_from_pending()
+# 返回本次成功导入的 ticker，供后续 review 强制确认“今日新增”进入持仓生命周期。
+_today_pending_imported = supplement_ashare_stocks_from_pending() or set()
+print(f"📌 今日 pending 成功导入/确认的标的：{sorted(_today_pending_imported)}")
 
 # ==========================================
 # 3. 加载账本，过滤有效持仓
@@ -480,6 +494,27 @@ try:
         (df['Date'] >= cutoff_date.replace(tzinfo=None)) &
         (df['Tag'].isin(ACTIVE_TAGS))
     ].copy()
+
+    # 【关键】本次 scan 成功导入的今日 pending 必须进入 review 的持仓集合。
+    # 不允许后续任何历史/去重逻辑把它们吞掉。
+    if _today_pending_imported:
+        _today_rows = df[
+            (df['Date'].dt.strftime('%Y-%m-%d') == today_str) &
+            (df['Ticker'].astype(str).str.strip().isin(_today_pending_imported)) &
+            (df['Tag'].isin(ACTIVE_TAGS))
+        ].copy()
+        if not _today_rows.empty:
+            existing_keys = set(
+                zip(recent_picks['Ticker'].astype(str).str.strip(), recent_picks['Date'].dt.strftime('%Y-%m-%d'))
+            )
+            add_rows = _today_rows[
+                ~_today_rows.apply(
+                    lambda r: (str(r['Ticker']).strip(), r['Date'].strftime('%Y-%m-%d')) in existing_keys, axis=1
+                )
+            ]
+            if not add_rows.empty:
+                recent_picks = pd.concat([recent_picks, add_rows], ignore_index=True)
+            print(f"📌 强制并入今日新增持仓 {len(_today_rows)} 条")
     if recent_picks.empty:
         print("⚠️ 最近30天无活跃持仓，退出。")
         sys.exit(0)
@@ -562,6 +597,9 @@ def get_price_on_date(ticker, target_date_str, field='close'):
         return None
     return float(valid.iloc[-1][field])
 
+# 当前复盘日期
+today_str = get_bj_time().strftime('%Y-%m-%d')
+
 # 加载历史归档去重
 already_archived = set()
 review_log_path = "review_history.csv"
@@ -578,12 +616,45 @@ if os.path.exists(review_log_path) and os.path.getsize(review_log_path) > 0:
         pass
 
 # ==========================================
+# 5.5 A股 T+1：读取前一交易日“止损待执行”标的
+# ==========================================
+pending_t1_stop = {}
+if os.path.exists(review_log_path) and os.path.getsize(review_log_path) > 0:
+    try:
+        _review_t1 = pd.read_csv(review_log_path, on_bad_lines='skip', keep_default_na=False)
+        required_t1_cols = {'Review_Date', 'Ticker', 'Status'}
+        if required_t1_cols.issubset(_review_t1.columns):
+            _review_t1['Review_Date'] = pd.to_datetime(_review_t1['Review_Date'], errors='coerce')
+            _review_t1['Ticker'] = _review_t1['Ticker'].astype(str).str.strip()
+            _today_dt = pd.to_datetime(today_str)
+            _review_t1 = _review_t1[
+                _review_t1['Review_Date'].notna() &
+                (_review_t1['Review_Date'] <= _today_dt)
+            ].sort_values(['Ticker', 'Review_Date'])
+
+            # 每只股票只看“最近一条复盘状态”。只有最近状态仍是 T+1止损待执行，
+            # 且该状态来自今天之前，今天才允许执行。这样可以避免旧的待执行记录
+            # 在股票已经重新开仓/恢复持有后被误触发。
+            _latest_review_by_ticker = _review_t1.groupby('Ticker', as_index=False).tail(1)
+            for _, _r in _latest_review_by_ticker.iterrows():
+                _ticker_key = str(_r['Ticker']).strip()
+                if (
+                    str(_r['Status']).strip() == 'T+1止损待执行' and
+                    _r['Review_Date'] < _today_dt
+                ):
+                    pending_t1_stop[_ticker_key] = _r.to_dict()
+
+            if pending_t1_stop:
+                print(f"📌 T+1联动：发现 {len(pending_t1_stop)} 只前一交易日已触发止损、今日可执行的标的")
+    except Exception as e:
+        print(f"⚠️ T+1止损待执行记录读取失败：{e}")
+
+# ==========================================
 # 6. 遍历持仓，执行止损/到期
 # ==========================================
 active_list = []
 expired_list = []
 skipped_duplicate = 0
-today_str = get_bj_time().strftime('%Y-%m-%d')
 
 print(f"开始处理 {len(recent_picks)} 条活跃持仓记录...")
 
@@ -597,6 +668,17 @@ _TERMINAL_OR_WATCH_TAGS = {
 
 for ticker, group in recent_picks.groupby('Ticker'):
     group = group.sort_values('Date').copy()
+
+    # 【今日新仓最高优先级】scan 当天生成并成功导入的 pending，
+    # 必须从今天这一条记录开始新的持仓生命周期。即使历史上曾经出现过同 ticker，
+    # 也不能把旧生命周期的首日、止损或 T+1 状态继承给今天的新仓。
+    if str(ticker).strip() in _today_pending_imported:
+        _today_rows_for_ticker = group[
+            group['Date'].dt.strftime('%Y-%m-%d') == today_str
+        ].copy()
+        if not _today_rows_for_ticker.empty:
+            group = _today_rows_for_ticker.sort_values('Date').copy()
+            print(f"🆕 {ticker} 使用今日 pending 记录作为新持仓生命周期起点，旧历史不继承。")
 
     # 优先从完整账本判断生命周期边界，而不是只看最近30天窗口。
     try:
@@ -627,6 +709,9 @@ for ticker, group in recent_picks.groupby('Ticker'):
     first_row = group.iloc[0]
     latest_row = group.iloc[-1]
     days_held = (get_bj_time().replace(tzinfo=None) - first_row['Date']).days
+    latest_date_str = latest_row['Date'].strftime('%Y-%m-%d')
+    is_new_today = (latest_date_str == today_str)
+    t1_locked = is_new_today
 
     latest_tag = str(latest_row.get('Tag', '')).strip()
     if latest_tag in ['Trap_Warning', 'Forced_Exit', 'Stop_Loss_Hit', 'Period_Matured']:
@@ -700,52 +785,125 @@ for ticker, group in recent_picks.groupby('Ticker'):
         if nums:
             stop_loss_val = float(nums[0])
 
-    # 止损触发
+    # ==========================================================
+    # A股 T+1 核心规则：
+    # - 当天新买入：即使盘中最低价跌破止损，也只能记录“止损触发”，不能当天清仓。
+    # - 下一交易日：若昨日已经触发止损，则以今日开盘价作为“可执行模拟成交价”进行结算。
+    # ==========================================================
+    t1_stop_triggered_today = False
+
+    # 先处理“昨日触发、今日执行”的 T+1 止损
+    if str(ticker).strip() in pending_t1_stop and not is_new_today:
+        today_open_for_exit = None
+        try:
+            today_open_for_exit = get_price_on_date(ticker, today_str, field='open')
+        except Exception:
+            today_open_for_exit = None
+        if today_open_for_exit is None:
+            try:
+                live_open, _ = get_live_quote(ticker)
+                today_open_for_exit = live_open
+            except Exception:
+                pass
+
+        if today_open_for_exit is not None and float(today_open_for_exit) > 0:
+            if (str(ticker), rec_date_str) not in already_archived:
+                exit_price = float(today_open_for_exit)
+                pnl = round(((exit_price - rec_price) / rec_price) * 100, 2) if rec_price > 0 else 0.0
+                stop_days = max(1, (get_bj_time().replace(tzinfo=None) - first_row['Date']).days)
+
+                try:
+                    df_stop = pd.read_csv(log_file, keep_default_na=False, on_bad_lines='warn')
+                    for col in ['Exit_Price', 'Exit_Date']:
+                        if col not in df_stop.columns:
+                            df_stop[col] = ''
+                        df_stop[col] = df_stop[col].astype(object)
+                    terminal_tags = {'Stop_Loss_Hit', 'Period_Matured', 'Forced_Exit', 'Dropped', 'Trap_Warning'}
+                    mask = (df_stop['Ticker'].astype(str).str.strip() == ticker) & (~df_stop['Tag'].astype(str).isin(terminal_tags))
+                    df_stop.loc[mask, 'Tag'] = 'Stop_Loss_Hit'
+                    df_stop.loc[mask, 'Exit_Price'] = exit_price
+                    df_stop.loc[mask, 'Exit_Date'] = today_str
+                    df_stop.to_csv(log_file, index=False)
+                    print(f"🛑 [T+1执行止损] {ticker} 昨日已跌破止损，今日开盘 {exit_price} 作为模拟执行价清仓")
+                except Exception as e:
+                    print(f"⚠️ T+1更新 {ticker} 状态失败: {e}")
+
+                expired_list.append({
+                    "代码": ticker,
+                    "名称": first_row.get('Name', ticker),
+                    "标签": "Stop_Loss_Hit",
+                    "推荐评分": score_str,
+                    "持股周期建议": hold_period_str,
+                    "止损价": stop_loss_str,
+                    "首次推荐日": rec_date_str,
+                    "首次推荐价": rec_price,
+                    "期满日": "",
+                    "期满日价格": exit_price,
+                    "期满日盈亏(%)": pnl,
+                    "持仓天数": stop_days,
+                    "系统连续推荐次数": len(group),
+                    "结算类型": "止损触发清仓",
+                    "执行说明": "昨日触发止损，受T+1限制于今日开盘执行"
+                })
+                continue
+
+    # 当前日价格仅用于判断“今天是否触及止损”
     if stop_loss_val is not None and today_low is not None and float(today_low) <= stop_loss_val:
-        if (str(ticker), rec_date_str) in already_archived:
-            skipped_duplicate += 1
+        if t1_locked:
+            # T+1 锁定：今天不能卖，只记录为待下一交易日执行
+            t1_stop_triggered_today = True
+            print(
+                f"⏳ [T+1锁定] {ticker} 今日最低价 {today_low} <= 止损 {stop_loss_val}，"
+                "仅记录止损触发，不执行当日清仓"
+            )
+        else:
+            if (str(ticker), rec_date_str) in already_archived:
+                skipped_duplicate += 1
+                continue
+
+            exit_price = stop_loss_val
+            pnl = round(((exit_price - rec_price) / rec_price) * 100, 2) if rec_price > 0 else 0.0
+            stop_days = max(1, (get_bj_time().replace(tzinfo=None) - first_row['Date']).days)
+
+            try:
+                df_stop = pd.read_csv(log_file, keep_default_na=False, on_bad_lines='warn')
+                for col in ['Exit_Price', 'Exit_Date']:
+                    if col in df_stop.columns:
+                        df_stop[col] = df_stop[col].astype(object)
+                terminal_tags = {'Stop_Loss_Hit', 'Period_Matured', 'Forced_Exit', 'Dropped', 'Trap_Warning'}
+                mask = (df_stop['Ticker'].astype(str) == ticker) & (~df_stop['Tag'].astype(str).isin(terminal_tags))
+                df_stop.loc[mask, 'Tag'] = 'Stop_Loss_Hit'
+                if 'Exit_Price' in df_stop.columns and 'Exit_Date' in df_stop.columns:
+                    df_stop.loc[mask, 'Exit_Price'] = exit_price
+                    df_stop.loc[mask, 'Exit_Date'] = today_str
+                df_stop.to_csv(log_file, index=False)
+                print(f"🛑 [触及止损] {ticker} 最低价 {today_low} <= 止损 {stop_loss_val}，按止损价 {exit_price} 结算")
+            except Exception as e:
+                print(f"⚠️ 更新 {ticker} 状态失败: {e}")
+
+            expired_list.append({
+                "代码": ticker,
+                "名称": first_row.get('Name', ticker),
+                "标签": "Stop_Loss_Hit",
+                "推荐评分": score_str,
+                "持股周期建议": hold_period_str,
+                "止损价": stop_loss_str,
+                "首次推荐日": rec_date_str,
+                "首次推荐价": rec_price,
+                "期满日": "",
+                "期满日价格": exit_price,
+                "期满日盈亏(%)": pnl,
+                "持仓天数": stop_days,
+                "系统连续推荐次数": len(group),
+                "结算类型": "止损触发清仓",
+                "执行说明": "非当日新仓，止损正常执行"
+            })
             continue
 
-        exit_price = stop_loss_val
-        pnl = round(((exit_price - rec_price) / rec_price) * 100, 2) if rec_price > 0 else 0.0
-        stop_days = max(0, (get_bj_time().replace(tzinfo=None) - first_row['Date']).days)
-
-        try:
-            df_stop = pd.read_csv(log_file, keep_default_na=False, on_bad_lines='warn')
-            for col in ['Exit_Price', 'Exit_Date']:
-                if col in df_stop.columns:
-                    df_stop[col] = df_stop[col].astype(object)
-            terminal_tags = {'Stop_Loss_Hit', 'Period_Matured', 'Forced_Exit', 'Dropped', 'Trap_Warning'}
-            mask = (df_stop['Ticker'].astype(str) == ticker) & (~df_stop['Tag'].astype(str).isin(terminal_tags))
-            df_stop.loc[mask, 'Tag'] = 'Stop_Loss_Hit'
-            if 'Exit_Price' in df_stop.columns and 'Exit_Date' in df_stop.columns:
-                df_stop.loc[mask, 'Exit_Price'] = exit_price
-                df_stop.loc[mask, 'Exit_Date'] = get_bj_time().strftime('%Y-%m-%d')
-            df_stop.to_csv(log_file, index=False)
-            print(f"🛑 [触及止损] {ticker} 最低价 {today_low} <= 止损 {stop_loss_val}，按止损价 {exit_price} 结算")
-        except Exception as e:
-            print(f"⚠️ 更新 {ticker} 状态失败: {e}")
-
-        expired_list.append({
-            "代码": ticker,
-            "名称": first_row.get('Name', ticker),
-            "标签": "Stop_Loss_Hit",
-            "推荐评分": score_str,
-            "持股周期建议": hold_period_str,
-            "止损价": stop_loss_str,
-            "首次推荐日": rec_date_str,
-            "首次推荐价": rec_price,
-            "期满日": "",
-            "期满日价格": exit_price,
-            "期满日盈亏(%)": pnl,
-            "持仓天数": stop_days,
-            "系统连续推荐次数": len(group),
-            "结算类型": "止损触发清仓",
-        })
-        continue
-
     # 到期检查
-    if maturity_date_dt.replace(tzinfo=None) <= get_bj_time().replace(tzinfo=None):
+    # A股新仓当天绝不能因为“1-2天”中的数字解析或盘后时间而立即归档；
+    # 今日新增至少保留到下一交易日。
+    if (not is_new_today) and maturity_date_dt.replace(tzinfo=None) <= get_bj_time().replace(tzinfo=None):
         if (str(ticker), rec_date_str) in already_archived:
             skipped_duplicate += 1
             continue
@@ -771,10 +929,8 @@ for ticker, group in recent_picks.groupby('Ticker'):
         })
     else:
         # 活跃持仓
-        latest_date_str = latest_row['Date'].strftime('%Y-%m-%d')
-        is_new_today = (latest_date_str == today_str)
         if is_new_today:
-            print(f"✅ {ticker} 今日新增：最新记录日期 {latest_date_str} == {today_str}")
+            print(f"✅ {ticker} 今日新增：最新记录日期 {latest_date_str} == {today_str}；T+1锁定，今日禁止卖出")
 
         today_open = None
         if 'Open_Price' in first_row and str(first_row['Open_Price']).strip():
@@ -816,6 +972,8 @@ for ticker, group in recent_picks.groupby('Ticker'):
             "剩余天数": remaining,
             "当前盈亏(%)": cur_pnl,
             "今日新增": "是" if is_new_today else "否",
+            "T+1锁定": "是" if t1_locked else "否",
+            "风控状态": "T+1止损待执行" if t1_stop_triggered_today else ("T+1锁定" if t1_locked else "正常监控"),
             "系统连续推荐次数": len(group),
         })
 
@@ -846,7 +1004,12 @@ prompt = f'''
 
 在风控判断或策略复盘时，请结合推荐评分进行验证：高分票（80分以上）如果出现明显亏损，需要特别指出"高信心预期未兑现"；低分票（60分以下）如果反而盈利良好，也需要指出"评分体系可能过于保守"。
 
-【今日新增标的特别说明】持仓列表中"今日新增"="是"的标的是当天刚生成的全新推荐，已有完整交易日数据，应计入正常盈亏分析。风控动作指令统一给"持有观察，纳入正常止损监控"。
+【A股T+1交易规则——必须严格遵守】
+1. "今日新增"="是"代表今天开盘建立的新仓，当天绝对禁止卖出、止损清仓或减仓。
+2. 即使今日盘中最低价跌破止损位，也只能标记为"T+1止损待执行"，不能在今天生成"止损触发清仓"归档。
+3. 下一交易日若昨日已经触发止损，允许按今日开盘价作为模拟执行价完成清仓归档；这是T+1后的实际可执行口径。
+4. 今日新增仍然必须纳入当前盈亏分析、胜率统计和报告，但风控动作必须写为"持有观察，T+1锁定；若止损已触发则下一交易日执行"。
+5. 绝对不要把今天新仓的盘中低点直接当成已经成交的止损价。
 
 请严格按以下 HTML 骨架输出复盘报告（直出HTML，禁加markdown框，盈利标红，亏损标绿）：
 
@@ -861,7 +1024,7 @@ prompt = f'''
     <p><b>持股周期建议:</b> [持股周期建议] | <b>止损位:</b> [止损价]</p>
     <p><b>买入成本:</b> ¥[首次推荐价] ➔ <b>现价:</b> ¥[现价]（今日开盘价 ¥[今日开盘价]） | <b>当前盈亏:</b> <span style="font-weight:bold; color:[盈利#d32f2f/亏损#388e3c];">[当前盈亏(%)]%</span></p>
     <p><span style="background: #607d8b; color: #fff; padding: 2px 6px; border-radius: 4px; font-size: 12px;">风控动作指令</span>
-    (判断现价是否跌破止损位，给出持有/止损/减仓指令)</p>
+    (严格遵守A股T+1：今日新增只能持有观察；今日若触发止损，只记录为T+1待执行；非新仓才可正常执行止损/减仓)</p>
 </div>
 
 <h2 style="color: #37474f; border-bottom: 2px solid #cfd8dc; padding-bottom: 5px; margin-top: 40px;">📁 已超期归档 - 策略复盘评价</h2>
@@ -870,7 +1033,7 @@ prompt = f'''
     <p><b>持股周期建议:</b> [持股周期建议] | <b>止损位:</b> [止损价]</p>
     <p><b>买入成本:</b> ¥[首次推荐价] → <b>期满日价格:</b> ¥[期满日价格] | <b>策略实际盈亏:</b> <span style="font-weight:bold; color:[盈利#d32f2f/亏损#388e3c];">[期满日盈亏(%)]%</span></p>
     <p><span style="background: #455a64; color: #fff; padding: 2px 6px; border-radius: 4px; font-size: 12px;">策略复盘</span>
-    (评价这次策略是否成功，归因分析盈亏原因)</p>
+    (评价这次策略是否成功，归因分析盈亏原因；若为T+1止损，则说明触发日与实际执行日的差异)</p>
 </div>
 
 【极其重要】直接输出HTML代码，第一个字符必须是 < 符号，绝对不要输出任何思考过程。
@@ -914,7 +1077,8 @@ try:
         review_date = get_bj_time().strftime('%Y-%m-%d')
 
         for item in active_list:
-            f.write(f"{review_date},{item['代码']},{item['名称']},{item['标签']},{item['首次推荐日']},{item['首次推荐价']},{item['现价']},{item['持仓天数']},{item['当前盈亏(%)']},,{item['持股周期建议']},{item['止损价']},{item['系统连续推荐次数']},持仓中,{item['推荐评分']}\n")
+            _status = item.get('风控状态', '正常监控')
+            f.write(f"{review_date},{item['代码']},{item['名称']},{item['标签']},{item['首次推荐日']},{item['首次推荐价']},{item['现价']},{item['持仓天数']},{item['当前盈亏(%)']},,{item['持股周期建议']},{item['止损价']},{item['系统连续推荐次数']},{'T+1止损待执行' if _status == 'T+1止损待执行' else '持仓中'},{item['推荐评分']}\n")
 
         for item in expired_list:
             pnl = item['期满日盈亏(%)'] if item['期满日盈亏(%)'] != "无数据" else ""
