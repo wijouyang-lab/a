@@ -175,7 +175,7 @@ def _recalibrate_stop_loss_ashare(stop_loss_str, scan_ref_price, real_open_price
         return stop_loss_str
 
 # ==========================================
-# 2. 补充待确认文件（盘后写入账本）
+# 2. 补充待确认文件（盘后写入账本）【彻底修复版】
 # ==========================================
 def supplement_ashare_stocks_from_pending():
     log_file = "trade_history.csv"
@@ -189,8 +189,10 @@ def supplement_ashare_stocks_from_pending():
 
     print(f"📋 发现 {len(pending_files)} 份待确认文件：{pending_files}")
 
+    # 升级表头（增加 Open_Price, Low_Price, ATR_Pct）
     _migrate_trade_history_add_columns(log_file)
 
+    # 新表头列
     new_header_cols = [
         "Date", "Ticker", "Name", "Tag", "Industry",
         "Open_Price", "Low_Price", "Close_Price", "Amount", "Daily_Pct",
@@ -215,6 +217,7 @@ def supplement_ashare_stocks_from_pending():
                 os.rename(pending_file, f"{pending_file}.processed")
                 continue
 
+            # 获取该交易日全市场 OHLC 数据（含最低价）
             df_prices = None
             for offset in range(0, 5):
                 try_date = (datetime.datetime.strptime(file_date_str, "%Y%m%d") - datetime.timedelta(days=offset)).strftime('%Y%m%d')
@@ -232,6 +235,7 @@ def supplement_ashare_stocks_from_pending():
                 low_map = dict(zip(df_prices['ts_code'], df_prices['low']))
                 close_map = dict(zip(df_prices['ts_code'], df_prices['close']))
 
+            # 读取现有账本，用于去重（只检查是否已有活跃持仓）
             df_existing = pd.DataFrame()
             if os.path.exists(log_file) and os.path.getsize(log_file) > 0:
                 try:
@@ -283,25 +287,38 @@ def supplement_ashare_stocks_from_pending():
                 else:
                     pct_chg = row.get('Daily_Pct', '')
 
+                # 校准止损位
                 calibrated_stop_loss = row['Stop_Loss']
                 if open_price is not None:
                     calibrated_stop_loss = _recalibrate_stop_loss_ashare(
                         row['Stop_Loss'], row.get('Scan_Ref_Price'), open_price
                     )
 
+                # ==========================================================
+                # 【彻底修复】检查该标的当前是否有活跃持仓，若有则跳过（不写入），
+                # 若无则直接使用 pending 中的原始 Tag 写入，绝不从历史账本读取标签。
+                # ==========================================================
+                skip_this = False
                 if not df_existing.empty:
-                    ticker_latest = df_existing[df_existing['Ticker'] == ticker].sort_values('Date', ascending=False)
-                    if not ticker_latest.empty:
-                        latest_tag = str(ticker_latest.iloc[0].get('Tag', '')).strip()
-                        if latest_tag in {'Stop_Loss_Hit', 'Period_Matured', 'Forced_Exit', 'Dropped', 'Trap_Warning'}:
-                            row['Tag'] = latest_tag
-                            print(f"⏸️ {ticker} 在账本中已标记为 {latest_tag}，同步 pending 标签")
+                    # 检查是否存在 Status == 'Active' 的记录
+                    active_mask = (df_existing['Ticker'] == ticker) & (df_existing['Status'] == 'Active')
+                    if active_mask.any():
+                        print(f"⏭️ {ticker} 当前已有活跃持仓，跳过重复追加")
+                        skip_this = True
+
+                if skip_this:
+                    continue
+
+                # 保留 pending 中的原始 Tag（如果没有，则默认 Core_Dragon）
+                tag = str(row.get('Tag', '')).strip()
+                if tag == '':
+                    tag = 'Core_Dragon'
 
                 new_records.append({
                     'Date': target_date_str,
                     'Ticker': ticker,
                     'Name': row['Name'],
-                    'Tag': row['Tag'],
+                    'Tag': tag,  # 直接使用 pending 中的 Tag，不修改
                     'Industry': row['Industry'],
                     'Open_Price': '' if open_price is None else open_price,
                     'Low_Price': '' if low_price is None else low_price,
@@ -325,7 +342,7 @@ def supplement_ashare_stocks_from_pending():
                         f.write(new_header)
                     for rec in new_records:
                         f.write(",".join(str(rec[c]) for c in new_header_cols) + "\n")
-                print(f"✅ [盘后补充] {pending_file} 成功补充 {len(new_records)} 条A股成交记录")
+                print(f"✅ [盘后补充] {pending_file} 成功补充 {len(new_records)} 条A股成交记录（保留原始标签）")
 
             os.rename(pending_file, f"{pending_file}.processed")
             print(f"📦 {pending_file} 已标记为已处理")
@@ -442,7 +459,6 @@ active_list = []
 expired_list = []
 skipped_duplicate = 0
 
-# 获取今天的日期字符串
 today_str = get_bj_time().strftime('%Y-%m-%d')
 
 for ticker, group in recent_picks.groupby('Ticker'):
@@ -596,11 +612,10 @@ for ticker, group in recent_picks.groupby('Ticker'):
         # ==========================================================
         latest_date_str = latest_row['Date'].strftime('%Y-%m-%d')
         is_new_today = (latest_date_str == today_str)
-        # 打印调试信息，便于排查
-        if latest_date_str == today_str:
+        if is_new_today:
             print(f"✅ {ticker} 今日新增：最新记录日期 {latest_date_str} == {today_str}")
         # ==========================================================
-        
+
         today_open = None
         if 'Open_Price' in first_row and str(first_row['Open_Price']).strip():
             try:
