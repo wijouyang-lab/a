@@ -1,9 +1,8 @@
 # -*- coding: utf-8 -*-
 """
-A股盘后复盘与风控审查引擎（最终修复版 - 基于 Tag 判断活跃）
-- 使用 Tag 区分活跃/终止，不再依赖 Status 列
-- supplement 强制使用 pending 中的 Tag，不修改
-- 今日新增使用最新记录日期判断
+A股盘后复盘与风控审查引擎（终极调试版）
+- 详尽日志输出，便于排查问题
+- 使用 Tag 判断活跃，不依赖 Status
 """
 
 import pandas as pd
@@ -41,7 +40,7 @@ if bj_hour < 15:
     sys.exit(0)
 
 TARGET_MODEL = 'claude-opus-4-8'
-print("启动 A 股盘后复盘引擎（最终修复版）...")
+print("启动 A 股盘后复盘引擎（终极调试版）...")
 
 ts.set_token(os.environ.get("TUSHARE_TOKEN"))
 pro = ts.pro_api()
@@ -152,7 +151,7 @@ def _recalibrate_stop_loss_ashare(stop_loss_str, scan_ref_price, real_open_price
         return stop_loss_str
 
 # ==========================================
-# 2. 补充待确认文件（使用 Tag 判断活跃）
+# 2. 补充待确认文件（带验证日志）
 # ==========================================
 def supplement_ashare_stocks_from_pending():
     log_file = "trade_history.csv"
@@ -168,10 +167,7 @@ def supplement_ashare_stocks_from_pending():
 
     _safe_migrate_table(log_file)
 
-    # 定义活跃标签
     ACTIVE_TAGS = {'Core_Double_Dragon', 'Core_Dragon', 'Sub_Pioneer', 'Observation'}
-    TERMINAL_TAGS = {'Stop_Loss_Hit', 'Period_Matured', 'Forced_Exit', 'Dropped', 'Trap_Warning'}
-
     header_cols = [
         "Date", "Ticker", "Name", "Tag", "Industry",
         "Open_Price", "Low_Price", "Close_Price", "Amount", "Daily_Pct",
@@ -273,12 +269,10 @@ def supplement_ashare_stocks_from_pending():
                         row['Stop_Loss'], row.get('Scan_Ref_Price'), open_price
                     )
 
-                # ==========================================================
-                # 【核心】检查该标的当前是否有活跃持仓（Tag 属于 ACTIVE_TAGS）
-                # ==========================================================
+                # 检查该标的当前是否有活跃持仓
                 skip = False
                 if not df_existing.empty:
-                    # 找出该标的所有记录，按日期降序取最新一条
+                    # 按日期降序取最新一条记录
                     ticker_rows = df_existing[df_existing['Ticker'] == ticker].sort_values('Date', ascending=False)
                     if not ticker_rows.empty:
                         latest_tag = str(ticker_rows.iloc[0].get('Tag', '')).strip()
@@ -289,13 +283,8 @@ def supplement_ashare_stocks_from_pending():
                 if skip:
                     continue
 
-                # 使用 pending 中的 Tag，如果为空则默认 Core_Dragon
-                tag = str(row.get('Tag', '')).strip()
-                if tag == '' or tag in TERMINAL_TAGS:
-                    # 如果 pending 中的 Tag 是终止标签，可能是旧数据，我们强制设为 Core_Dragon
-                    tag = 'Core_Dragon'
-                    print(f"⚠️ {ticker} 的 Tag 被重置为 Core_Dragon（原值为 {row.get('Tag', '空')}）")
-
+                # 强制设置 Tag 为 Core_Dragon
+                tag = 'Core_Dragon'
                 print(f"📝 准备写入 {ticker}，Tag={tag}")
 
                 new_records.append({
@@ -328,6 +317,22 @@ def supplement_ashare_stocks_from_pending():
                         line = ",".join(str(rec[c]) for c in header_cols)
                         f.write(line + "\n")
                         print(f"   ✅ 已追加 {rec['Ticker']} (Tag={rec['Tag']})")
+
+                # ============================================================
+                # 【验证】立即重新读取文件，打印新增的行
+                # ============================================================
+                print("📋 验证写入：重新读取 trade_history.csv 中新增的行...")
+                df_check = pd.read_csv(log_file, keep_default_na=False)
+                df_check['Date'] = pd.to_datetime(df_check['Date'])
+                # 只打印最新追加的几条（按 Ticker 分组取最新）
+                for ticker in [rec['Ticker'] for rec in new_records]:
+                    rows = df_check[df_check['Ticker'] == ticker].sort_values('Date', ascending=False)
+                    if not rows.empty:
+                        latest = rows.iloc[0]
+                        print(f"   -> {ticker}: 日期={latest['Date']}, Tag={latest['Tag']}, 状态={'活跃' if latest['Tag'] in ACTIVE_TAGS else '非活跃'}")
+                    else:
+                        print(f"   -> {ticker}: 未找到记录（写入可能失败）")
+
                 print(f"✅ [盘后补充] {pending_file} 成功追加 {len(new_records)} 条记录")
 
             else:
@@ -362,6 +367,11 @@ try:
     if recent_picks.empty:
         print("⚠️ 最近30天无活跃持仓，退出。")
         sys.exit(0)
+    print(f"📊 加载到 {len(recent_picks)} 条活跃持仓记录")
+    print("📊 活跃持仓摘要：")
+    for ticker, group in recent_picks.groupby('Ticker'):
+        latest = group.sort_values('Date').iloc[-1]
+        print(f"   {ticker}: 最新日期={latest['Date'].strftime('%Y-%m-%d')}, Tag={latest['Tag']}")
 except Exception as e:
     print(f"⚠️ 读取账本失败: {e}")
     sys.exit(1)
@@ -461,7 +471,7 @@ for ticker, group in recent_picks.groupby('Ticker'):
 
     latest_tag = str(latest_row.get('Tag', '')).strip()
     if latest_tag in ['Trap_Warning', 'Forced_Exit', 'Stop_Loss_Hit', 'Period_Matured']:
-        # 如果最新 Tag 是终止标签，说明该标的已经平仓，跳过（理论上不会出现在 recent_picks 中）
+        # 理论上不会出现，因为我们已经过滤了
         continue
 
     hold_period_str = 'N/A'
