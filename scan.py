@@ -366,10 +366,6 @@ def build_current_holdings_card(latest_price_map):
 # 0d. 【新增】读取昨日止损标的，生成联动警告
 # ==========================================
 def get_stop_loss_hit_warning():
-    """
-    读取 trade_history.csv，提取近期被标记为 Stop_Loss_Hit 的标的，
-    生成一条风险警告文本，供 AI 提示词使用。
-    """
     log_file = "trade_history.csv"
     if not os.path.exists(log_file):
         return ""
@@ -1543,19 +1539,16 @@ if __name__ == "__main__":
     chosen = match_pool_to_report(pool_with_news, ai_report_html, DEFAULT_STOP_LOSS_PCT)
 
     # ============================================================
-    # 【修复】写入 trade_history.csv（强制类型 + 验证）
+    # 【修复】改用追加模式写入 trade_history.csv（避免 pd.concat 类型冲突）
     # ============================================================
     if chosen:
         log_file = "trade_history.csv"
         df_new = pd.DataFrame(chosen)
-        
+
         # 去重：过滤已在持仓中的标的
         if os.path.exists(log_file):
             try:
                 df_old = pd.read_csv(log_file, keep_default_na=False)
-                # 强制旧表所有列为 object 类型
-                for col in df_old.columns:
-                    df_old[col] = df_old[col].astype(object)
                 _active_tags = {'Core_Double_Dragon', 'Sub_Pioneer', 'Core_Dragon'}
                 _active_tickers = set(df_old[df_old['Tag'].isin(_active_tags)]['Ticker'].unique())
                 _before_filter = len(df_new)
@@ -1565,48 +1558,29 @@ if __name__ == "__main__":
                     print(f"📋 跳过 {_skipped} 只已在持仓中的标的，不重复追加")
             except Exception as e:
                 print(f"⚠️ 持仓去重过滤失败，继续追加全部: {e}")
-                df_old = None
-        
+
         if not df_new.empty:
-            # 填充日期
-            df_new['Date'] = get_bj_time().strftime('%Y-%m-%d %H:%M:%S')
-            df_new['Close_Price'] = df_new['Close']
-            # 确保所有列存在
+            # 补充缺失列
             cols = ['Date', 'Ticker', 'Name', 'Industry', 'Tag', 'Open_Price', 'Close_Price', 'Amount', 'Daily_Pct', 'Hold_Period', 'Stop_Loss', 'Score', 'ATR_Pct', '周期共振']
             for c in cols:
                 if c not in df_new.columns:
                     df_new[c] = ''
             df_new = df_new[cols]
-            # 强制新表所有列为 object 类型
+            df_new['Date'] = get_bj_time().strftime('%Y-%m-%d %H:%M:%S')
+
+            # 强制所有列转为字符串，确保追加时格式一致
             for col in df_new.columns:
-                df_new[col] = df_new[col].astype(object)
-            
-            # 合并
-            if os.path.exists(log_file) and 'df_old' in locals() and df_old is not None and not df_old.empty:
-                # 确保 df_old 列与 df_new 一致
-                for col in df_new.columns:
-                    if col not in df_old.columns:
-                        df_old[col] = ''
-                df_old = df_old[df_new.columns]
-                df_final = pd.concat([df_old, df_new], ignore_index=True)
-            else:
-                df_final = df_new
-            
-            # 写入前检查
-            if df_final is not None and not df_final.empty:
-                # 记录写入前的文件大小（如果存在）
-                old_size = os.path.getsize(log_file) if os.path.exists(log_file) else 0
-                try:
-                    df_final.to_csv(log_file, index=False, encoding='utf-8')
-                    # 验证写入是否成功
-                    if os.path.exists(log_file) and os.path.getsize(log_file) > old_size:
-                        print(f"✅ 已将 {len(df_new)} 只精选标的入账 trade_history.csv（文件大小 {os.path.getsize(log_file)} 字节，增加 {os.path.getsize(log_file) - old_size} 字节）")
-                    else:
-                        print(f"❌ 写入失败！文件大小未增加（旧: {old_size}，新: {os.path.getsize(log_file) if os.path.exists(log_file) else 0}）")
-                except Exception as e:
-                    print(f"❌ 写入异常: {e}")
-            else:
-                print(f"⚠️ df_final 为空，写入跳过")
+                df_new[col] = df_new[col].astype(str)
+
+            # 判断是否需要写表头
+            file_exists = os.path.exists(log_file) and os.path.getsize(log_file) > 0
+
+            # 直接追加模式
+            try:
+                df_new.to_csv(log_file, mode='a', header=not file_exists, index=False, encoding='utf-8')
+                print(f"✅ 已将 {len(df_new)} 只精选标的追加至 trade_history.csv（追加模式）")
+            except Exception as e:
+                print(f"❌ 追加写入失败: {e}")
         else:
             print("📋 今日无新入选标的，全部已在持仓中，跳过入账。")
     else:
