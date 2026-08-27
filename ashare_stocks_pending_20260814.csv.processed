@@ -1,7 +1,0 @@
-Date,Ticker,Name,Tag,Industry,Amount,Daily_Pct,Hold_Period,Stop_Loss,Score,Status,Scan_Ref_Price
-2026-08-14,000977.SZ,浪潮信息,Core_Dragon,IT设备,11947134.569,5.9184,7-12天,71.00元,78,pending,77.01
-2026-08-14,301396.SZ,宏景科技,Observation,软件服务,7606809.21347,4.8601,观望,观望,N/A,pending,209.67
-2026-08-14,603019.SH,中科曙光,Core_Dragon,IT设备,7492434.067,3.7144,7-10天,82.00元,79,pending,87.29
-2026-08-14,600396.SH,华电辽能,Observation,火力发电,6432438.907,9.0221,观望,观望,N/A,pending,16.8
-2026-08-14,300759.SZ,康龙化成,Observation,化学制药,5158058.65057,3.9666,观望,观望,N/A,pending,47.81
-2026-08-14,600664.SH,哈药股份,Observation,化学制药,4487849.333,0.5675,观望,观望,N/A,pending,8.9
