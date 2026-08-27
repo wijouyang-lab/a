@@ -1,8 +1,9 @@
 # -*- coding: utf-8 -*-
 """
-A股盘后复盘与风控审查引擎（Hold_Period 自动修复版）
-- 自动填充缺失的 Hold_Period
-- 使用 Tag 判断活跃，不依赖 Status
+A股盘后复盘与风控审查引擎（终极可靠版）
+- 完全重构 supplement，确保可靠追加
+- 只检查最近30天活跃持仓，避免历史误判
+- 强制列对齐，确保写入正确
 """
 
 import pandas as pd
@@ -40,7 +41,7 @@ if bj_hour < 15:
     sys.exit(0)
 
 TARGET_MODEL = 'claude-opus-4-8'
-print("启动 A 股盘后复盘引擎（Hold_Period 自动修复版）...")
+print("启动 A 股盘后复盘引擎（终极可靠版）...")
 
 ts.set_token(os.environ.get("TUSHARE_TOKEN"))
 pro = ts.pro_api()
@@ -71,62 +72,53 @@ def get_live_quote(ticker):
         print(f"⚠️ 实时行情兜底查询失败 [{ticker}]: {e}")
         return None, None
 
-def _safe_migrate_table(log_file):
-    if not (os.path.exists(log_file) and os.path.getsize(log_file) > 0):
-        return
+def _ensure_table_columns(log_file):
+    """
+    确保表头包含所有必要列，并返回当前表头列列表。
+    如果缺失列，则添加并填充空值。
+    """
+    if not os.path.exists(log_file) or os.path.getsize(log_file) == 0:
+        # 文件不存在或为空，使用默认表头
+        default_cols = [
+            "Date", "Ticker", "Name", "Tag", "Industry",
+            "Open_Price", "Low_Price", "Close_Price", "Amount", "Daily_Pct",
+            "Hold_Period", "Stop_Loss", "Score", "ATR_Pct", "周期共振"
+        ]
+        return default_cols
+
     with open(log_file, "r", encoding="utf-8") as f:
-        lines = f.readlines()
-    if not lines:
-        return
-    header = lines[0].strip()
-    old_cols = [c.strip() for c in header.split(",")]
-    old_count = len(old_cols)
-    needs_open = "Open_Price" not in old_cols
-    needs_low = "Low_Price" not in old_cols
-    needs_atr = "ATR_Pct" not in old_cols
-    if not (needs_open or needs_low or needs_atr):
-        return
-    new_cols = old_cols[:]
-    if needs_open:
-        idx = new_cols.index("Close_Price") if "Close_Price" in new_cols else len(new_cols)
-        new_cols.insert(idx, "Open_Price")
-    if needs_low:
-        idx = new_cols.index("Close_Price") + 1 if "Close_Price" in new_cols else len(new_cols)
-        new_cols.insert(idx, "Low_Price")
-    if needs_atr:
-        new_cols.append("ATR_Pct")
-    new_count = len(new_cols)
-    data_lines = lines[1:]
-    fixed = []
-    for line in data_lines:
-        if not line.strip():
-            continue
-        reader = csv.reader([line])
-        fields = next(reader)
-        if len(fields) < old_count:
-            fields += [""] * (old_count - len(fields))
-        elif len(fields) > old_count:
-            fields = fields[:old_count]
-        new_row = []
-        for col in new_cols:
-            if col in old_cols:
-                idx = old_cols.index(col)
-                new_row.append(fields[idx] if idx < len(fields) else "")
-            else:
-                new_row.append("")
-        if len(new_row) < new_count:
-            new_row += [""] * (new_count - len(new_row))
-        fixed.append(",".join(new_row))
-    with open(log_file, "w", encoding="utf-8") as f:
-        f.write(",".join(new_cols) + "\n")
-        f.write("\n".join(fixed))
-        if fixed:
-            f.write("\n")
-    added = []
-    if needs_open: added.append("Open_Price")
-    if needs_low: added.append("Low_Price")
-    if needs_atr: added.append("ATR_Pct")
-    print(f"⚠️ 表头升级：增加 {added}，已迁移 {len(fixed)} 行。")
+        header = f.readline().strip()
+    cols = [c.strip() for c in header.split(",")]
+    # 确保所有必要列存在
+    required = ["Date", "Ticker", "Name", "Tag", "Industry",
+                "Open_Price", "Low_Price", "Close_Price", "Amount", "Daily_Pct",
+                "Hold_Period", "Stop_Loss", "Score", "ATR_Pct", "周期共振"]
+    missing = [c for c in required if c not in cols]
+    if missing:
+        # 添加缺失列（简单追加到末尾）
+        with open(log_file, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+        # 更新表头
+        new_cols = cols + missing
+        new_header = ",".join(new_cols) + "\n"
+        # 处理数据行，为缺失列补空值
+        data_lines = lines[1:]
+        fixed = []
+        for line in data_lines:
+            if not line.strip():
+                continue
+            fields = line.rstrip("\n").split(",")
+            # 补齐到新列数
+            while len(fields) < len(new_cols):
+                fields.append("")
+            fixed.append(",".join(fields))
+        with open(log_file, "w", encoding="utf-8") as f:
+            f.write(new_header)
+            if fixed:
+                f.write("\n".join(fixed) + "\n")
+        print(f"⚠️ 表头补全：添加列 {missing}")
+        cols = new_cols
+    return cols
 
 def _recalibrate_stop_loss_ashare(stop_loss_str, scan_ref_price, real_open_price):
     try:
@@ -148,7 +140,7 @@ def _recalibrate_stop_loss_ashare(stop_loss_str, scan_ref_price, real_open_price
         return stop_loss_str
 
 # ==========================================
-# 2. 补充待确认文件
+# 2. 补充待确认文件（完全重写）
 # ==========================================
 def supplement_ashare_stocks_from_pending():
     log_file = "trade_history.csv"
@@ -162,15 +154,13 @@ def supplement_ashare_stocks_from_pending():
 
     print(f"📋 发现 {len(pending_files)} 份待确认文件：{pending_files}")
 
-    _safe_migrate_table(log_file)
+    # 确保表头完整，获取当前列顺序
+    existing_cols = _ensure_table_columns(log_file)
+    print(f"📋 当前表头列：{existing_cols}")
 
     ACTIVE_TAGS = {'Core_Double_Dragon', 'Core_Dragon', 'Sub_Pioneer', 'Observation'}
-    header_cols = [
-        "Date", "Ticker", "Name", "Tag", "Industry",
-        "Open_Price", "Low_Price", "Close_Price", "Amount", "Daily_Pct",
-        "Hold_Period", "Stop_Loss", "Score", "ATR_Pct", "周期共振"
-    ]
-    header_line = ",".join(header_cols) + "\n"
+    today_str = get_bj_time().strftime('%Y-%m-%d')
+    cutoff_date = get_bj_time() - datetime.timedelta(days=30)
 
     for pending_file in pending_files:
         m = re.search(r"ashare_stocks_pending_(\d{8})\.csv", pending_file)
@@ -179,7 +169,7 @@ def supplement_ashare_stocks_from_pending():
             continue
         file_date_str = m.group(1)
         target_date_str = f"{file_date_str[:4]}-{file_date_str[4:6]}-{file_date_str[6:]}"
-        is_today = (target_date_str == get_bj_time().strftime('%Y-%m-%d'))
+        is_today = (target_date_str == today_str)
 
         print(f"📡 处理 {pending_file}（交易日 {target_date_str}）...")
 
@@ -207,7 +197,7 @@ def supplement_ashare_stocks_from_pending():
                 low_map = dict(zip(df_prices['ts_code'], df_prices['low']))
                 close_map = dict(zip(df_prices['ts_code'], df_prices['close']))
 
-            # 读取现有账本
+            # 读取现有账本（用于去重）
             df_existing = pd.DataFrame()
             if os.path.exists(log_file) and os.path.getsize(log_file) > 0:
                 try:
@@ -225,6 +215,7 @@ def supplement_ashare_stocks_from_pending():
                 low_price = low_map.get(ticker)
                 close_price = close_map.get(ticker)
 
+                # 单独查询
                 if open_price is None or low_price is None or close_price is None:
                     try:
                         df_single = pro.daily(ts_code=ticker, start_date=file_date_str, end_date=file_date_str,
@@ -265,27 +256,33 @@ def supplement_ashare_stocks_from_pending():
                         row['Stop_Loss'], row.get('Scan_Ref_Price'), open_price
                     )
 
-                # 检查是否已有活跃持仓
+                # ==========================================================
+                # 【关键】检查最近30天内是否有活跃持仓
+                # ==========================================================
                 skip = False
                 if not df_existing.empty:
-                    ticker_rows = df_existing[df_existing['Ticker'] == ticker].sort_values('Date', ascending=False)
-                    if not ticker_rows.empty:
-                        latest_tag = str(ticker_rows.iloc[0].get('Tag', '')).strip()
-                        if latest_tag in ACTIVE_TAGS:
-                            print(f"⏭️ {ticker} 当前已有活跃持仓（Tag={latest_tag}），跳过追加")
-                            skip = True
+                    df_recent = df_existing[df_existing['Date'] >= cutoff_date.replace(tzinfo=None)]
+                    active_mask = (df_recent['Ticker'] == ticker) & (df_recent['Tag'].isin(ACTIVE_TAGS))
+                    if active_mask.any():
+                        print(f"⏭️ {ticker} 最近30天内有活跃持仓，跳过追加")
+                        skip = True
 
                 if skip:
                     continue
 
-                # 强制设置 Tag 为 Core_Dragon，并确保 Hold_Period 有效
+                # 强制使用 Core_Dragon
                 tag = 'Core_Dragon'
                 hold_period = str(row.get('Hold_Period', '')).strip()
                 if hold_period == '' or hold_period.lower() in ['', 'n/a', 'nan', 'none', '观望']:
                     hold_period = '5-10天'
                     print(f"⚠️ {ticker} Hold_Period 缺失，使用默认值 '5-10天'")
+                else:
+                    # 保留原值，但确保格式正确（如果是纯数字可能缺少“天”）
+                    if not re.search(r'\d+.*天', hold_period):
+                        hold_period = hold_period + '天'  # 简单补天
 
-                new_records.append({
+                # 组装记录（按现有表头顺序）
+                rec = {
                     'Date': target_date_str,
                     'Ticker': ticker,
                     'Name': row['Name'],
@@ -301,7 +298,8 @@ def supplement_ashare_stocks_from_pending():
                     'Score': row['Score'],
                     'ATR_Pct': row.get('ATR_Pct', ''),
                     '周期共振': row.get('周期共振', ''),
-                })
+                }
+                new_records.append(rec)
 
             if missing_price_tickers:
                 print(f"⚠️ 以下标的无完整价格: {missing_price_tickers}")
@@ -310,9 +308,10 @@ def supplement_ashare_stocks_from_pending():
                 need_header = not os.path.exists(log_file) or os.path.getsize(log_file) == 0
                 with open(log_file, "a", encoding="utf-8") as f:
                     if need_header:
-                        f.write(header_line)
+                        f.write(",".join(existing_cols) + "\n")
                     for rec in new_records:
-                        line = ",".join(str(rec[c]) for c in header_cols)
+                        # 按现有列顺序写入
+                        line = ",".join(str(rec.get(col, '')) for col in existing_cols)
                         f.write(line + "\n")
                         print(f"   ✅ 已追加 {rec['Ticker']} (Tag={rec['Tag']}, Hold_Period={rec['Hold_Period']})")
 
@@ -329,7 +328,7 @@ def supplement_ashare_stocks_from_pending():
 supplement_ashare_stocks_from_pending()
 
 # ==========================================
-# 3. 加载账本，修复 Hold_Period 缺失
+# 3. 加载账本，过滤有效持仓
 # ==========================================
 log_file = "trade_history.csv"
 if not os.path.exists(log_file):
@@ -339,41 +338,17 @@ if not os.path.exists(log_file):
 try:
     df = pd.read_csv(log_file, keep_default_na=False, on_bad_lines='warn')
     df['Date'] = pd.to_datetime(df['Date'])
-    
-    # 定义活跃标签
     ACTIVE_TAGS = {'Core_Double_Dragon', 'Core_Dragon', 'Sub_Pioneer', 'Observation'}
     cutoff_date = get_bj_time() - datetime.timedelta(days=30)
-    
-    # 取出所有在最近30天内且 Tag 为活跃的记录
     recent_picks = df[
         (df['Date'] >= cutoff_date.replace(tzinfo=None)) &
         (df['Tag'].isin(ACTIVE_TAGS))
     ].copy()
-    
-    # ============================================================
-    # 【关键修复】为所有 Tag=Core_Dragon 且 Hold_Period 无效的行填充默认值
-    # ============================================================
-    # 先按 Ticker 分组，从同一 Ticker 的历史有效 Hold_Period 中继承，若无则用默认值
-    for ticker, group in recent_picks.groupby('Ticker'):
-        # 查找该 Ticker 历史记录中有效的 Hold_Period
-        hist_rows = df[df['Ticker'] == ticker]
-        valid_hp = hist_rows[~hist_rows['Hold_Period'].astype(str).str.lower().isin(['', 'n/a', 'nan', 'none', '观望'])]['Hold_Period'].tolist()
-        # 默认值
-        default_hp = '5-10天'
-        fallback_hp = valid_hp[-1] if valid_hp else default_hp
-        
-        # 更新当前组中 Hold_Period 无效的行
-        mask = recent_picks['Ticker'] == ticker
-        invalid_hp_mask = mask & (recent_picks['Hold_Period'].astype(str).str.lower().isin(['', 'n/a', 'nan', 'none', '观望']))
-        if invalid_hp_mask.any():
-            recent_picks.loc[invalid_hp_mask, 'Hold_Period'] = fallback_hp
-            print(f"🔧 修复 {ticker} 的 Hold_Period 为 '{fallback_hp}'")
-    
     if recent_picks.empty:
         print("⚠️ 最近30天无活跃持仓，退出。")
         sys.exit(0)
     print(f"📊 加载到 {len(recent_picks)} 条活跃持仓记录")
-    print("📊 活跃持仓摘要：")
+    # 打印摘要
     for ticker, group in recent_picks.groupby('Ticker'):
         latest = group.sort_values('Date').iloc[-1]
         print(f"   {ticker}: 最新日期={latest['Date'].strftime('%Y-%m-%d')}, Tag={latest['Tag']}, Hold_Period={latest.get('Hold_Period', 'N/A')}")
@@ -381,17 +356,25 @@ except Exception as e:
     print(f"⚠️ 读取账本失败: {e}")
     sys.exit(1)
 
-# 版本过滤：只保留 Hold_Period 有效的行（已修复过，这里可以保留，但不会过滤掉任何行）
+# 版本过滤：只保留 Hold_Period 有效的行（但对于 Observation 可以宽松）
 _INVALID = {'', 'n/a', 'nan', 'none'}
 for col in ['Hold_Period', 'Stop_Loss', 'Score']:
     if col not in recent_picks.columns:
         recent_picks[col] = ''
 
-valid = recent_picks['Hold_Period'].astype(str).str.strip().str.lower().map(lambda v: v not in _INVALID)
-dropped = (~valid).sum()
+# 对于 Core_Dragon 必须要求 Hold_Period 有效，Observation 可以宽松
+def is_valid_hold_period(val):
+    s = str(val).strip().lower()
+    return s not in _INVALID and s not in ['观望', '坚决空仓']
+
+valid_mask = recent_picks.apply(
+    lambda row: is_valid_hold_period(row['Hold_Period']) if row['Tag'] == 'Core_Dragon' else True,
+    axis=1
+)
+dropped = (~valid_mask).sum()
 if dropped:
-    print(f"🗂️ 过滤掉 {dropped} 条不完整记录（Hold_Period 缺失）")
-recent_picks = recent_picks[valid].copy()
+    print(f"🗂️ 过滤掉 {dropped} 条 Core_Dragon 记录（Hold_Period 无效）")
+recent_picks = recent_picks[valid_mask].copy()
 
 if recent_picks.empty:
     print("⚠️ 无有效持仓，退出。")
@@ -499,10 +482,10 @@ for ticker, group in recent_picks.groupby('Ticker'):
 
     hold_days = parse_hold_days(hold_period_str)
     if hold_days is None:
-        # 如果还为空，使用默认值继续
-        print(f"⏭️ {ticker} Hold_Period 仍无效，尝试使用默认值 5-10天")
-        hold_days = 7  # 默认 7 天
+        # 如果仍无效，强制使用默认值
+        hold_days = 7
         hold_period_str = "5-10天"
+        print(f"⚠️ {ticker} Hold_Period 无法解析，使用默认值 7天")
 
     try:
         rec_price = float(first_row.get('Open_Price', 0))
