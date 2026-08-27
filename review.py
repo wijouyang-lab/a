@@ -1,11 +1,9 @@
 # -*- coding: utf-8 -*-
 """
-A股盘后复盘与风控审查引擎（极简可靠版）
-- 使用当日最低价（Low_Price）判断是否触发止损
-- 自动升级表头，补充 Low_Price 列（安全升级，不丢数据）
-- 止损优先于到期，结算价 = 止损价
-- 与 scan.py 生成的 ashare_stocks_pending_*.csv 联动
-- 今日新增标的纳入胜率统计
+A股盘后复盘与风控审查引擎（最终修复版 - 基于 Tag 判断活跃）
+- 使用 Tag 区分活跃/终止，不再依赖 Status 列
+- supplement 强制使用 pending 中的 Tag，不修改
+- 今日新增使用最新记录日期判断
 """
 
 import pandas as pd
@@ -26,7 +24,7 @@ import sys
 # ==========================================
 _missing_env = [k for k in ("CLAWSOCKET_API_KEY", "CLAWSOCKET_BASE_URL", "TUSHARE_TOKEN") if not os.environ.get(k)]
 if _missing_env:
-    print(f"致命错误：未检测到环境变量 {', '.join(_missing_env)}！请检查 GitHub Secrets 配置。")
+    print(f"致命错误：未检测到环境变量 {', '.join(_missing_env)}！")
     sys.exit(1)
 
 BEIJING_TZ = datetime.timezone(datetime.timedelta(hours=8))
@@ -43,9 +41,8 @@ if bj_hour < 15:
     sys.exit(0)
 
 TARGET_MODEL = 'claude-opus-4-8'
-print("启动 A 股盘后复盘引擎（极简可靠版）...")
+print("启动 A 股盘后复盘引擎（最终修复版）...")
 
-# 初始化 tushare
 ts.set_token(os.environ.get("TUSHARE_TOKEN"))
 pro = ts.pro_api()
 
@@ -53,7 +50,6 @@ pro = ts.pro_api()
 # 1. 辅助函数
 # ==========================================
 def get_live_quote(ticker):
-    """实时行情兜底（仅用于今日新增标的）"""
     try:
         bare_code = ticker.split('.')[0] if '.' in ticker else ticker
         df_rt = ts.get_realtime_quotes(bare_code)
@@ -64,12 +60,12 @@ def get_live_quote(ticker):
         try:
             v = float(row.get('open', 0))
             open_p = v if v > 0 else None
-        except (ValueError, TypeError):
+        except:
             pass
         try:
             v = float(row.get('price', 0))
             last_p = v if v > 0 else None
-        except (ValueError, TypeError):
+        except:
             pass
         return open_p, last_p
     except Exception as e:
@@ -78,27 +74,22 @@ def get_live_quote(ticker):
 
 def _safe_migrate_table(log_file):
     """
-    安全升级表头：增加 Open_Price, Low_Price, ATR_Pct（若缺失）。
-    用 csv 模块逐行处理，保证字段数一致。
+    确保表头包含 Open_Price, Low_Price, ATR_Pct (若缺失则添加)
     """
     if not (os.path.exists(log_file) and os.path.getsize(log_file) > 0):
         return
-
     with open(log_file, "r", encoding="utf-8") as f:
         lines = f.readlines()
     if not lines:
         return
-
     header = lines[0].strip()
     old_cols = [c.strip() for c in header.split(",")]
     old_count = len(old_cols)
-
     needs_open = "Open_Price" not in old_cols
     needs_low = "Low_Price" not in old_cols
     needs_atr = "ATR_Pct" not in old_cols
     if not (needs_open or needs_low or needs_atr):
         return
-
     new_cols = old_cols[:]
     if needs_open:
         idx = new_cols.index("Close_Price") if "Close_Price" in new_cols else len(new_cols)
@@ -108,9 +99,7 @@ def _safe_migrate_table(log_file):
         new_cols.insert(idx, "Low_Price")
     if needs_atr:
         new_cols.append("ATR_Pct")
-
     new_count = len(new_cols)
-
     data_lines = lines[1:]
     fixed = []
     for line in data_lines:
@@ -118,30 +107,25 @@ def _safe_migrate_table(log_file):
             continue
         reader = csv.reader([line])
         fields = next(reader)
-        # 补齐/截断到旧列数
         if len(fields) < old_count:
             fields += [""] * (old_count - len(fields))
         elif len(fields) > old_count:
             fields = fields[:old_count]
-
-        # 按新表头顺序重新组装
         new_row = []
         for col in new_cols:
             if col in old_cols:
                 idx = old_cols.index(col)
                 new_row.append(fields[idx] if idx < len(fields) else "")
             else:
-                new_row.append("")  # 新增列空值
+                new_row.append("")
         if len(new_row) < new_count:
             new_row += [""] * (new_count - len(new_row))
         fixed.append(",".join(new_row))
-
     with open(log_file, "w", encoding="utf-8") as f:
         f.write(",".join(new_cols) + "\n")
         f.write("\n".join(fixed))
         if fixed:
             f.write("\n")
-
     added = []
     if needs_open: added.append("Open_Price")
     if needs_low: added.append("Low_Price")
@@ -168,7 +152,7 @@ def _recalibrate_stop_loss_ashare(stop_loss_str, scan_ref_price, real_open_price
         return stop_loss_str
 
 # ==========================================
-# 2. 补充待确认文件（极简可靠版）
+# 2. 补充待确认文件（使用 Tag 判断活跃）
 # ==========================================
 def supplement_ashare_stocks_from_pending():
     log_file = "trade_history.csv"
@@ -182,10 +166,12 @@ def supplement_ashare_stocks_from_pending():
 
     print(f"📋 发现 {len(pending_files)} 份待确认文件：{pending_files}")
 
-    # 升级表头（如果有缺失列）
     _safe_migrate_table(log_file)
 
-    # 表头列（保持与现有文件一致）
+    # 定义活跃标签
+    ACTIVE_TAGS = {'Core_Double_Dragon', 'Core_Dragon', 'Sub_Pioneer', 'Observation'}
+    TERMINAL_TAGS = {'Stop_Loss_Hit', 'Period_Matured', 'Forced_Exit', 'Dropped', 'Trap_Warning'}
+
     header_cols = [
         "Date", "Ticker", "Name", "Tag", "Industry",
         "Open_Price", "Low_Price", "Close_Price", "Amount", "Daily_Pct",
@@ -210,7 +196,7 @@ def supplement_ashare_stocks_from_pending():
                 os.rename(pending_file, f"{pending_file}.processed")
                 continue
 
-            # 获取 OHLC 数据
+            # 获取 OHLC
             df_prices = None
             for offset in range(0, 5):
                 try_date = (datetime.datetime.strptime(file_date_str, "%Y%m%d") - datetime.timedelta(days=offset)).strftime('%Y%m%d')
@@ -228,7 +214,7 @@ def supplement_ashare_stocks_from_pending():
                 low_map = dict(zip(df_prices['ts_code'], df_prices['low']))
                 close_map = dict(zip(df_prices['ts_code'], df_prices['close']))
 
-            # 读取现有账本（只用于检查活跃持仓）
+            # 读取现有账本（用于检查是否存在活跃持仓）
             df_existing = pd.DataFrame()
             if os.path.exists(log_file) and os.path.getsize(log_file) > 0:
                 try:
@@ -261,7 +247,6 @@ def supplement_ashare_stocks_from_pending():
                     except:
                         pass
 
-                # 实时兜底
                 if (open_price is None or low_price is None or close_price is None) and is_today:
                     live_open, live_last = get_live_quote(ticker)
                     if open_price is None:
@@ -274,7 +259,6 @@ def supplement_ashare_stocks_from_pending():
                 if open_price is None or close_price is None:
                     missing_price_tickers.append(ticker)
 
-                # 涨跌幅
                 if open_price is not None and close_price is not None:
                     try:
                         pct_chg = round((float(close_price) - float(open_price)) / float(open_price) * 100, 2)
@@ -283,7 +267,6 @@ def supplement_ashare_stocks_from_pending():
                 else:
                     pct_chg = row.get('Daily_Pct', '')
 
-                # 校准止损位
                 calibrated_stop_loss = row['Stop_Loss']
                 if open_price is not None:
                     calibrated_stop_loss = _recalibrate_stop_loss_ashare(
@@ -291,29 +274,35 @@ def supplement_ashare_stocks_from_pending():
                     )
 
                 # ==========================================================
-                # 【核心】检查该标的当前是否有活跃持仓（Status == 'Active'）
-                # 若有则跳过，若无则直接使用 pending 中的 Tag 写入
+                # 【核心】检查该标的当前是否有活跃持仓（Tag 属于 ACTIVE_TAGS）
                 # ==========================================================
                 skip = False
                 if not df_existing.empty:
-                    active_mask = (df_existing['Ticker'] == ticker) & (df_existing['Status'] == 'Active')
-                    if active_mask.any():
-                        print(f"⏭️ {ticker} 当前已有活跃持仓，跳过重复追加")
-                        skip = True
+                    # 找出该标的所有记录，按日期降序取最新一条
+                    ticker_rows = df_existing[df_existing['Ticker'] == ticker].sort_values('Date', ascending=False)
+                    if not ticker_rows.empty:
+                        latest_tag = str(ticker_rows.iloc[0].get('Tag', '')).strip()
+                        if latest_tag in ACTIVE_TAGS:
+                            print(f"⏭️ {ticker} 当前已有活跃持仓（Tag={latest_tag}），跳过追加")
+                            skip = True
 
                 if skip:
                     continue
 
-                # 使用 pending 中的 Tag（如果为空则默认 Core_Dragon）
+                # 使用 pending 中的 Tag，如果为空则默认 Core_Dragon
                 tag = str(row.get('Tag', '')).strip()
-                if tag == '':
+                if tag == '' or tag in TERMINAL_TAGS:
+                    # 如果 pending 中的 Tag 是终止标签，可能是旧数据，我们强制设为 Core_Dragon
                     tag = 'Core_Dragon'
+                    print(f"⚠️ {ticker} 的 Tag 被重置为 Core_Dragon（原值为 {row.get('Tag', '空')}）")
+
+                print(f"📝 准备写入 {ticker}，Tag={tag}")
 
                 new_records.append({
                     'Date': target_date_str,
                     'Ticker': ticker,
                     'Name': row['Name'],
-                    'Tag': tag,  # 直接使用 pending 中的 Tag
+                    'Tag': tag,
                     'Industry': row['Industry'],
                     'Open_Price': '' if open_price is None else open_price,
                     'Low_Price': '' if low_price is None else low_price,
@@ -336,8 +325,13 @@ def supplement_ashare_stocks_from_pending():
                     if need_header:
                         f.write(header_line)
                     for rec in new_records:
-                        f.write(",".join(str(rec[c]) for c in header_cols) + "\n")
-                print(f"✅ [盘后补充] {pending_file} 成功追加 {len(new_records)} 条记录（Tag 保留原始值）")
+                        line = ",".join(str(rec[c]) for c in header_cols)
+                        f.write(line + "\n")
+                        print(f"   ✅ 已追加 {rec['Ticker']} (Tag={rec['Tag']})")
+                print(f"✅ [盘后补充] {pending_file} 成功追加 {len(new_records)} 条记录")
+
+            else:
+                print(f"ℹ️ {pending_file} 无新记录需要追加")
 
             os.rename(pending_file, f"{pending_file}.processed")
             print(f"📦 {pending_file} 已标记为已处理")
@@ -348,7 +342,7 @@ def supplement_ashare_stocks_from_pending():
 supplement_ashare_stocks_from_pending()
 
 # ==========================================
-# 3. 加载账本，过滤有效持仓
+# 3. 加载账本，过滤有效持仓（使用 Tag 判断）
 # ==========================================
 log_file = "trade_history.csv"
 if not os.path.exists(log_file):
@@ -358,16 +352,21 @@ if not os.path.exists(log_file):
 try:
     df = pd.read_csv(log_file, keep_default_na=False, on_bad_lines='warn')
     df['Date'] = pd.to_datetime(df['Date'])
+    # 只取最近30天且 Tag 为活跃标签的记录
+    ACTIVE_TAGS = {'Core_Double_Dragon', 'Core_Dragon', 'Sub_Pioneer', 'Observation'}
     cutoff_date = get_bj_time() - datetime.timedelta(days=30)
-    recent_picks = df[df['Date'] >= cutoff_date.replace(tzinfo=None)].copy()
+    recent_picks = df[
+        (df['Date'] >= cutoff_date.replace(tzinfo=None)) &
+        (df['Tag'].isin(ACTIVE_TAGS))
+    ].copy()
     if recent_picks.empty:
-        print("⚠️ 最近30天无交易记录，退出。")
+        print("⚠️ 最近30天无活跃持仓，退出。")
         sys.exit(0)
 except Exception as e:
     print(f"⚠️ 读取账本失败: {e}")
     sys.exit(1)
 
-# 版本过滤
+# 版本过滤：只保留 Hold_Period 有效的行
 _INVALID = {'', 'n/a', 'nan', 'none'}
 for col in ['Hold_Period', 'Stop_Loss', 'Score']:
     if col not in recent_picks.columns:
@@ -383,12 +382,8 @@ if recent_picks.empty:
     print("⚠️ 无有效持仓，退出。")
     sys.exit(0)
 
-no_sl = recent_picks['Stop_Loss'].astype(str).str.strip().str.lower().isin(_INVALID)
-if no_sl.sum():
-    print(f"⚠️ {no_sl.sum()} 条记录 Stop_Loss 缺失，将继续追踪但无法做止损判断。")
-
 # ==========================================
-# 4. 获取历史行情
+# 4. 获取历史行情（含 OHLC）
 # ==========================================
 start_hist = (get_bj_time() - datetime.timedelta(days=60)).strftime('%Y%m%d')
 end_hist = get_bj_time().strftime('%Y%m%d')
@@ -456,6 +451,8 @@ expired_list = []
 skipped_duplicate = 0
 today_str = get_bj_time().strftime('%Y-%m-%d')
 
+print(f"开始处理 {len(recent_picks)} 条活跃持仓记录...")
+
 for ticker, group in recent_picks.groupby('Ticker'):
     group = group.sort_values('Date')
     first_row = group.iloc[0]
@@ -464,7 +461,7 @@ for ticker, group in recent_picks.groupby('Ticker'):
 
     latest_tag = str(latest_row.get('Tag', '')).strip()
     if latest_tag in ['Trap_Warning', 'Forced_Exit', 'Stop_Loss_Hit', 'Period_Matured']:
-        print(f"⏸️ {ticker} 已终止，跳过")
+        # 如果最新 Tag 是终止标签，说明该标的已经平仓，跳过（理论上不会出现在 recent_picks 中）
         continue
 
     hold_period_str = 'N/A'
@@ -501,7 +498,7 @@ for ticker, group in recent_picks.groupby('Ticker'):
     maturity_date_dt = first_row['Date'] + datetime.timedelta(days=hold_days)
     maturity_date = maturity_date_dt.strftime('%Y-%m-%d')
 
-    # 获取当日最低价（触及即止损）
+    # 获取当日最低价
     today_low = None
     if 'Low_Price' in first_row and str(first_row['Low_Price']).strip():
         try:
@@ -821,7 +818,6 @@ total_count = active_count + closed_count
 
 new_today_count = sum(1 for x in active_list if x.get('今日新增') == '是')
 
-# 【修复】今日新增的标的已有完整交易日数据，应纳入胜率统计
 _win_rate_pool = [x for x in active_list if isinstance(x['当前盈亏(%)'], (int, float))]
 active_wins = sum(1 for x in _win_rate_pool if x['当前盈亏(%)'] > 0)
 active_win_rate = (active_wins / len(_win_rate_pool) * 100) if _win_rate_pool else 0.0
