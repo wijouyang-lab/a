@@ -556,10 +556,14 @@ for ticker, group in recent_picks.groupby('Ticker'):
         # 锁定 trade_history 状态
         try:
             df_stop = pd.read_csv(log_file, keep_default_na=False)
+            # ========== 【修复】确保 Exit_Price 和 Exit_Date 列为 object 类型 ==========
+            for col in ['Exit_Price', 'Exit_Date']:
+                if col in df_stop.columns:
+                    df_stop[col] = df_stop[col].astype(object)
+            # ======================================================================
             terminal_tags = {'Stop_Loss_Hit', 'Period_Matured', 'Forced_Exit', 'Dropped', 'Trap_Warning'}
             mask = (df_stop['Ticker'].astype(str) == ticker) & (~df_stop['Tag'].astype(str).isin(terminal_tags))
             df_stop.loc[mask, 'Tag'] = 'Stop_Loss_Hit'
-            # 也可记录 Exit_Price 和 Exit_Date（若列存在）
             if 'Exit_Price' in df_stop.columns and 'Exit_Date' in df_stop.columns:
                 df_stop.loc[mask, 'Exit_Price'] = exit_price
                 df_stop.loc[mask, 'Exit_Date'] = get_bj_time().strftime('%Y-%m-%d')
