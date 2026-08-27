@@ -1539,50 +1539,54 @@ if __name__ == "__main__":
     chosen = match_pool_to_report(pool_with_news, ai_report_html, DEFAULT_STOP_LOSS_PCT)
 
     # ============================================================
-    # 【修复】改用追加模式写入 trade_history.csv（避免 pd.concat 类型冲突）
+    # 【修复】生成 pending 文件，由 review.py 盘后补充
     # ============================================================
     if chosen:
-        log_file = "trade_history.csv"
-        df_new = pd.DataFrame(chosen)
-
-        # 去重：过滤已在持仓中的标的
-        if os.path.exists(log_file):
+        # 过滤已在持仓中的标的
+        if os.path.exists("trade_history.csv"):
             try:
-                df_old = pd.read_csv(log_file, keep_default_na=False)
+                df_old = pd.read_csv("trade_history.csv", keep_default_na=False)
                 _active_tags = {'Core_Double_Dragon', 'Sub_Pioneer', 'Core_Dragon'}
                 _active_tickers = set(df_old[df_old['Tag'].isin(_active_tags)]['Ticker'].unique())
-                _before_filter = len(df_new)
-                df_new = df_new[~df_new['Ticker'].isin(_active_tickers)]
-                _skipped = _before_filter - len(df_new)
+                _before_filter = len(chosen)
+                chosen = [item for item in chosen if item['Ticker'] not in _active_tickers]
+                _skipped = _before_filter - len(chosen)
                 if _skipped > 0:
                     print(f"📋 跳过 {_skipped} 只已在持仓中的标的，不重复追加")
             except Exception as e:
-                print(f"⚠️ 持仓去重过滤失败，继续追加全部: {e}")
+                print(f"⚠️ 持仓去重过滤失败: {e}")
 
-        if not df_new.empty:
-            # 补充缺失列
-            cols = ['Date', 'Ticker', 'Name', 'Industry', 'Tag', 'Open_Price', 'Close_Price', 'Amount', 'Daily_Pct', 'Hold_Period', 'Stop_Loss', 'Score', 'ATR_Pct', '周期共振']
-            for c in cols:
-                if c not in df_new.columns:
-                    df_new[c] = ''
-            df_new = df_new[cols]
-            df_new['Date'] = get_bj_time().strftime('%Y-%m-%d %H:%M:%S')
+        if chosen:
+            pending_file = f"ashare_stocks_pending_{get_bj_time().strftime('%Y%m%d')}.csv"
 
-            # 强制所有列转为字符串，确保追加时格式一致
-            for col in df_new.columns:
-                df_new[col] = df_new[col].astype(str)
+            # 准备待确认数据
+            pending_cols = ['Ticker', 'Name', 'Industry', 'Tag', 'Amount', 'Daily_Pct', 'Hold_Period', 'Stop_Loss', 'Score', 'ATR_Pct', '周期共振']
+            df_pending = pd.DataFrame(chosen)
 
-            # 判断是否需要写表头
-            file_exists = os.path.exists(log_file) and os.path.getsize(log_file) > 0
+            # 确保列存在
+            for c in pending_cols:
+                if c not in df_pending.columns:
+                    df_pending[c] = ''
+            df_pending = df_pending[pending_cols]
 
-            # 直接追加模式
-            try:
-                df_new.to_csv(log_file, mode='a', header=not file_exists, index=False, encoding='utf-8')
-                print(f"✅ 已将 {len(df_new)} 只精选标的追加至 trade_history.csv（追加模式）")
-            except Exception as e:
-                print(f"❌ 追加写入失败: {e}")
+            # 添加 Scan_Ref_Price（盘前参考价）
+            if 'Open_Price' in pd.DataFrame(chosen).columns:
+                df_pending['Scan_Ref_Price'] = pd.DataFrame(chosen)['Open_Price']
+            elif 'Close' in pd.DataFrame(chosen).columns:
+                df_pending['Scan_Ref_Price'] = pd.DataFrame(chosen)['Close']
+            else:
+                df_pending['Scan_Ref_Price'] = 0
+
+            # 强制字符串类型
+            for col in df_pending.columns:
+                df_pending[col] = df_pending[col].astype(str)
+
+            # 写入 pending 文件
+            df_pending.to_csv(pending_file, index=False, encoding='utf-8')
+            print(f"✅ 已生成 {len(df_pending)} 条A股待确认记录（{pending_file}）")
+            print(f"⏳ 盘后 review.py 将补充开盘价/收盘价后写入 trade_history.csv")
         else:
-            print("📋 今日无新入选标的，全部已在持仓中，跳过入账。")
+            print("📋 今日无新入选标的（全部已在持仓中），跳过写账。")
     else:
         print("⚠️ match_pool_to_report 未解析出任何标的，跳过写账。")
 
