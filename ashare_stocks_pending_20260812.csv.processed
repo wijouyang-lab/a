@@ -1,6 +1,0 @@
-Date,Ticker,Name,Tag,Industry,Amount,Daily_Pct,Hold_Period,Stop_Loss,Score,Status
-2026-08-12,300308.SZ,中际旭创,Core_Dragon,通信设备,29958629.1862,2.5885,8-12天,798.00元,62,pending
-2026-08-12,300502.SZ,新易盛,Core_Dragon,通信设备,19977399.8933,3.9289,7-10天,365.00元,68,pending
-2026-08-12,300759.SZ,康龙化成,Observation,化学制药,5670867.69228,1.1907,观望,观望,N/A,pending
-2026-08-12,600664.SH,哈药股份,Core_Dragon,化学制药,5494869.237,9.9734,5-7天,7.45元,66,pending
-2026-08-12,001258.SZ,立新能源,Core_Dragon,新型电力,3628988.25127,10.0138,5-7天,14.35元,59,pending
