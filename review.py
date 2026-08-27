@@ -442,6 +442,9 @@ active_list = []
 expired_list = []
 skipped_duplicate = 0
 
+# 获取今天的日期字符串
+today_str = get_bj_time().strftime('%Y-%m-%d')
+
 for ticker, group in recent_picks.groupby('Ticker'):
     group = group.sort_values('Date')
     first_row = group.iloc[0]
@@ -496,7 +499,6 @@ for ticker, group in recent_picks.groupby('Ticker'):
 
     if today_low is None:
         try:
-            today_str = get_bj_time().strftime('%Y-%m-%d')
             low_val = get_price_on_date(ticker, today_str, field='low')
             if low_val is not None:
                 today_low = low_val
@@ -590,10 +592,13 @@ for ticker, group in recent_picks.groupby('Ticker'):
         })
     else:
         # ==========================================================
-        # 【修复】判断今日新增：用最新一行（latest_row）的日期，而非最早一行
+        # 【核心修复】判断今日新增：使用 latest_row 的日期
         # ==========================================================
         latest_date_str = latest_row['Date'].strftime('%Y-%m-%d')
-        is_new_today = (latest_date_str == get_bj_time().strftime('%Y-%m-%d'))
+        is_new_today = (latest_date_str == today_str)
+        # 打印调试信息，便于排查
+        if latest_date_str == today_str:
+            print(f"✅ {ticker} 今日新增：最新记录日期 {latest_date_str} == {today_str}")
         # ==========================================================
         
         today_open = None
@@ -603,14 +608,14 @@ for ticker, group in recent_picks.groupby('Ticker'):
             except:
                 pass
         if today_open is None:
-            today_open = get_price_on_date(ticker, get_bj_time().strftime('%Y-%m-%d'), field='open')
+            today_open = get_price_on_date(ticker, today_str, field='open')
             if today_open is None:
                 live_open, _ = get_live_quote(ticker)
                 today_open = live_open
 
         cur_price = price_map_today.get(ticker)
         if cur_price is None:
-            cur_price = get_price_on_date(ticker, get_bj_time().strftime('%Y-%m-%d'), field='close')
+            cur_price = get_price_on_date(ticker, today_str, field='close')
         if cur_price is None:
             _, live_last = get_live_quote(ticker)
             cur_price = live_last or rec_price
