@@ -1542,13 +1542,20 @@ if __name__ == "__main__":
 
     chosen = match_pool_to_report(pool_with_news, ai_report_html, DEFAULT_STOP_LOSS_PCT)
 
+    # ============================================================
+    # 【修复】写入 trade_history.csv（强制类型 + 验证）
+    # ============================================================
     if chosen:
         log_file = "trade_history.csv"
         df_new = pd.DataFrame(chosen)
         
+        # 去重：过滤已在持仓中的标的
         if os.path.exists(log_file):
             try:
-                df_old = pd.read_csv(log_file)
+                df_old = pd.read_csv(log_file, keep_default_na=False)
+                # 强制旧表所有列为 object 类型
+                for col in df_old.columns:
+                    df_old[col] = df_old[col].astype(object)
                 _active_tags = {'Core_Double_Dragon', 'Sub_Pioneer', 'Core_Dragon'}
                 _active_tickers = set(df_old[df_old['Tag'].isin(_active_tags)]['Ticker'].unique())
                 _before_filter = len(df_new)
@@ -1558,25 +1565,52 @@ if __name__ == "__main__":
                     print(f"📋 跳过 {_skipped} 只已在持仓中的标的，不重复追加")
             except Exception as e:
                 print(f"⚠️ 持仓去重过滤失败，继续追加全部: {e}")
+                df_old = None
         
         if not df_new.empty:
+            # 填充日期
             df_new['Date'] = get_bj_time().strftime('%Y-%m-%d %H:%M:%S')
             df_new['Close_Price'] = df_new['Close']
+            # 确保所有列存在
             cols = ['Date', 'Ticker', 'Name', 'Industry', 'Tag', 'Open_Price', 'Close_Price', 'Amount', 'Daily_Pct', 'Hold_Period', 'Stop_Loss', 'Score', 'ATR_Pct', '周期共振']
             for c in cols:
                 if c not in df_new.columns:
                     df_new[c] = ''
             df_new = df_new[cols]
+            # 强制新表所有列为 object 类型
+            for col in df_new.columns:
+                df_new[col] = df_new[col].astype(object)
             
-            if os.path.exists(log_file):
-                df_old = pd.read_csv(log_file)
+            # 合并
+            if os.path.exists(log_file) and 'df_old' in locals() and df_old is not None and not df_old.empty:
+                # 确保 df_old 列与 df_new 一致
+                for col in df_new.columns:
+                    if col not in df_old.columns:
+                        df_old[col] = ''
+                df_old = df_old[df_new.columns]
                 df_final = pd.concat([df_old, df_new], ignore_index=True)
             else:
                 df_final = df_new
-            df_final.to_csv(log_file, index=False)
-            print(f"✅ 已将 {len(df_new)} 只精选标的入账 trade_history.csv")
+            
+            # 写入前检查
+            if df_final is not None and not df_final.empty:
+                # 记录写入前的文件大小（如果存在）
+                old_size = os.path.getsize(log_file) if os.path.exists(log_file) else 0
+                try:
+                    df_final.to_csv(log_file, index=False, encoding='utf-8')
+                    # 验证写入是否成功
+                    if os.path.exists(log_file) and os.path.getsize(log_file) > old_size:
+                        print(f"✅ 已将 {len(df_new)} 只精选标的入账 trade_history.csv（文件大小 {os.path.getsize(log_file)} 字节，增加 {os.path.getsize(log_file) - old_size} 字节）")
+                    else:
+                        print(f"❌ 写入失败！文件大小未增加（旧: {old_size}，新: {os.path.getsize(log_file) if os.path.exists(log_file) else 0}）")
+                except Exception as e:
+                    print(f"❌ 写入异常: {e}")
+            else:
+                print(f"⚠️ df_final 为空，写入跳过")
         else:
             print("📋 今日无新入选标的，全部已在持仓中，跳过入账。")
+    else:
+        print("⚠️ match_pool_to_report 未解析出任何标的，跳过写账。")
 
     final_email_html = build_email(ai_report_html)
     send_emails(final_email_html)
