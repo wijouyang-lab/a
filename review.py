@@ -143,52 +143,98 @@ def _recalibrate_stop_loss_ashare(stop_loss_str, scan_ref_price, real_open_price
 # 2. 补充待确认文件（完全重写）
 # ==========================================
 def supplement_ashare_stocks_from_pending():
+    """
+    盘后补充 scan.py 当天生成的 pending 文件。
+
+    关键修复：
+    1. 与 scan.py 保持一致：Observation 不视为真实持仓，不阻止当天重新入选。
+    2. 去重改为 (Ticker, Date)，而不是“最近30天只要出现过就跳过”。
+    3. 今天的 .csv 即使上一次被误标记为 .processed，只要 trade_history 中没有当天记录，
+       仍会作为“今日恢复文件”重新导入，避免今天新增永久丢失。
+    4. 写入前重新读取 trade_history，支持一次运行同时恢复多个遗漏标的。
+    """
     log_file = "trade_history.csv"
+    today_str = get_bj_time().strftime('%Y-%m-%d')
+
+    # 正常 pending + 今日已被旧版本错误标记为 .processed 的恢复文件
     pending_files = sorted(
         f for f in glob.glob("ashare_stocks_pending_*.csv")
         if not f.endswith(".processed")
     )
-    if not pending_files:
+
+    recovery_files = sorted(
+        f for f in glob.glob(f"ashare_stocks_pending_{get_bj_time().strftime('%Y%m%d')}.csv.processed")
+        if os.path.isfile(f)
+    )
+
+    all_files = []
+    for f in pending_files:
+        all_files.append((f, False))
+    for f in recovery_files:
+        if f not in [x[0] for x in all_files]:
+            all_files.append((f, True))
+
+    if not all_files:
         print("📋 无待确认A股文件，跳过补充。")
         return
 
-    print(f"📋 发现 {len(pending_files)} 份待确认文件：{pending_files}")
+    print(f"📋 发现 {len(all_files)} 份待确认/恢复文件：{[x[0] for x in all_files]}")
 
-    # 确保表头完整，获取当前列顺序
     existing_cols = _ensure_table_columns(log_file)
     print(f"📋 当前表头列：{existing_cols}")
 
-    ACTIVE_TAGS = {'Core_Double_Dragon', 'Core_Dragon', 'Sub_Pioneer', 'Observation'}
-    today_str = get_bj_time().strftime('%Y-%m-%d')
-    cutoff_date = get_bj_time() - datetime.timedelta(days=30)
+    # 与 scan.py 保持完全一致：这 3 个标签才算“真实活跃持仓”
+    HOLDING_TAGS = {'Core_Double_Dragon', 'Core_Dragon', 'Sub_Pioneer'}
 
-    for pending_file in pending_files:
-        m = re.search(r"ashare_stocks_pending_(\d{8})\.csv", pending_file)
+    for pending_file, is_recovery in all_files:
+        m = re.search(r"ashare_stocks_pending_(\d{8})\.csv(?:\.processed)?$", pending_file)
         if not m:
             print(f"⚠️ 无法解析日期，跳过 {pending_file}")
             continue
+
         file_date_str = m.group(1)
         target_date_str = f"{file_date_str[:4]}-{file_date_str[4:6]}-{file_date_str[6:]}"
         is_today = (target_date_str == today_str)
 
-        print(f"📡 处理 {pending_file}（交易日 {target_date_str}）...")
+        print(
+            f"📡 处理 {pending_file}（交易日 {target_date_str}"
+            f"{'；恢复旧版已处理文件' if is_recovery else ''}）..."
+        )
 
         try:
-            df_pending = pd.read_csv(pending_file)
+            df_pending = pd.read_csv(pending_file, dtype=str, keep_default_na=False)
             if df_pending.empty:
-                os.rename(pending_file, f"{pending_file}.processed")
+                if not is_recovery:
+                    os.rename(pending_file, f"{pending_file}.processed")
+                print(f"ℹ️ {pending_file} 为空")
                 continue
 
-            # 获取 OHLC
+            # 统一 ticker 格式，避免前后空格造成“假重复”
+            if 'Ticker' not in df_pending.columns:
+                print(f"⚠️ {pending_file} 缺少 Ticker 列，跳过。")
+                continue
+            df_pending['Ticker'] = df_pending['Ticker'].astype(str).str.strip()
+
+            # 获取目标交易日 OHLC
             df_prices = None
             for offset in range(0, 5):
-                try_date = (datetime.datetime.strptime(file_date_str, "%Y%m%d") - datetime.timedelta(days=offset)).strftime('%Y%m%d')
+                try_date = (
+                    datetime.datetime.strptime(file_date_str, "%Y%m%d")
+                    - datetime.timedelta(days=offset)
+                ).strftime('%Y%m%d')
                 try:
-                    df_try = pro.daily(trade_date=try_date, fields='ts_code,open,high,low,close')
+                    df_try = pro.daily(
+                        trade_date=try_date,
+                        fields='ts_code,open,high,low,close'
+                    )
                     if df_try is not None and not df_try.empty:
+                        # 对“今天”禁止悄悄拿前一交易日价格冒充今天；
+                        # 非今天文件才允许回退最近可用交易日。
+                        if is_today and try_date != file_date_str:
+                            continue
                         df_prices = df_try
                         break
-                except:
+                except Exception:
                     pass
 
             open_map, low_map, close_map = {}, {}, {}
@@ -197,29 +243,88 @@ def supplement_ashare_stocks_from_pending():
                 low_map = dict(zip(df_prices['ts_code'], df_prices['low']))
                 close_map = dict(zip(df_prices['ts_code'], df_prices['close']))
 
-            # 读取现有账本（用于去重）
+            # 每个 pending 文件处理前重新读取账本，避免同一批次重复写入
             df_existing = pd.DataFrame()
             if os.path.exists(log_file) and os.path.getsize(log_file) > 0:
                 try:
-                    df_existing = pd.read_csv(log_file, keep_default_na=False, on_bad_lines='warn')
-                    df_existing['Date'] = pd.to_datetime(df_existing['Date'])
-                except:
+                    df_existing = pd.read_csv(
+                        log_file,
+                        keep_default_na=False,
+                        on_bad_lines='warn'
+                    )
+                    if 'Date' in df_existing.columns:
+                        df_existing['Date'] = pd.to_datetime(
+                            df_existing['Date'], errors='coerce'
+                        )
+                    if 'Ticker' in df_existing.columns:
+                        df_existing['Ticker'] = (
+                            df_existing['Ticker'].astype(str).str.strip()
+                        )
+                except Exception as e:
+                    print(f"⚠️ 读取现有账本用于去重失败：{e}")
                     df_existing = pd.DataFrame()
 
+            # 精确去重：同一股票 + 同一天已经写入，则永远不再重复追加
+            existing_date_keys = set()
+            if (
+                not df_existing.empty
+                and {'Ticker', 'Date'}.issubset(df_existing.columns)
+            ):
+                valid_existing = df_existing.dropna(subset=['Date']).copy()
+                existing_date_keys = {
+                    (
+                        str(r['Ticker']).strip(),
+                        pd.to_datetime(r['Date']).strftime('%Y-%m-%d')
+                    )
+                    for _, r in valid_existing.iterrows()
+                }
+
+            # 当前真实持仓：只看 scan.py 认定的 3 类，不把 Observation 当作阻塞条件。
+            current_active_tickers = set()
+            if (
+                not df_existing.empty
+                and {'Ticker', 'Tag'}.issubset(df_existing.columns)
+            ):
+                current_active_tickers = set(
+                    df_existing[
+                        df_existing['Tag'].astype(str).str.strip().isin(HOLDING_TAGS)
+                    ]['Ticker'].astype(str).str.strip()
+                )
+
             new_records = []
+            skipped_same_day = []
+            skipped_existing_active = []
             missing_price_tickers = []
 
             for _, row in df_pending.iterrows():
-                ticker = row['Ticker']
+                ticker = str(row.get('Ticker', '')).strip()
+                if not ticker:
+                    continue
+
+                # 1) 同一 ticker + 同一天已经存在：严格去重
+                if (ticker, target_date_str) in existing_date_keys:
+                    skipped_same_day.append(ticker)
+                    continue
+
+                # 2) 只有当前仍处于真实持仓状态才阻止重复；
+                #    Observation / 已止损 / 已到期 / 强平后的重新入选不阻止。
+                if ticker in current_active_tickers:
+                    skipped_existing_active.append(ticker)
+                    continue
+
                 open_price = open_map.get(ticker)
                 low_price = low_map.get(ticker)
                 close_price = close_map.get(ticker)
 
-                # 单独查询
+                # 单独查询目标交易日
                 if open_price is None or low_price is None or close_price is None:
                     try:
-                        df_single = pro.daily(ts_code=ticker, start_date=file_date_str, end_date=file_date_str,
-                                              fields='ts_code,open,high,low,close')
+                        df_single = pro.daily(
+                            ts_code=ticker,
+                            start_date=file_date_str,
+                            end_date=file_date_str,
+                            fields='ts_code,open,high,low,close'
+                        )
                         if df_single is not None and not df_single.empty:
                             if open_price is None:
                                 open_price = float(df_single.iloc[0]['open'])
@@ -227,103 +332,133 @@ def supplement_ashare_stocks_from_pending():
                                 low_price = float(df_single.iloc[0]['low'])
                             if close_price is None:
                                 close_price = float(df_single.iloc[0]['close'])
-                    except:
+                    except Exception:
                         pass
 
-                if (open_price is None or low_price is None or close_price is None) and is_today:
-                    live_open, live_last = get_live_quote(ticker)
-                    if open_price is None:
-                        open_price = live_open
-                    if close_price is None:
-                        close_price = live_last or live_open
-                    if low_price is None and live_open is not None and live_last is not None:
-                        low_price = min(live_open, live_last)
+                # 今天：只有拿不到今日 daily 时才允许实时行情兜底
+                if (open_price is None or close_price is None or low_price is None) and is_today:
+                    try:
+                        live_open, live_last = get_live_quote(ticker)
+                        if open_price is None:
+                            open_price = live_open
+                        if close_price is None:
+                            close_price = live_last or live_open
+                        if low_price is None and live_open is not None and live_last is not None:
+                            low_price = min(live_open, live_last)
+                    except Exception:
+                        pass
 
                 if open_price is None or close_price is None:
                     missing_price_tickers.append(ticker)
 
                 if open_price is not None and close_price is not None:
                     try:
-                        pct_chg = round((float(close_price) - float(open_price)) / float(open_price) * 100, 2)
-                    except:
+                        pct_chg = round(
+                            (float(close_price) - float(open_price))
+                            / float(open_price) * 100, 2
+                        )
+                    except Exception:
                         pct_chg = row.get('Daily_Pct', '')
                 else:
                     pct_chg = row.get('Daily_Pct', '')
 
-                calibrated_stop_loss = row['Stop_Loss']
+                calibrated_stop_loss = row.get('Stop_Loss', '')
                 if open_price is not None:
                     calibrated_stop_loss = _recalibrate_stop_loss_ashare(
-                        row['Stop_Loss'], row.get('Scan_Ref_Price'), open_price
+                        row.get('Stop_Loss', ''),
+                        row.get('Scan_Ref_Price'),
+                        open_price
                     )
 
-                # ==========================================================
-                # 【关键】检查最近30天内是否有活跃持仓
-                # ==========================================================
-                skip = False
-                if not df_existing.empty:
-                    df_recent = df_existing[df_existing['Date'] >= cutoff_date.replace(tzinfo=None)]
-                    active_mask = (df_recent['Ticker'] == ticker) & (df_recent['Tag'].isin(ACTIVE_TAGS))
-                    if active_mask.any():
-                        print(f"⏭️ {ticker} 最近30天内有活跃持仓，跳过追加")
-                        skip = True
-
-                if skip:
-                    continue
-
-                # 强制使用 Core_Dragon
                 tag = 'Core_Dragon'
                 hold_period = str(row.get('Hold_Period', '')).strip()
-                if hold_period == '' or hold_period.lower() in ['', 'n/a', 'nan', 'none', '观望']:
+                if hold_period == '' or hold_period.lower() in {
+                    'n/a', 'nan', 'none', '观望'
+                }:
                     hold_period = '5-10天'
-                    print(f"⚠️ {ticker} Hold_Period 缺失，使用默认值 '5-10天'")
-                else:
-                    # 保留原值，但确保格式正确（如果是纯数字可能缺少“天”）
-                    if not re.search(r'\d+.*天', hold_period):
-                        hold_period = hold_period + '天'  # 简单补天
+                    print(
+                        f"⚠️ {ticker} Hold_Period 缺失，"
+                        "使用默认值 '5-10天'"
+                    )
+                elif not re.search(r'\d+.*天', hold_period):
+                    hold_period += '天'
 
-                # 组装记录（按现有表头顺序）
                 rec = {
                     'Date': target_date_str,
                     'Ticker': ticker,
-                    'Name': row['Name'],
+                    'Name': row.get('Name', ticker),
                     'Tag': tag,
-                    'Industry': row['Industry'],
+                    'Industry': row.get('Industry', ''),
                     'Open_Price': '' if open_price is None else open_price,
                     'Low_Price': '' if low_price is None else low_price,
                     'Close_Price': '' if close_price is None else close_price,
-                    'Amount': row['Amount'],
+                    'Amount': row.get('Amount', ''),
                     'Daily_Pct': pct_chg,
                     'Hold_Period': hold_period,
                     'Stop_Loss': calibrated_stop_loss,
-                    'Score': row['Score'],
+                    'Score': row.get('Score', ''),
                     'ATR_Pct': row.get('ATR_Pct', ''),
                     '周期共振': row.get('周期共振', ''),
                 }
                 new_records.append(rec)
 
+                # 本次运行内立即加入去重集合，防止 pending 自身有重复行
+                existing_date_keys.add((ticker, target_date_str))
+
+            if skipped_same_day:
+                print(f"⏭️ 同日已存在，跳过 {len(skipped_same_day)} 条：{skipped_same_day}")
+            if skipped_existing_active:
+                print(
+                    f"⏭️ 当前真实持仓，跳过 {len(skipped_existing_active)} 条："
+                    f"{skipped_existing_active}"
+                )
             if missing_price_tickers:
-                print(f"⚠️ 以下标的无完整价格: {missing_price_tickers}")
+                print(f"⚠️ 以下标的无完整价格：{missing_price_tickers}")
 
             if new_records:
-                need_header = not os.path.exists(log_file) or os.path.getsize(log_file) == 0
-                with open(log_file, "a", encoding="utf-8") as f:
-                    if need_header:
-                        f.write(",".join(existing_cols) + "\n")
-                    for rec in new_records:
-                        # 按现有列顺序写入
-                        line = ",".join(str(rec.get(col, '')) for col in existing_cols)
-                        f.write(line + "\n")
-                        print(f"   ✅ 已追加 {rec['Ticker']} (Tag={rec['Tag']}, Hold_Period={rec['Hold_Period']})")
+                # 以 DataFrame 统一写出，避免名称/行业中出现逗号时破坏 CSV
+                append_df = pd.DataFrame(new_records)
+                for col in existing_cols:
+                    if col not in append_df.columns:
+                        append_df[col] = ''
+                append_df = append_df[existing_cols]
 
-                print(f"✅ [盘后补充] {pending_file} 成功追加 {len(new_records)} 条记录")
+                need_header = not os.path.exists(log_file) or os.path.getsize(log_file) == 0
+                append_df.to_csv(
+                    log_file,
+                    mode='a',
+                    header=need_header,
+                    index=False,
+                    encoding='utf-8'
+                )
+
+                for rec in new_records:
+                    print(
+                        f"   ✅ 已追加 {rec['Ticker']} "
+                        f"(Date={rec['Date']}, Tag={rec['Tag']}, "
+                        f"Hold_Period={rec['Hold_Period']})"
+                    )
+
+                print(
+                    f"✅ [盘后补充] {pending_file} 成功追加 "
+                    f"{len(new_records)} 条记录"
+                )
             else:
                 print(f"ℹ️ {pending_file} 无新记录需要追加")
 
-            os.rename(pending_file, f"{pending_file}.processed")
-            print(f"📦 {pending_file} 已标记为已处理")
+            # 只有原始 .csv 才需要转成 .processed；恢复文件保持原样，
+            # 方便人工核对，且下次仍会被精确去重保护。
+            if not is_recovery and os.path.exists(pending_file):
+                processed_path = f"{pending_file}.processed"
+                if os.path.exists(processed_path):
+                    # 不覆盖已有恢复证据
+                    os.remove(processed_path)
+                os.rename(pending_file, processed_path)
+                print(f"📦 {pending_file} 已标记为已处理")
 
         except Exception as e:
             print(f"❌ 处理 {pending_file} 失败: {e}")
+
 
 supplement_ashare_stocks_from_pending()
 
@@ -338,7 +473,8 @@ if not os.path.exists(log_file):
 try:
     df = pd.read_csv(log_file, keep_default_na=False, on_bad_lines='warn')
     df['Date'] = pd.to_datetime(df['Date'])
-    ACTIVE_TAGS = {'Core_Double_Dragon', 'Core_Dragon', 'Sub_Pioneer', 'Observation'}
+    # 与 scan.py 保持一致：Observation 仅为观察池，不计入真实活跃持仓。
+    ACTIVE_TAGS = {'Core_Double_Dragon', 'Core_Dragon', 'Sub_Pioneer'}
     cutoff_date = get_bj_time() - datetime.timedelta(days=30)
     recent_picks = df[
         (df['Date'] >= cutoff_date.replace(tzinfo=None)) &
@@ -451,7 +587,42 @@ today_str = get_bj_time().strftime('%Y-%m-%d')
 
 print(f"开始处理 {len(recent_picks)} 条活跃持仓记录...")
 
+# 当前持仓生命周期：从最近一次“非真实持仓状态”后的第一条真实持仓记录开始。
+# 这样可正确处理：Observation -> 今日重新入选 Core_Dragon 的“重新开仓”。
+_ALL_HOLDING_TAGS = {'Core_Double_Dragon', 'Core_Dragon', 'Sub_Pioneer'}
+_TERMINAL_OR_WATCH_TAGS = {
+    'Observation', 'Trap_Warning', 'Forced_Exit', 'Stop_Loss_Hit',
+    'Period_Matured', 'Dropped'
+}
+
 for ticker, group in recent_picks.groupby('Ticker'):
+    group = group.sort_values('Date').copy()
+
+    # 优先从完整账本判断生命周期边界，而不是只看最近30天窗口。
+    try:
+        ticker_all = df[df['Ticker'].astype(str).str.strip() == str(ticker).strip()].copy()
+        ticker_all = ticker_all.sort_values('Date').reset_index(drop=True)
+        active_positions = ticker_all[
+            ticker_all['Tag'].astype(str).str.strip().isin(_ALL_HOLDING_TAGS)
+        ]
+        if not active_positions.empty:
+            last_active_pos = active_positions.index[-1]
+            # 从最后一条真实持仓向前找边界；连续的真实持仓视为同一生命周期。
+            lifecycle_positions = []
+            for pos in range(int(last_active_pos), -1, -1):
+                tag_i = str(ticker_all.iloc[pos]['Tag']).strip()
+                if tag_i not in _ALL_HOLDING_TAGS:
+                    break
+                lifecycle_positions.append(pos)
+            lifecycle_positions.reverse()
+            lifecycle_group = ticker_all.iloc[lifecycle_positions].copy()
+            # 只保留本次主循环可见的最近30天活跃记录，若生命周期起点较早则仍保留起点。
+            if not lifecycle_group.empty:
+                older_start = lifecycle_group['Date'].min()
+                group = lifecycle_group[lifecycle_group['Date'] >= older_start].copy()
+    except Exception as e:
+        print(f"⚠️ {ticker} 生命周期边界判断失败，回退最近30天数据：{e}")
+
     group = group.sort_values('Date')
     first_row = group.iloc[0]
     latest_row = group.iloc[-1]
