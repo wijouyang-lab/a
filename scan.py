@@ -465,6 +465,699 @@ def get_top_300_pool():
 
     return full_pool, codes, trade_date
 
+
+# ==========================================
+# 2. 【新增】重要人物讲话 + 关键经济数据 + 宏观状态机
+# ==========================================
+# 设计原则：
+# 1) 数据采集失败不能让 scan 失败
+# 2) 经济数据必须考虑“实际值 vs 前值/目标”，而不是只把数字丢给 AI
+# 3) 重要人物讲话必须经过“政策/通胀/利率/商品/行业”传导
+# 4) 经济数据与人物讲话进入最终 AI 选股 prompt，直接参与 Top 1-5 判断
+# 5) 技术评分仍由原程序客观计算，不允许宏观模块篡改技术指标
+
+KEY_PERSON_KEYWORDS = {
+    "特朗普": [
+        "特朗普", "Trump", "Donald Trump", "President Trump"
+    ],
+    "沃什": [
+        "Kevin Warsh", "Warsh", "沃什", "凯文·沃什"
+    ],
+    "鲍威尔": [
+        "Jerome Powell", "Powell", "鲍威尔"
+    ],
+    "沃勒": [
+        "Christopher Waller", "Waller", "沃勒"
+    ],
+    "鲍曼": [
+        "Michelle Bowman", "Bowman", "鲍曼"
+    ],
+    "贝森特": [
+        "Scott Bessent", "Bessent", "贝森特"
+    ],
+    "卢特尼克": [
+        "Howard Lutnick", "Lutnick", "卢特尼克"
+    ],
+    "潘功胜": [
+        "潘功胜", "Pan Gongsheng"
+    ],
+    "中国人民银行": [
+        "中国人民银行", "央行", "People's Bank of China", "PBOC"
+    ],
+    "财政部": [
+        "财政部", "Ministry of Finance"
+    ],
+    "发改委": [
+        "发改委", "国家发展和改革委员会", "NDRC"
+    ],
+}
+
+PERSON_EVENT_KEYWORDS = [
+    "讲话", "演讲", "发言", "表示", "称", "称将", "警告",
+    "通胀", "inflation", "利率", "rate", "降息", "加息",
+    "关税", "tariff", "财政", "赤字", "就业", "失业",
+    "政策", "货币", "贸易", "美元", "经济", "economy"
+]
+
+def _normalise_event_text(text):
+    s = str(text or "").strip()
+    s = re.sub(r"\s+", " ", s)
+    return s
+
+def _classify_person_event(title, source_text=""):
+    text = f"{title} {source_text}".lower()
+
+    hawkish_words = [
+        "inflation remains", "inflation is too high", "higher for longer",
+        "higher rates", "rate hike", "rates need to stay high",
+        "通胀仍高", "通胀风险", "高利率", "加息", "维持高利率",
+        "关税导致通胀", "tariff inflation"
+    ]
+    dovish_words = [
+        "rate cut", "rate cuts", "cut rates", "easing", "lower rates",
+        "inflation easing", "disinflation", "通胀回落", "降息",
+        "降息空间", "货币宽松", "通胀下降"
+    ]
+    tariff_words = ["tariff", "tariffs", "关税", "贸易战", "进口税"]
+    fiscal_words = ["tax cut", "tax cuts", "spending", "deficit", "减税", "赤字", "财政刺激"]
+    commodity_words = ["gold", "silver", "copper", "oil", "黄金", "白银", "铜", "原油"]
+
+    hawkish = any(w in text for w in hawkish_words)
+    dovish = any(w in text for w in dovish_words)
+    tariff = any(w in text for w in tariff_words)
+    fiscal = any(w in text for w in fiscal_words)
+    commodity = any(w in text for w in commodity_words)
+
+    if tariff and hawkish:
+        tone = "偏鹰+关税通胀"
+    elif hawkish:
+        tone = "偏鹰"
+    elif dovish:
+        tone = "偏鸽"
+    elif tariff:
+        tone = "关税/贸易"
+    elif fiscal:
+        tone = "财政扩张"
+    elif commodity:
+        tone = "商品相关"
+    else:
+        tone = "中性/待确认"
+
+    inflation_bias = "上升风险" if (hawkish or tariff) else ("下降/缓和" if dovish else "中性")
+    rate_bias = "降息预期下降" if hawkish else ("降息预期上升" if dovish else "中性")
+    asset_bias = []
+    if hawkish:
+        asset_bias += ["10Y偏上", "美元偏强", "成长估值承压", "贵金属偏空"]
+    if dovish:
+        asset_bias += ["10Y偏下", "美元偏弱", "成长估值受益", "贵金属偏多"]
+    if tariff:
+        asset_bias += ["通胀风险↑", "制造业成本链分化"]
+    if fiscal:
+        asset_bias += ["增长预期↑", "财政赤字/期限溢价需关注"]
+    if commodity:
+        asset_bias += ["商品价格需与讲话方向交叉验证"]
+
+    return {
+        "语调": tone,
+        "通胀方向": inflation_bias,
+        "利率方向": rate_bias,
+        "资产影响": "；".join(dict.fromkeys(asset_bias)) if asset_bias else "暂未形成明确资产方向",
+    }
+
+def get_key_person_events():
+    """
+    抓取最近72小时重要人物/政策讲话。
+    采用现有 RSS 新闻源 + 关键词过滤，不依赖新增 API key。
+    返回既给 AI 读、也可用于宏观行业降权。
+    """
+    print("🎙️ [阶段2.4] 正在抓取重要人物讲话与政策预期变化...")
+    rss_sources = [
+        ("WSJ Markets", "https://feeds.a.dj.com/rss/RSSMarketsMain.xml"),
+        ("CNBC Markets", "https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss01&id=10000664"),
+        ("新浪财经", "https://rss.sina.com.cn/roll/finance/hot_roll.xml"),
+    ]
+
+    events = []
+    now = get_bj_time()
+
+    for source_name, url in rss_sources:
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req, timeout=10) as response:
+                root = ET.fromstring(response.read())
+
+            for item in root.findall(".//item")[:80]:
+                title_node = item.find("title")
+                date_node = item.find("pubDate")
+                if title_node is None or not title_node.text:
+                    continue
+
+                title = _normalise_event_text(title_node.text)
+                if not title:
+                    continue
+
+                dt_obj = _parse_rss_date(date_node.text if date_node is not None else "")
+                if dt_obj is None:
+                    continue
+
+                hours = (now - dt_obj).total_seconds() / 3600
+                if hours < -2 or hours > 72:
+                    continue
+
+                person = None
+                for person_name, kws in KEY_PERSON_KEYWORDS.items():
+                    if any(k.lower() in title.lower() for k in kws):
+                        person = person_name
+                        break
+
+                if not person:
+                    continue
+
+                if not any(k.lower() in title.lower() for k in PERSON_EVENT_KEYWORDS):
+                    continue
+
+                classification = _classify_person_event(title)
+
+                events.append({
+                    "time": dt_obj,
+                    "person": person,
+                    "source": source_name,
+                    "title": title,
+                    **classification,
+                })
+        except Exception as e:
+            print(f"   ⚠️ {source_name} 重要人物讲话抓取失败: {e}")
+
+    # 去重：相同人物+标题归一化
+    unique = {}
+    for e in events:
+        key = (e["person"], re.sub(r"[^a-z0-9\u4e00-\u9fff]+", "", e["title"].lower())[:120])
+        unique[key] = e
+
+    events = sorted(unique.values(), key=lambda x: x["time"], reverse=True)
+
+    if not events:
+        print("   ℹ️ 最近72小时未抓到可确认的关键人物讲话。")
+        return "最近72小时暂无可确认的关键人物讲话，不能仅凭传闻改变宏观判断。"
+
+    lines = ["【🔥 重要人物讲话/政策预期】"]
+    for e in events[:12]:
+        tag = "[最新]" if (now - e["time"]).total_seconds() <= 12 * 3600 else "[72h内]"
+        lines.append(
+            f"{tag} [{e['person']}] [{e['source']}] {e['time'].strftime('%m-%d %H:%M')} "
+            f"{e['title']} | 语调={e['语调']} | 通胀={e['通胀方向']} | 利率={e['利率方向']} | 资产={e['资产影响']}"
+        )
+
+    result = "\n".join(lines)
+    print(f"✅ 重要人物讲话监控完成：{len(events)} 条")
+    return result
+
+def _safe_tushare_call(func_name, **kwargs):
+    """
+    尝试调用 Tushare 宏观接口。
+    某个接口不存在/无权限/网络失败时只跳过该指标。
+    """
+    try:
+        fn = getattr(pro, func_name, None)
+        if fn is None:
+            return pd.DataFrame()
+        df = fn(**kwargs)
+        if df is None or df.empty:
+            return pd.DataFrame()
+        return df
+    except Exception as e:
+        print(f"   ⚠️ Tushare {func_name} 获取失败: {e}")
+        return pd.DataFrame()
+
+def _extract_latest_metric(df, value_candidates, date_candidates=None):
+    if df is None or df.empty:
+        return None, None, None
+
+    date_candidates = date_candidates or ["month", "ann_date", "trade_date", "end_date", "date", "period"]
+    date_col = next((c for c in date_candidates if c in df.columns), None)
+
+    value_col = None
+    for c in value_candidates:
+        if c in df.columns:
+            value_col = c
+            break
+    if value_col is None:
+        return None, None, None
+
+    work = df.copy()
+    if date_col:
+        work["_sort_date"] = pd.to_datetime(work[date_col].astype(str), errors="coerce")
+        work = work.sort_values("_sort_date")
+    else:
+        work["_sort_date"] = pd.NaT
+
+    work = work.dropna(subset=[value_col])
+    if work.empty:
+        return None, None, None
+
+    latest = work.iloc[-1]
+    value = None
+    try:
+        value = float(latest[value_col])
+    except Exception:
+        pass
+
+    latest_date = latest["_sort_date"]
+    if pd.isna(latest_date):
+        latest_date = None
+    prev_value = None
+    if len(work) >= 2:
+        try:
+            prev_value = float(work.iloc[-2][value_col])
+        except Exception:
+            prev_value = None
+
+    return value, prev_value, latest_date
+
+def _fetch_bls_series(series_id, label, limit=8):
+    """
+    BLS public API，无需 key。
+    """
+    url = "https://api.bls.gov/publicAPI/v2/timeseries/data/"
+    payload = json.dumps({
+        "seriesid": [series_id],
+        "startyear": str(get_bj_time().year - 2),
+        "endyear": str(get_bj_time().year),
+    }).encode("utf-8")
+
+    req = urllib.request.Request(
+        url,
+        data=payload,
+        headers={"Content-Type": "application/json", "User-Agent": "Mozilla/5.0"},
+        method="POST",
+    )
+
+    try:
+        with urllib.request.urlopen(req, timeout=12) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+
+        series = data.get("Results", {}).get("series", [])
+        if not series:
+            return []
+
+        rows = series[0].get("data", [])
+        out = []
+        for row in rows[:limit]:
+            try:
+                out.append({
+                    "year": int(row["year"]),
+                    "period": row["period"],
+                    "value": float(row["value"]),
+                })
+            except Exception:
+                continue
+        return out
+    except Exception as e:
+        print(f"   ⚠️ BLS {label} 获取失败: {e}")
+        return []
+
+def _latest_bls_value(rows):
+    if not rows:
+        return None
+    usable = [r for r in rows if str(r.get("period", "")).startswith("M")]
+    if not usable:
+        usable = rows
+    usable = sorted(usable, key=lambda x: (x["year"], x["period"]))
+    return usable[-1]["value"] if usable else None
+
+def _previous_bls_value(rows):
+    if not rows:
+        return None
+    usable = [r for r in rows if str(r.get("period", "")).startswith("M")]
+    if not usable:
+        usable = rows
+    usable = sorted(usable, key=lambda x: (x["year"], x["period"]))
+    return usable[-2]["value"] if len(usable) >= 2 else None
+
+def _fred_csv_series(series_id, label):
+    """
+    FRED 公共 CSV 端点，无需 API key。
+    """
+    url = f"https://fred.stlouisfed.org/graph/fredgraph.csv?id={urllib.parse.quote(series_id)}"
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=12) as resp:
+            content = resp.read().decode("utf-8")
+
+        df = pd.read_csv(pd.io.common.StringIO(content))
+        if df.empty:
+            return None, None, None
+
+        date_col = df.columns[0]
+        value_col = df.columns[1]
+        df[value_col] = pd.to_numeric(df[value_col], errors="coerce")
+        df[date_col] = pd.to_datetime(df[date_col], errors="coerce")
+        df = df.dropna(subset=[date_col, value_col]).sort_values(date_col)
+
+        if df.empty:
+            return None, None, None
+
+        latest = float(df.iloc[-1][value_col])
+        prev = float(df.iloc[-2][value_col]) if len(df) >= 2 else None
+        dt = df.iloc[-1][date_col]
+        return latest, prev, dt
+    except Exception as e:
+        print(f"   ⚠️ FRED {label} 获取失败: {e}")
+        return None, None, None
+
+def _economic_regime_from_metrics(metrics):
+    """
+    根据实际值、前值和政策目标形成可解释的宏观状态。
+    该分数只作为“宏观修正”，不改动原有技术评分。
+    """
+    score = 0
+    signals = []
+    sector_bias = {
+        "消费": 0,
+        "有色金属": 0,
+        "贵金属": 0,
+        "成长科技": 0,
+        "金融": 0,
+        "周期制造": 0,
+        "能源": 0,
+    }
+
+    # 中国社消
+    r = metrics.get("CN_消费")
+    if r and r["value"] is not None:
+        v = r["value"]
+        prev = r.get("prev")
+        if v >= 4:
+            score += 2
+            sector_bias["消费"] += 2
+            sector_bias["周期制造"] += 1
+            signals.append(f"中国消费较强（社零约{v:.1f}%）")
+        elif v < 1.5:
+            score -= 2
+            sector_bias["消费"] -= 2
+            signals.append(f"中国消费偏弱（社零约{v:.1f}%）")
+
+        if prev is not None and v < prev:
+            sector_bias["消费"] -= 1
+            signals.append("社零环比前期边际走弱")
+
+    # 中国 PMI
+    r = metrics.get("CN_PMI")
+    if r and r["value"] is not None:
+        v = r["value"]
+        if v >= 50.5:
+            sector_bias["周期制造"] += 2
+            sector_bias["有色金属"] += 1
+            signals.append(f"中国制造业PMI偏扩张（{v:.1f}）")
+        elif v < 49.5:
+            sector_bias["周期制造"] -= 2
+            sector_bias["有色金属"] -= 1
+            signals.append(f"中国制造业PMI偏弱（{v:.1f}）")
+
+    # 中国 CPI/PPI
+    r = metrics.get("CN_CPI")
+    if r and r["value"] is not None:
+        v = r["value"]
+        if v > 2:
+            sector_bias["消费"] += 1
+            sector_bias["能源"] += 1
+            signals.append(f"中国CPI同比偏高（{v:.1f}%）")
+        elif v < 0:
+            sector_bias["消费"] -= 1
+            sector_bias["周期制造"] -= 1
+            signals.append(f"中国价格环境偏弱（CPI {v:.1f}%）")
+
+    r = metrics.get("CN_PPI")
+    if r and r["value"] is not None:
+        v = r["value"]
+        if v > 0:
+            sector_bias["周期制造"] += 1
+            sector_bias["有色金属"] += 1
+            signals.append(f"中国PPI转正/改善（{v:.1f}%）")
+        elif v < -2:
+            sector_bias["周期制造"] -= 1
+            sector_bias["有色金属"] -= 1
+            signals.append(f"中国PPI明显偏弱（{v:.1f}%）")
+
+    # 美国通胀
+    r = metrics.get("US_CPI")
+    if r and r["value"] is not None:
+        v = r["value"]
+        prev = r.get("prev")
+        if v > 3:
+            sector_bias["成长科技"] -= 1
+            sector_bias["贵金属"] -= 1
+            sector_bias["有色金属"] -= 1
+            signals.append(f"美国CPI仍偏高（{v:.1f}）")
+        elif v < 2.5:
+            sector_bias["成长科技"] += 1
+            sector_bias["贵金属"] += 1
+            signals.append(f"美国通胀较温和（{v:.1f}）")
+        if prev is not None and v < prev:
+            signals.append("美国通胀边际回落")
+
+    # 美国失业率
+    r = metrics.get("US_UNRATE")
+    if r and r["value"] is not None:
+        v = r["value"]
+        prev = r.get("prev")
+        if v >= 5:
+            sector_bias["成长科技"] += 1
+            sector_bias["贵金属"] += 1
+            sector_bias["周期制造"] -= 1
+            signals.append(f"美国就业明显走弱（失业率{v:.1f}%）")
+        elif v <= 4:
+            sector_bias["成长科技"] -= 1
+            signals.append(f"美国就业仍偏紧（失业率{v:.1f}%）")
+        if prev is not None and v > prev:
+            signals.append("美国失业率边际上升")
+
+    # 美国非农
+    r = metrics.get("US_NFP")
+    if r and r["value"] is not None:
+        v = r["value"]
+        if v > 180:
+            sector_bias["周期制造"] += 1
+            sector_bias["成长科技"] -= 1
+            signals.append(f"美国非农仍偏强（约{v:.0f}千）")
+        elif v < 100:
+            sector_bias["成长科技"] += 1
+            sector_bias["周期制造"] -= 1
+            signals.append(f"美国就业增长偏弱（约{v:.0f}千）")
+
+    # 美国 PCE / Core PCE（FRED）
+    r = metrics.get("US_PCE")
+    if r and r["value"] is not None:
+        v = r["value"]
+        if v > 3:
+            sector_bias["成长科技"] -= 1
+            sector_bias["贵金属"] -= 1
+            signals.append(f"美国PCE仍偏高（{v:.1f}%附近）")
+        elif v < 2.5:
+            sector_bias["成长科技"] += 1
+            sector_bias["贵金属"] += 1
+            signals.append(f"美国PCE较温和（{v:.1f}%附近）")
+
+    ranked = sorted(sector_bias.items(), key=lambda x: x[1], reverse=True)
+    strongest = [f"{k}{v:+d}" for k, v in ranked if v != 0]
+
+    return {
+        "宏观评分": max(-10, min(10, score)),
+        "信号": signals,
+        "行业偏向": strongest[:8],
+    }
+
+def get_key_economic_data():
+    """
+    中国 + 美国核心经济数据。
+    中国侧优先 Tushare；美国侧使用 BLS/FRED。
+    这里不要求新增 Secret。
+    """
+    print("📊 [阶段2.7] 正在抓取中国/美国关键经济数据...")
+
+    metrics = {}
+
+    # ---------- 中国 ----------
+    # 社零/消费
+    cn_candidates = [
+        ("cn_qv", ["qv_yoy", "qv"], "社零"),
+        ("cn_cpi", ["nt_val", "cpi"], "CPI"),
+        ("cn_ppi", ["ppi"], "PPI"),
+        ("cn_pmi", ["pmi"], "PMI"),
+    ]
+
+    for func_name, value_candidates, label in cn_candidates:
+        df_metric = _safe_tushare_call(func_name)
+        if df_metric.empty:
+            continue
+
+        value, prev, dt = _extract_latest_metric(
+            df_metric,
+            value_candidates,
+            ["month", "ann_date", "end_date", "date", "period"]
+        )
+        if value is None:
+            continue
+
+        key = {
+            "社零": "CN_消费",
+            "CPI": "CN_CPI",
+            "PPI": "CN_PPI",
+            "PMI": "CN_PMI",
+        }.get(label)
+
+        if key:
+            metrics[key] = {
+                "value": value,
+                "prev": prev,
+                "date": dt.strftime("%Y-%m-%d") if dt is not None else "未知",
+            }
+
+    # 如果 Tushare 没拿到消费数据，再尝试常见宏观接口
+    if "CN_消费" not in metrics:
+        for fn in ["cn_cx", "cn_retail"]:
+            df_metric = _safe_tushare_call(fn)
+            if df_metric.empty:
+                continue
+            value, prev, dt = _extract_latest_metric(
+                df_metric,
+                ["retail_yoy", "qv_yoy", "yoy", "value"],
+                ["month", "ann_date", "date", "period"]
+            )
+            if value is not None:
+                metrics["CN_消费"] = {
+                    "value": value, "prev": prev,
+                    "date": dt.strftime("%Y-%m-%d") if dt is not None else "未知"
+                }
+                break
+
+    # 中国失业率
+    for fn in ["cn_sf", "cn_unemployment"]:
+        df_metric = _safe_tushare_call(fn)
+        if df_metric.empty:
+            continue
+        value, prev, dt = _extract_latest_metric(
+            df_metric,
+            ["unemployment", "unemployment_rate", "urban_unemployment", "value"],
+            ["month", "ann_date", "date", "period"]
+        )
+        if value is not None:
+            metrics["CN_UNRATE"] = {
+                "value": value, "prev": prev,
+                "date": dt.strftime("%Y-%m-%d") if dt is not None else "未知"
+            }
+            break
+
+    # ---------- 美国 BLS ----------
+    us_unrate_rows = _fetch_bls_series("LNS14000000", "美国失业率")
+    us_cpi_rows = _fetch_bls_series("CUUR0000SA0", "美国CPI")
+    us_nfp_rows = _fetch_bls_series("CES0000000001", "美国非农")
+
+    us_unrate = _latest_bls_value(us_unrate_rows)
+    us_unrate_prev = _previous_bls_value(us_unrate_rows)
+    if us_unrate is not None:
+        metrics["US_UNRATE"] = {
+            "value": us_unrate,
+            "prev": us_unrate_prev,
+            "date": f"{us_unrate_rows[-1]['year']}-{us_unrate_rows[-1]['period']}"
+        }
+
+    us_cpi_index = _latest_bls_value(us_cpi_rows)
+    us_cpi_prev_index = _previous_bls_value(us_cpi_rows)
+    # CPI index -> 不直接伪装成同比；只在这里保存指数变化，显示同比时由相邻年度计算较复杂，交给 AI结合标题/数据判断
+    if us_cpi_index is not None:
+        metrics["US_CPI"] = {
+            "value": us_cpi_index,
+            "prev": us_cpi_prev_index,
+            "date": f"{us_cpi_rows[-1]['year']}-{us_cpi_rows[-1]['period']}"
+        }
+
+    us_nfp = _latest_bls_value(us_nfp_rows)
+    us_nfp_prev = _previous_bls_value(us_nfp_rows)
+    if us_nfp is not None:
+        # CES0000000001 是总非农就业水平（千人），这里作为就业规模趋势，不把它误称为月度新增非农
+        metrics["US_NFP"] = {
+            "value": us_nfp,
+            "prev": us_nfp_prev,
+            "date": f"{us_nfp_rows[-1]['year']}-{us_nfp_rows[-1]['period']}"
+        }
+
+    # FRED PCE Price Index：转换为近似同比，使用最近12个月变化
+    pce_latest, pce_prev, pce_dt = _fred_csv_series("PCEPI", "美国PCE物价指数")
+    pce_prev_year = None
+    if pce_latest is not None:
+        try:
+            url = "https://fred.stlouisfed.org/graph/fredgraph.csv?id=PCEPI"
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req, timeout=12) as resp:
+                content = resp.read().decode("utf-8")
+            pce_df = pd.read_csv(pd.io.common.StringIO(content))
+            pce_df[pce_df.columns[1]] = pd.to_numeric(pce_df[pce_df.columns[1]], errors="coerce")
+            pce_df[pce_df.columns[0]] = pd.to_datetime(pce_df[pce_df.columns[0]], errors="coerce")
+            pce_df = pce_df.dropna().sort_values(pce_df.columns[0])
+            if len(pce_df) >= 13:
+                latest_val = float(pce_df.iloc[-1][pce_df.columns[1]])
+                yoy_base = float(pce_df.iloc[-13][pce_df.columns[1]])
+                pce_yoy = (latest_val / yoy_base - 1) * 100 if yoy_base else None
+                pce_prev_year = pce_yoy
+        except Exception:
+            pce_prev_year = None
+
+    if pce_prev_year is not None:
+        metrics["US_PCE"] = {
+            "value": pce_prev_year,
+            "prev": None,
+            "date": pce_dt.strftime("%Y-%m-%d") if pce_dt is not None else "未知"
+        }
+
+    regime = _economic_regime_from_metrics(metrics)
+
+    lines = ["【📊 中美关键经济数据】"]
+
+    display_map = [
+        ("CN_消费", "中国社零/消费"),
+        ("CN_CPI", "中国CPI"),
+        ("CN_PPI", "中国PPI"),
+        ("CN_PMI", "中国制造业PMI"),
+        ("CN_UNRATE", "中国城镇调查失业率"),
+        ("US_UNRATE", "美国失业率"),
+        ("US_CPI", "美国CPI指数"),
+        ("US_NFP", "美国非农就业总量"),
+        ("US_PCE", "美国PCE同比估算"),
+    ]
+
+    for key, label in display_map:
+        d = metrics.get(key)
+        if not d:
+            lines.append(f"❓ {label}: 暂无可用数据")
+            continue
+
+        val = d["value"]
+        prev = d.get("prev")
+        prev_text = f"，前值/上一期≈{prev}" if prev is not None else ""
+        lines.append(
+            f"• {label}: {val:.2f}{prev_text}（数据期: {d.get('date','未知')}）"
+        )
+
+    # 政策目标基线
+    lines.append("")
+    lines.append("【🇨🇳 政策目标/基线参考】")
+    lines.append("• 中国宏观判断应同时比较政府工作报告年度目标、当前实际数据与边际变化，不能只看绝对值。")
+    lines.append("• 社零/PMI/就业偏弱时，优先考虑政策加码与内需修复，而非机械追逐周期股。")
+
+    lines.append("")
+    lines.append("【🧭 宏观状态机结果】")
+    lines.append(f"• 宏观评分（-10~+10）: {regime['宏观评分']:+d}")
+    lines.append(f"• 主要信号: {'；'.join(regime['信号'][:8]) if regime['信号'] else '当前数据不足以形成强方向'}")
+    lines.append(f"• 行业偏向: {', '.join(regime['行业偏向']) if regime['行业偏向'] else '中性'}")
+    lines.append("")
+    lines.append("【执行规则】")
+    lines.append("经济数据不是独立买入信号；必须与重要人物讲话、10Y、美元、金银铜油、美股板块和A股技术/资金面交叉验证。")
+    lines.append("若经济数据与人物讲话方向一致，则提高宏观传导置信度；若相互冲突，则降低置信度，等待价格确认。")
+
+    return "\n".join(lines), metrics, regime
+
+
 # ==========================================
 # 2. 宏观新闻采集
 # ==========================================
@@ -1193,7 +1886,7 @@ def load_evolved_rules() -> str:
     except Exception as e:
         return ""
 
-def generate_ai_report(pool_data, macro_news_text, macro_data_text, us_sector_text, removed_tickers, embargo_text="", sector_tech_data=None):
+def generate_ai_report(pool_data, macro_news_text, macro_data_text, us_sector_text, removed_tickers, embargo_text="", sector_tech_data=None, key_person_text="", economic_data_text="", macro_regime=None):
     print("🧠 [阶段4] 召唤 AI 大脑...")
     client = anthropic.Anthropic(
         api_key=os.environ.get("CLAWSOCKET_API_KEY"),
@@ -1217,6 +1910,8 @@ def generate_ai_report(pool_data, macro_news_text, macro_data_text, us_sector_te
         }
         if d.get('个股新闻'):
             item["个股新闻"] = d['个股新闻']
+        if macro_regime:
+            item["行业宏观偏向"] = macro_regime.get("行业偏向", [])
         compact_pool.append(item)
 
     tech_sector_block = ""
@@ -1257,6 +1952,12 @@ def generate_ai_report(pool_data, macro_news_text, macro_data_text, us_sector_te
 
     {embargo_text}
 
+    【🔥 重要人物讲话与政策预期变化】：
+    {key_person_text}
+
+    【📊 中美关键经济数据与宏观状态机】：
+    {economic_data_text}
+
     【今日全球宏观与A股消息面】：
     {macro_news_text}
 
@@ -1265,6 +1966,9 @@ def generate_ai_report(pool_data, macro_news_text, macro_data_text, us_sector_te
 
     【昨日美股各板块涨跌】：
     {us_sector_text}
+
+    【🧭 宏观行业偏向摘要】
+    {json.dumps(macro_regime, ensure_ascii=False) if macro_regime else "暂无宏观状态机结果"}
 
     {tech_sector_block}
 
@@ -1293,6 +1997,24 @@ def generate_ai_report(pool_data, macro_news_text, macro_data_text, us_sector_te
     第三步（技术选个股）：在主线板块内，**必须优先选择【周期共振】为 True 的标的**（即代码已自动标记满足：日线MACD↑ + 周线MACD↑ + 看涨吞没/启明星/刺穿线/锤子线）。
     第四步（评分确认）：如果存在周期共振标的，直接将其排入Top1-5，除非该标的有重大负面新闻。若无共振标的，再退而求其次选择技术评分≥20的票，但须在报告中明确警示"无共振信号"。
     第五步（新闻权重校验）：对每只入选Top1-5的标的，检查其个股新闻的时效标签。如果主要利好来自[📑前日]或[📄昨日]且个股已大涨，必须降级至观察池或排除。
+
+    第六步（重要人物讲话校验——新增硬规则）：
+    1. 重要人物讲话不是普通新闻，必须判断其是否改变“通胀→利率→美元→商品→行业”的预期链。
+    2. 讲话如果与最新经济数据方向一致，宏观传导置信度提高。
+    3. 讲话如果与最新经济数据矛盾，不得机械追随讲话，必须等待10Y/美元/金银铜油等价格确认。
+    4. 特朗普的关税/财政表态重点分析通胀、财政赤字、产业链与商品需求；Fed官员重点分析通胀、就业、降息路径。
+    5. 对有色、贵金属、能源、成长科技等高宏观敏感行业，重要人物讲话的影响权重高于普通个股新闻。
+
+    第七步（经济数据校验——新增硬规则）：
+    1. 必须比较“实际值、前值、趋势”；如果没有市场预期值，明确写“无预期值，避免虚构”。
+    2. 中国社零/PMI/就业用于判断内需、制造和政策加码空间。
+    3. 美国CPI/PCE/失业率/就业用于判断Fed降息空间、实际利率和全球风险偏好。
+    4. 经济数据不能替代个股技术面；它决定“今天优先去哪些产业链寻找技术确认”。
+    5. 若宏观状态机对某行业形成明显逆风，除非有更强的独立个股催化和技术共振，否则Top1-5降级。
+    6. 宏观状态机是行业方向过滤器，不是机械加分器。
+
+    第八步（最终选股交叉验证）：
+    每只Top1-5必须回答“当前宏观状态 + 重要人物讲话 + 经济数据 + 大宗/美股 + A股行业 + 个股新闻 + 技术面”是否形成同向共振；如果存在明显冲突，必须降低评分并在报告中写明。
 
     【输出格式要求】（严格按以下HTML骨架输出，不要输出任何其他文字）：
 
@@ -1493,6 +2215,8 @@ def match_pool_to_report(pool_data, ai_html, default_stop_loss_pct):
 # ==========================================
 if __name__ == "__main__":
     macro_news = get_free_macro_news()
+    key_person_text = get_key_person_events()
+    economic_data_text, economic_metrics, macro_regime = get_key_economic_data()
     macro_data_text = get_global_macro_data()
     latest_price_map = get_latest_price_map()
 
@@ -1524,7 +2248,10 @@ if __name__ == "__main__":
         us_sector_text,
         removed_tickers,
         embargo_text,
-        sector_tech_summary
+        sector_tech_summary,
+        key_person_text,
+        economic_data_text,
+        macro_regime
     )
 
     # 注入卡片（已废弃，但保留空壳）
