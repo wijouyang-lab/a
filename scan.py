@@ -1,4 +1,4 @@
-tushare只有k线数据。其他数据应该来自于网络。# 消息+逻辑推演驱动版 | 事件→产业链→受益标的 | 个股新闻深度版 | Top5详细分析+评分版
+# 消息+逻辑推演驱动版 | 事件→产业链→受益标的 | 个股新闻深度版 | Top5详细分析+评分版
 # -*- coding: utf-8 -*-
 import pandas as pd
 import numpy as np
@@ -467,62 +467,45 @@ def get_top_300_pool():
 
 
 # ==========================================
-# 2. 【新增】重要人物讲话 + 关键经济数据 + 宏观状态机
+# 2. 【新版】重要人物讲话 + 关键经济数据 + 宏观状态机
 # ==========================================
-# 设计原则：
-# 1) 数据采集失败不能让 scan 失败
-# 2) 经济数据必须考虑“实际值 vs 前值/目标”，而不是只把数字丢给 AI
-# 3) 重要人物讲话必须经过“政策/通胀/利率/商品/行业”传导
-# 4) 经济数据与人物讲话进入最终 AI 选股 prompt，直接参与 Top 1-5 判断
-# 5) 技术评分仍由原程序客观计算，不允许宏观模块篡改技术指标
+# 数据职责：
+# - Tushare：A股行情/K线/资金流/基本信息
+# - 中国宏观：国家统计局/人民银行官方网页
+# - 美国宏观：BLS + BEA，FRED作为PCE兜底
+# - 重要人物：新闻RSS + Federal Reserve官方讲话页
+# ==========================================
+
+import html
 
 KEY_PERSON_KEYWORDS = {
-    "特朗普": [
-        "特朗普", "Trump", "Donald Trump", "President Trump"
-    ],
-    "沃什": [
-        "Kevin Warsh", "Warsh", "沃什", "凯文·沃什"
-    ],
-    "鲍威尔": [
-        "Jerome Powell", "Powell", "鲍威尔"
-    ],
-    "沃勒": [
-        "Christopher Waller", "Waller", "沃勒"
-    ],
-    "鲍曼": [
-        "Michelle Bowman", "Bowman", "鲍曼"
-    ],
-    "贝森特": [
-        "Scott Bessent", "Bessent", "贝森特"
-    ],
-    "卢特尼克": [
-        "Howard Lutnick", "Lutnick", "卢特尼克"
-    ],
-    "潘功胜": [
-        "潘功胜", "Pan Gongsheng"
-    ],
-    "中国人民银行": [
-        "中国人民银行", "央行", "People's Bank of China", "PBOC"
-    ],
-    "财政部": [
-        "财政部", "Ministry of Finance"
-    ],
-    "发改委": [
-        "发改委", "国家发展和改革委员会", "NDRC"
-    ],
+    "特朗普": ["特朗普", "Trump", "Donald Trump", "President Trump"],
+    "沃什": ["Kevin Warsh", "Warsh", "沃什", "凯文·沃什"],
+    "鲍威尔": ["Jerome Powell", "Powell", "鲍威尔"],
+    "沃勒": ["Christopher Waller", "Waller", "沃勒"],
+    "鲍曼": ["Michelle Bowman", "Bowman", "鲍曼"],
+    "贝森特": ["Scott Bessent", "Bessent", "贝森特"],
+    "卢特尼克": ["Howard Lutnick", "Lutnick", "卢特尼克"],
+    "格里尔": ["Jamieson Greer", "Greer", "格里尔"],
+    "潘功胜": ["潘功胜", "Pan Gongsheng"],
+    "中国人民银行": ["中国人民银行", "央行", "People's Bank of China", "PBOC"],
+    "财政部": ["财政部", "Ministry of Finance"],
+    "发改委": ["发改委", "国家发展和改革委员会", "NDRC"],
 }
 
 PERSON_EVENT_KEYWORDS = [
     "讲话", "演讲", "发言", "表示", "称", "称将", "警告",
     "通胀", "inflation", "利率", "rate", "降息", "加息",
     "关税", "tariff", "财政", "赤字", "就业", "失业",
-    "政策", "货币", "贸易", "美元", "经济", "economy"
+    "政策", "货币", "贸易", "美元", "经济", "economy",
 ]
+
 
 def _normalise_event_text(text):
     s = str(text or "").strip()
     s = re.sub(r"\s+", " ", s)
     return s
+
 
 def _classify_person_event(title, source_text=""):
     text = f"{title} {source_text}".lower()
@@ -530,16 +513,17 @@ def _classify_person_event(title, source_text=""):
     hawkish_words = [
         "inflation remains", "inflation is too high", "higher for longer",
         "higher rates", "rate hike", "rates need to stay high",
-        "通胀仍高", "通胀风险", "高利率", "加息", "维持高利率",
-        "关税导致通胀", "tariff inflation"
+        "restrictive policy", "restrictive monetary", "rate cut is premature",
+        "no rush to cut", "通胀仍高", "通胀风险", "高利率", "加息",
+        "维持高利率", "关税导致通胀", "tariff inflation",
     ]
     dovish_words = [
         "rate cut", "rate cuts", "cut rates", "easing", "lower rates",
-        "inflation easing", "disinflation", "通胀回落", "降息",
-        "降息空间", "货币宽松", "通胀下降"
+        "inflation easing", "disinflation", "dovish", "通胀回落", "降息",
+        "降息空间", "货币宽松", "通胀下降", "鸽派",
     ]
     tariff_words = ["tariff", "tariffs", "关税", "贸易战", "进口税"]
-    fiscal_words = ["tax cut", "tax cuts", "spending", "deficit", "减税", "赤字", "财政刺激"]
+    fiscal_words = ["tax cut", "tax cuts", "spending", "deficit", "减税", "赤字", "财政刺激", "fiscal"]
     commodity_words = ["gold", "silver", "copper", "oil", "黄金", "白银", "铜", "原油"]
 
     hawkish = any(w in text for w in hawkish_words)
@@ -584,17 +568,107 @@ def _classify_person_event(title, source_text=""):
         "资产影响": "；".join(dict.fromkeys(asset_bias)) if asset_bias else "暂未形成明确资产方向",
     }
 
+
+def _http_get_text(url, timeout=15, retries=3, headers=None):
+    base_headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/150.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Connection": "close",
+    }
+    if headers:
+        base_headers.update(headers)
+
+    for attempt in range(1, retries + 1):
+        try:
+            req = urllib.request.Request(url, headers=base_headers)
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                raw = resp.read()
+            return raw.decode("utf-8", errors="ignore")
+        except Exception as e:
+            print(f"   ⚠️ 网络请求失败 {attempt}/{retries}: {str(e)[:160]}")
+            if attempt < retries:
+                time.sleep(min(2 * attempt, 5))
+
+    return None
+
+
+def _html_to_text(text):
+    if not text:
+        return ""
+    text = html.unescape(text)
+    text = re.sub(r"<script.*?</script>", " ", text, flags=re.S | re.I)
+    text = re.sub(r"<style.*?</style>", " ", text, flags=re.S | re.I)
+    text = re.sub(r"<[^>]+>", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _parse_num(v):
+    if v is None:
+        return None
+    s = str(v).strip().replace(",", "")
+    s = s.replace("%", "")
+    if not s:
+        return None
+    try:
+        return float(s)
+    except Exception:
+        m = re.search(r"[-+]?\d+(?:\.\d+)?", s)
+        return float(m.group()) if m else None
+
+
+def _get_fed_official_events():
+    url = "https://www.federalreserve.gov/newsevents/speech/2026-speeches.htm"
+    raw = _http_get_text(url, timeout=15, retries=2, headers={"Referer": "https://www.federalreserve.gov/"})
+    if not raw:
+        return []
+
+    person_map = {
+        "Kevin Warsh": "沃什",
+        "Jerome Powell": "鲍威尔",
+        "Christopher Waller": "沃勒",
+        "Michelle W. Bowman": "鲍曼",
+        "Lisa D. Cook": "库克",
+        "Philip N. Jefferson": "杰斐逊",
+        "Stephen I. Miran": "米兰",
+        "Adriana D. Kugler": "库格勒",
+    }
+
+    text = _html_to_text(raw)
+    events = []
+    date_matches = list(re.finditer(r"\b(\d{1,2}/\d{1,2}/2026)\b", text))
+    for i, m in enumerate(date_matches):
+        block_end = date_matches[i + 1].start() if i + 1 < len(date_matches) else min(len(text), m.end() + 1400)
+        block = text[m.start():block_end]
+        person = None
+        for eng, cn in person_map.items():
+            if eng.lower() in block.lower():
+                person = cn
+                break
+        if not person:
+            continue
+        try:
+            dt = datetime.datetime.strptime(m.group(1), "%m/%d/%Y").replace(tzinfo=BEIJING_TZ)
+        except Exception:
+            continue
+        events.append({
+            "time": dt,
+            "person": person,
+            "source": "Federal Reserve",
+            "title": block[:700],
+            **_classify_person_event(block),
+        })
+    return events
+
+
 def get_key_person_events():
-    """
-    抓取最近72小时重要人物/政策讲话。
-    采用现有 RSS 新闻源 + 关键词过滤，不依赖新增 API key。
-    返回既给 AI 读、也可用于宏观行业降权。
-    """
     print("🎙️ [阶段2.4] 正在抓取重要人物讲话与政策预期变化...")
     rss_sources = [
         ("WSJ Markets", "https://feeds.a.dj.com/rss/RSSMarketsMain.xml"),
         ("CNBC Markets", "https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss01&id=10000664"),
         ("新浪财经", "https://rss.sina.com.cn/roll/finance/hot_roll.xml"),
+        ("Google News Trump", "https://news.google.com/rss/search?q=Trump+Fed+inflation+rates+when:3d&hl=en-US&gl=US&ceid=US:en"),
+        ("Google News Fed", "https://news.google.com/rss/search?q=Powell+Warsh+Waller+Fed+inflation+rates+when:3d&hl=en-US&gl=US&ceid=US:en"),
+        ("Google News China Policy", "https://news.google.com/rss/search?q=China+State+Council+PBOC+economy+policy+when:3d&hl=en-US&gl=US&ceid=US:en"),
     ]
 
     events = []
@@ -602,142 +676,127 @@ def get_key_person_events():
 
     for source_name, url in rss_sources:
         try:
-            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-            with urllib.request.urlopen(req, timeout=10) as response:
-                root = ET.fromstring(response.read())
-
+            raw = _http_get_text(url, timeout=12, retries=2)
+            if not raw:
+                continue
+            root = ET.fromstring(raw)
             for item in root.findall(".//item")[:80]:
                 title_node = item.find("title")
                 date_node = item.find("pubDate")
                 if title_node is None or not title_node.text:
                     continue
-
                 title = _normalise_event_text(title_node.text)
-                if not title:
-                    continue
-
                 dt_obj = _parse_rss_date(date_node.text if date_node is not None else "")
                 if dt_obj is None:
                     continue
-
-                hours = (now - dt_obj).total_seconds() / 3600
-                if hours < -2 or hours > 72:
+                age_hours = (now - dt_obj).total_seconds() / 3600
+                if age_hours < -2 or age_hours > 72:
                     continue
 
                 person = None
+                low = title.lower()
                 for person_name, kws in KEY_PERSON_KEYWORDS.items():
-                    if any(k.lower() in title.lower() for k in kws):
+                    if any(k.lower() in low for k in kws):
                         person = person_name
                         break
-
                 if not person:
                     continue
 
-                if not any(k.lower() in title.lower() for k in PERSON_EVENT_KEYWORDS):
-                    continue
-
-                classification = _classify_person_event(title)
-
-                events.append({
-                    "time": dt_obj,
-                    "person": person,
-                    "source": source_name,
-                    "title": title,
-                    **classification,
-                })
+                if source_name.startswith("Google News") or any(k.lower() in low for k in PERSON_EVENT_KEYWORDS):
+                    events.append({
+                        "time": dt_obj,
+                        "person": person,
+                        "source": source_name,
+                        "title": title,
+                        **_classify_person_event(title),
+                    })
         except Exception as e:
-            print(f"   ⚠️ {source_name} 重要人物讲话抓取失败: {e}")
+            print(f"   ⚠️ {source_name} 重要人物讲话抓取失败: {str(e)[:140]}")
 
-    # 去重：相同人物+标题归一化
+    try:
+        for event in _get_fed_official_events():
+            age_hours = (now - event["time"]).total_seconds() / 3600
+            if -24 <= age_hours <= 7 * 24:
+                events.append(event)
+    except Exception as e:
+        print(f"   ⚠️ Federal Reserve 官方讲话抓取失败: {str(e)[:140]}")
+
     unique = {}
     for e in events:
-        key = (e["person"], re.sub(r"[^a-z0-9\u4e00-\u9fff]+", "", e["title"].lower())[:120])
+        key = (e["person"], re.sub(r"[^a-z0-9\u4e00-\u9fff]+", "", e["title"].lower())[:160])
         unique[key] = e
 
     events = sorted(unique.values(), key=lambda x: x["time"], reverse=True)
 
     if not events:
         print("   ℹ️ 最近72小时未抓到可确认的关键人物讲话。")
-        return "最近72小时暂无可确认的关键人物讲话，不能仅凭传闻改变宏观判断。"
+        return "最近72小时暂无可确认的重要人物讲话，不能仅凭传闻改变宏观判断。"
 
     lines = ["【🔥 重要人物讲话/政策预期】"]
-    for e in events[:12]:
-        tag = "[最新]" if (now - e["time"]).total_seconds() <= 12 * 3600 else "[72h内]"
+    for e in events[:20]:
+        age_hours = (now - e["time"]).total_seconds() / 3600
+        tag = "[🔥最新]" if age_hours <= 12 else ("[📰24h]" if age_hours <= 24 else ("[📄72h]" if age_hours <= 72 else "[📑近期]"))
         lines.append(
             f"{tag} [{e['person']}] [{e['source']}] {e['time'].strftime('%m-%d %H:%M')} "
             f"{e['title']} | 语调={e['语调']} | 通胀={e['通胀方向']} | 利率={e['利率方向']} | 资产={e['资产影响']}"
         )
 
-    result = "\n".join(lines)
     print(f"✅ 重要人物讲话监控完成：{len(events)} 条")
-    return result
+    return "\n".join(lines)
 
-def _safe_tushare_call(func_name, **kwargs):
-    """
-    尝试调用 Tushare 宏观接口。
-    某个接口不存在/无权限/网络失败时只跳过该指标。
-    """
-    try:
-        fn = getattr(pro, func_name, None)
-        if fn is None:
-            return pd.DataFrame()
-        df = fn(**kwargs)
-        if df is None or df.empty:
-            return pd.DataFrame()
-        return df
-    except Exception as e:
-        print(f"   ⚠️ Tushare {func_name} 获取失败: {e}")
-        return pd.DataFrame()
 
-def _extract_latest_metric(df, value_candidates, date_candidates=None):
-    if df is None or df.empty:
-        return None, None, None
+def _fetch_nbs_context():
+    urls = [
+        "https://www.stats.gov.cn/sj/zxfb/",
+        "https://www.stats.gov.cn/",
+    ]
+    keywords = [
+        "社会消费品零售总额", "居民消费价格", "生产者价格", "采购经理指数",
+        "城镇调查失业率", "工业增加值", "固定资产投资", "国民经济",
+    ]
+    out = []
+    seen = set()
+    for url in urls:
+        raw = _http_get_text(url, timeout=15, retries=2, headers={"Referer": "https://www.stats.gov.cn/"})
+        if not raw:
+            continue
+        text = _html_to_text(raw)
+        for sent in re.split(r"[。！？]", text):
+            sent = sent.strip()
+            if len(sent) < 20 or not any(k in sent for k in keywords):
+                continue
+            key = re.sub(r"\s+", "", sent)
+            if key not in seen:
+                seen.add(key)
+                out.append(sent[:600])
+    return out[:20]
 
-    date_candidates = date_candidates or ["month", "ann_date", "trade_date", "end_date", "date", "period"]
-    date_col = next((c for c in date_candidates if c in df.columns), None)
 
-    value_col = None
-    for c in value_candidates:
-        if c in df.columns:
-            value_col = c
-            break
-    if value_col is None:
-        return None, None, None
+def _fetch_pbc_context():
+    urls = [
+        "https://www.pbc.gov.cn/goutongjiaoliu/113456/113469/index.html",
+        "https://www.pbc.gov.cn/diaochatongji/",
+    ]
+    keywords = ["社会融资规模", "M2", "人民币贷款", "货币政策"]
+    out = []
+    seen = set()
+    for url in urls:
+        raw = _http_get_text(url, timeout=15, retries=2, headers={"Referer": "https://www.pbc.gov.cn/"})
+        if not raw:
+            continue
+        text = _html_to_text(raw)
+        for sent in re.split(r"[。！？]", text):
+            sent = sent.strip()
+            if len(sent) < 20 or not any(k in sent for k in keywords):
+                continue
+            key = re.sub(r"\s+", "", sent)
+            if key not in seen:
+                seen.add(key)
+                out.append(sent[:600])
+    return out[:20]
 
-    work = df.copy()
-    if date_col:
-        work["_sort_date"] = pd.to_datetime(work[date_col].astype(str), errors="coerce")
-        work = work.sort_values("_sort_date")
-    else:
-        work["_sort_date"] = pd.NaT
 
-    work = work.dropna(subset=[value_col])
-    if work.empty:
-        return None, None, None
-
-    latest = work.iloc[-1]
-    value = None
-    try:
-        value = float(latest[value_col])
-    except Exception:
-        pass
-
-    latest_date = latest["_sort_date"]
-    if pd.isna(latest_date):
-        latest_date = None
-    prev_value = None
-    if len(work) >= 2:
-        try:
-            prev_value = float(work.iloc[-2][value_col])
-        except Exception:
-            prev_value = None
-
-    return value, prev_value, latest_date
-
-def _fetch_bls_series(series_id, label, limit=8):
-    """
-    BLS public API，无需 key。
-    """
+def _fetch_bls_series(series_id, label, limit=18):
     url = "https://api.bls.gov/publicAPI/v2/timeseries/data/"
     payload = json.dumps({
         "seriesid": [series_id],
@@ -745,522 +804,412 @@ def _fetch_bls_series(series_id, label, limit=8):
         "endyear": str(get_bj_time().year),
     }).encode("utf-8")
 
-    req = urllib.request.Request(
-        url,
-        data=payload,
-        headers={"Content-Type": "application/json", "User-Agent": "Mozilla/5.0"},
-        method="POST",
-    )
+    for attempt in range(1, 4):
+        try:
+            req = urllib.request.Request(
+                url,
+                data=payload,
+                headers={"Content-Type": "application/json", "User-Agent": "Mozilla/5.0"},
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+            series = data.get("Results", {}).get("series", [])
+            if not series:
+                return []
+            rows = []
+            for row in series[0].get("data", []):
+                try:
+                    period = str(row["period"])
+                    if not period.startswith("M"):
+                        continue
+                    rows.append({
+                        "year": int(row["year"]),
+                        "period": period,
+                        "value": float(row["value"]),
+                    })
+                except Exception:
+                    continue
+            rows.sort(key=lambda x: (x["year"], x["period"]))
+            return rows[-limit:]
+        except Exception as e:
+            print(f"   ⚠️ BLS {label} 第{attempt}/3次失败: {str(e)[:140]}")
+            if attempt < 3:
+                time.sleep(attempt)
+    return []
 
-    try:
-        with urllib.request.urlopen(req, timeout=12) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-
-        series = data.get("Results", {}).get("series", [])
-        if not series:
-            return []
-
-        rows = series[0].get("data", [])
-        out = []
-        for row in rows[:limit]:
-            try:
-                out.append({
-                    "year": int(row["year"]),
-                    "period": row["period"],
-                    "value": float(row["value"]),
-                })
-            except Exception:
-                continue
-        return out
-    except Exception as e:
-        print(f"   ⚠️ BLS {label} 获取失败: {e}")
-        return []
 
 def _latest_bls_value(rows):
-    if not rows:
-        return None
-    usable = [r for r in rows if str(r.get("period", "")).startswith("M")]
-    if not usable:
-        usable = rows
-    usable = sorted(usable, key=lambda x: (x["year"], x["period"]))
-    return usable[-1]["value"] if usable else None
+    return rows[-1]["value"] if rows else None
+
 
 def _previous_bls_value(rows):
+    return rows[-2]["value"] if len(rows) >= 2 else None
+
+
+def _same_month_last_year(rows):
     if not rows:
         return None
-    usable = [r for r in rows if str(r.get("period", "")).startswith("M")]
-    if not usable:
-        usable = rows
-    usable = sorted(usable, key=lambda x: (x["year"], x["period"]))
-    return usable[-2]["value"] if len(usable) >= 2 else None
+    latest = rows[-1]
+    target = (latest["year"] - 1, latest["period"])
+    for row in rows:
+        if (row["year"], row["period"]) == target:
+            return row["value"]
+    return None
+
 
 def _fred_csv_series(series_id, label):
-    """
-    FRED 公共 CSV 端点，无需 API key。
-    """
     url = f"https://fred.stlouisfed.org/graph/fredgraph.csv?id={urllib.parse.quote(series_id)}"
-    try:
-        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-        with urllib.request.urlopen(req, timeout=12) as resp:
-            content = resp.read().decode("utf-8")
+    for attempt in range(1, 4):
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0", "Accept": "text/csv,*/*"})
+            with urllib.request.urlopen(req, timeout=20) as resp:
+                content = resp.read().decode("utf-8", errors="ignore")
+            df = pd.read_csv(pd.io.common.StringIO(content))
+            if df.empty:
+                return None, None, None, None
+            date_col, value_col = df.columns[:2]
+            df[date_col] = pd.to_datetime(df[date_col], errors="coerce")
+            df[value_col] = pd.to_numeric(df[value_col], errors="coerce")
+            df = df.dropna(subset=[date_col, value_col]).sort_values(date_col)
+            if len(df) < 2:
+                return None, None, None, None
+            latest = float(df.iloc[-1][value_col])
+            prev = float(df.iloc[-2][value_col])
+            dt = df.iloc[-1][date_col]
+            yoy = None
+            target = dt - pd.DateOffset(years=1)
+            idx = (df[date_col] - target).abs().idxmin()
+            if idx is not None:
+                base = df.loc[idx, value_col]
+                if pd.notna(base) and float(base) != 0:
+                    yoy = (latest / float(base) - 1) * 100
+            return latest, prev, yoy, dt
+        except Exception as e:
+            print(f"   ⚠️ FRED {label} 第{attempt}/3次失败: {str(e)[:140]}")
+            if attempt < 3:
+                time.sleep(attempt * 2)
+    return None, None, None, None
 
-        df = pd.read_csv(pd.io.common.StringIO(content))
-        if df.empty:
-            return None, None, None
 
-        date_col = df.columns[0]
-        value_col = df.columns[1]
-        df[value_col] = pd.to_numeric(df[value_col], errors="coerce")
-        df[date_col] = pd.to_datetime(df[date_col], errors="coerce")
-        df = df.dropna(subset=[date_col, value_col]).sort_values(date_col)
+def _fetch_bea_pce():
+    urls = [
+        "https://www.bea.gov/news/2026/personal-income-and-outlays-july-2026",
+        "https://www.bea.gov/data/personal-consumption-expenditures-price-index",
+    ]
+    for url in urls:
+        raw = _http_get_text(url, timeout=15, retries=2, headers={"Referer": "https://www.bea.gov/"})
+        if not raw:
+            continue
+        text = _html_to_text(raw)
+        result = {"pce_yoy": None, "core_pce_yoy": None, "date": "未知", "source": "BEA"}
+        date_match = re.search(r"(January|February|March|April|May|June|July|August|September|October|November|December)\s+(20\d{2})", text, re.I)
+        if date_match:
+            result["date"] = f"{date_match.group(1)} {date_match.group(2)}"
+        pce_match = re.search(r"PCE price index.*?same month one year ago.*?increased\s+([0-9.]+)\s*percent", text, re.I | re.S)
+        core_match = re.search(r"Excluding food and energy.*?same month one year ago.*?increased\s+([0-9.]+)\s*percent", text, re.I | re.S)
+        if pce_match:
+            result["pce_yoy"] = float(pce_match.group(1))
+        if core_match:
+            result["core_pce_yoy"] = float(core_match.group(1))
+        if result["pce_yoy"] is not None or result["core_pce_yoy"] is not None:
+            return result
+    return None
 
-        if df.empty:
-            return None, None, None
 
-        latest = float(df.iloc[-1][value_col])
-        prev = float(df.iloc[-2][value_col]) if len(df) >= 2 else None
-        dt = df.iloc[-1][date_col]
-        return latest, prev, dt
-    except Exception as e:
-        print(f"   ⚠️ FRED {label} 获取失败: {e}")
-        return None, None, None
+def _build_us_metrics():
+    metrics = {}
+
+    unrate = _fetch_bls_series("LNS14000000", "美国失业率", limit=18)
+    if unrate:
+        latest, prev, row = unrate[-1]["value"], unrate[-2]["value"], unrate[-1]
+        metrics["US_UNRATE"] = {
+            "value": latest,
+            "prev": prev,
+            "date": f"{row['year']}-{row['period']}",
+            "unit": "%",
+            "source": "BLS",
+        }
+
+    cpi = _fetch_bls_series("CUUR0000SA0", "美国CPI", limit=30)
+    if cpi:
+        latest_index = cpi[-1]["value"]
+        prev_index = cpi[-2]["value"] if len(cpi) >= 2 else None
+        base = _same_month_last_year(cpi)
+        yoy = ((latest_index / base) - 1) * 100 if base not in (None, 0) else None
+        row = cpi[-1]
+        metrics["US_CPI"] = {
+            "value": yoy,
+            "raw_index": latest_index,
+            "prev_index": prev_index,
+            "date": f"{row['year']}-{row['period']}",
+            "unit": "%",
+            "source": "BLS",
+        }
+
+    # CES0000000001 是非农就业存量，先转为月度变化，作为新增非农近似。
+    nfp = _fetch_bls_series("CES0000000001", "美国非农就业", limit=18)
+    if nfp:
+        latest_total = nfp[-1]["value"]
+        prev_total = nfp[-2]["value"]
+        change = latest_total - prev_total
+        row = nfp[-1]
+        metrics["US_NFP"] = {
+            "value": change,
+            "employment_level": latest_total,
+            "prev_employment_level": prev_total,
+            "date": f"{row['year']}-{row['period']}",
+            "unit": "千人",
+            "source": "BLS(由非农总量月差计算)",
+        }
+
+    bea = _fetch_bea_pce()
+    if bea:
+        if bea.get("pce_yoy") is not None:
+            metrics["US_PCE"] = {
+                "value": bea["pce_yoy"], "prev": None,
+                "date": bea.get("date", "未知"), "unit": "%", "source": "BEA",
+            }
+        if bea.get("core_pce_yoy") is not None:
+            metrics["US_CORE_PCE"] = {
+                "value": bea["core_pce_yoy"], "prev": None,
+                "date": bea.get("date", "未知"), "unit": "%", "source": "BEA",
+            }
+
+    if "US_PCE" not in metrics:
+        _, _, yoy, dt = _fred_csv_series("PCEPI", "美国PCE")
+        if yoy is not None:
+            metrics["US_PCE"] = {
+                "value": yoy, "prev": None,
+                "date": dt.strftime("%Y-%m-%d") if dt is not None else "未知",
+                "unit": "%", "source": "FRED-Fallback",
+            }
+
+    if "US_CORE_PCE" not in metrics:
+        _, _, yoy, dt = _fred_csv_series("PCEPILFE", "美国核心PCE")
+        if yoy is not None:
+            metrics["US_CORE_PCE"] = {
+                "value": yoy, "prev": None,
+                "date": dt.strftime("%Y-%m-%d") if dt is not None else "未知",
+                "unit": "%", "source": "FRED-Fallback",
+            }
+
+    return metrics
+
 
 def _economic_regime_from_metrics(metrics):
-    """
-    根据实际值、前值和政策目标形成可解释的宏观状态。
-    该分数只作为“宏观修正”，不改动原有技术评分。
-    """
     score = 0
     signals = []
     sector_bias = {
-        "消费": 0,
-        "有色金属": 0,
-        "贵金属": 0,
-        "成长科技": 0,
-        "金融": 0,
-        "周期制造": 0,
-        "能源": 0,
+        "消费": 0, "有色金属": 0, "贵金属": 0,
+        "成长科技": 0, "金融": 0, "周期制造": 0, "能源": 0,
     }
 
-    # 中国社消
     r = metrics.get("CN_消费")
-    if r and r["value"] is not None:
+    if r and r.get("value") is not None:
         v = r["value"]
-        prev = r.get("prev")
-        if v >= 4:
-            score += 2
-            sector_bias["消费"] += 2
-            sector_bias["周期制造"] += 1
-            signals.append(f"中国消费较强（社零约{v:.1f}%）")
-        elif v < 1.5:
-            score -= 2
-            sector_bias["消费"] -= 2
+        if v >= 5:
+            score += 2; sector_bias["消费"] += 2; sector_bias["周期制造"] += 1
+            signals.append(f"中国消费偏强（社零约{v:.1f}%）")
+        elif v < 2:
+            score -= 2; sector_bias["消费"] -= 2
             signals.append(f"中国消费偏弱（社零约{v:.1f}%）")
 
-        if prev is not None and v < prev:
-            sector_bias["消费"] -= 1
-            signals.append("社零环比前期边际走弱")
-
-    # 中国 PMI
     r = metrics.get("CN_PMI")
-    if r and r["value"] is not None:
+    if r and r.get("value") is not None:
         v = r["value"]
         if v >= 50.5:
-            sector_bias["周期制造"] += 2
-            sector_bias["有色金属"] += 1
-            signals.append(f"中国制造业PMI偏扩张（{v:.1f}）")
+            sector_bias["周期制造"] += 2; sector_bias["有色金属"] += 1
+            signals.append(f"中国制造业偏扩张（PMI {v:.1f}）")
         elif v < 49.5:
-            sector_bias["周期制造"] -= 2
-            sector_bias["有色金属"] -= 1
-            signals.append(f"中国制造业PMI偏弱（{v:.1f}）")
+            sector_bias["周期制造"] -= 2; sector_bias["有色金属"] -= 1
+            signals.append(f"中国制造业偏弱（PMI {v:.1f}）")
 
-    # 中国 CPI/PPI
     r = metrics.get("CN_CPI")
-    if r and r["value"] is not None:
+    if r and r.get("value") is not None:
         v = r["value"]
         if v > 2:
-            sector_bias["消费"] += 1
-            sector_bias["能源"] += 1
-            signals.append(f"中国CPI同比偏高（{v:.1f}%）")
+            sector_bias["消费"] += 1; sector_bias["能源"] += 1
+            signals.append(f"中国价格环境偏强（CPI {v:.1f}%）")
         elif v < 0:
-            sector_bias["消费"] -= 1
-            sector_bias["周期制造"] -= 1
+            sector_bias["消费"] -= 1; sector_bias["周期制造"] -= 1
             signals.append(f"中国价格环境偏弱（CPI {v:.1f}%）")
 
     r = metrics.get("CN_PPI")
-    if r and r["value"] is not None:
+    if r and r.get("value") is not None:
         v = r["value"]
         if v > 0:
-            sector_bias["周期制造"] += 1
-            sector_bias["有色金属"] += 1
-            signals.append(f"中国PPI转正/改善（{v:.1f}%）")
+            sector_bias["周期制造"] += 1; sector_bias["有色金属"] += 1
+            signals.append(f"中国PPI改善（{v:.1f}%）")
         elif v < -2:
-            sector_bias["周期制造"] -= 1
-            sector_bias["有色金属"] -= 1
+            sector_bias["周期制造"] -= 1; sector_bias["有色金属"] -= 1
             signals.append(f"中国PPI明显偏弱（{v:.1f}%）")
 
-    # 美国通胀
-    r = metrics.get("US_CPI")
-    if r and r["value"] is not None:
+    r = metrics.get("CN_UNRATE")
+    if r and r.get("value") is not None:
         v = r["value"]
-        prev = r.get("prev")
+        if v < 5:
+            sector_bias["消费"] += 1
+            signals.append(f"中国就业相对稳定（失业率{v:.1f}%）")
+        elif v >= 6:
+            sector_bias["消费"] -= 1; score -= 1
+            signals.append(f"中国就业压力偏高（失业率{v:.1f}%）")
+
+    r = metrics.get("US_CPI")
+    if r and r.get("value") is not None:
+        v = r["value"]
+        if v > 3:
+            sector_bias["成长科技"] -= 1; sector_bias["贵金属"] -= 1
+            signals.append(f"美国CPI偏高（{v:.1f}%）")
+        elif v < 2.5:
+            sector_bias["成长科技"] += 1; sector_bias["贵金属"] += 1
+            signals.append(f"美国CPI较温和（{v:.1f}%）")
+
+    r = metrics.get("US_CORE_PCE")
+    if r and r.get("value") is not None:
+        v = r["value"]
+        if v > 3:
+            sector_bias["成长科技"] -= 1; sector_bias["贵金属"] -= 1
+            signals.append(f"美国核心PCE偏高（{v:.1f}%）")
+        elif v < 2.5:
+            sector_bias["成长科技"] += 1; sector_bias["贵金属"] += 1
+            signals.append(f"美国核心PCE较温和（{v:.1f}%）")
+
+    r = metrics.get("US_PCE")
+    if r and r.get("value") is not None:
+        v = r["value"]
         if v > 3:
             sector_bias["成长科技"] -= 1
-            sector_bias["贵金属"] -= 1
-            sector_bias["有色金属"] -= 1
-            signals.append(f"美国CPI仍偏高（{v:.1f}）")
+            signals.append(f"美国PCE偏高（{v:.1f}%）")
         elif v < 2.5:
             sector_bias["成长科技"] += 1
-            sector_bias["贵金属"] += 1
-            signals.append(f"美国通胀较温和（{v:.1f}）")
-        if prev is not None and v < prev:
-            signals.append("美国通胀边际回落")
+            signals.append(f"美国PCE较温和（{v:.1f}%）")
 
-    # 美国失业率
     r = metrics.get("US_UNRATE")
-    if r and r["value"] is not None:
+    if r and r.get("value") is not None:
         v = r["value"]
-        prev = r.get("prev")
         if v >= 5:
-            sector_bias["成长科技"] += 1
-            sector_bias["贵金属"] += 1
-            sector_bias["周期制造"] -= 1
-            signals.append(f"美国就业明显走弱（失业率{v:.1f}%）")
+            sector_bias["成长科技"] += 1; sector_bias["贵金属"] += 1; sector_bias["周期制造"] -= 1
+            signals.append(f"美国就业明显转弱（失业率{v:.1f}%）")
         elif v <= 4:
             sector_bias["成长科技"] -= 1
             signals.append(f"美国就业仍偏紧（失业率{v:.1f}%）")
-        if prev is not None and v > prev:
-            signals.append("美国失业率边际上升")
 
-    # 美国非农
     r = metrics.get("US_NFP")
-    if r and r["value"] is not None:
+    if r and r.get("value") is not None:
         v = r["value"]
         if v > 180:
-            sector_bias["周期制造"] += 1
-            sector_bias["成长科技"] -= 1
-            signals.append(f"美国非农仍偏强（约{v:.0f}千）")
+            sector_bias["周期制造"] += 1; sector_bias["成长科技"] -= 1
+            signals.append(f"美国新增非农较强（约{v:.0f}千）")
         elif v < 100:
-            sector_bias["成长科技"] += 1
-            sector_bias["周期制造"] -= 1
-            signals.append(f"美国就业增长偏弱（约{v:.0f}千）")
-
-    # 美国 PCE / Core PCE（FRED）
-    r = metrics.get("US_PCE")
-    if r and r["value"] is not None:
-        v = r["value"]
-        if v > 3:
-            sector_bias["成长科技"] -= 1
-            sector_bias["贵金属"] -= 1
-            signals.append(f"美国PCE仍偏高（{v:.1f}%附近）")
-        elif v < 2.5:
-            sector_bias["成长科技"] += 1
-            sector_bias["贵金属"] += 1
-            signals.append(f"美国PCE较温和（{v:.1f}%附近）")
+            sector_bias["成长科技"] += 1; sector_bias["周期制造"] -= 1
+            signals.append(f"美国新增非农偏弱（约{v:.0f}千）")
 
     ranked = sorted(sector_bias.items(), key=lambda x: x[1], reverse=True)
     strongest = [f"{k}{v:+d}" for k, v in ranked if v != 0]
-
     return {
         "宏观评分": max(-10, min(10, score)),
         "信号": signals,
         "行业偏向": strongest[:8],
     }
 
-def get_key_economic_data():
-    """
-    中国 + 美国核心经济数据。
-    中国侧优先 Tushare；美国侧使用 BLS/FRED。
-    这里不要求新增 Secret。
-    """
-    print("📊 [阶段2.7] 正在抓取中国/美国关键经济数据...")
 
+def get_key_economic_data():
+    print("📊 [阶段2.7] 正在抓取中美关键经济数据...")
     metrics = {}
 
-    # ---------- 中国 ----------
-    # 社零/消费
-    cn_candidates = [
-        ("cn_qv", ["qv_yoy", "qv"], "社零"),
-        ("cn_cpi", ["nt_val", "cpi"], "CPI"),
-        ("cn_ppi", ["ppi"], "PPI"),
-        ("cn_pmi", ["pmi"], "PMI"),
-    ]
+    # 中国：官方网页语境。页面无法稳定解析结构化数字时，不伪造数字；将官方文本交给AI。
+    nbs_context = _fetch_nbs_context()
+    pbc_context = _fetch_pbc_context()
 
-    for func_name, value_candidates, label in cn_candidates:
-        df_metric = _safe_tushare_call(func_name)
-        if df_metric.empty:
-            continue
+    # 尝试从近期官方文本中提取明确百分比，匹配到时再结构化。
+    nbs_text = " ".join(nbs_context)
+    patterns = {
+        "CN_消费": [r"社会消费品零售总额.*?(?:增长|同比).*?([+-]?\d+(?:\.\d+)?)%", r"社零.*?([+-]?\d+(?:\.\d+)?)%"],
+        "CN_CPI": [r"居民消费价格.*?(?:同比|上涨|下降).*?([+-]?\d+(?:\.\d+)?)%", r"CPI.*?([+-]?\d+(?:\.\d+)?)%"],
+        "CN_PPI": [r"工业生产者出厂价格.*?(?:同比|上涨|下降).*?([+-]?\d+(?:\.\d+)?)%", r"PPI.*?([+-]?\d+(?:\.\d+)?)%"],
+        "CN_PMI": [r"(?:制造业)?采购经理指数.*?([+-]?\d+(?:\.\d+)?)", r"PMI.*?([+-]?\d+(?:\.\d+)?)"],
+        "CN_UNRATE": [r"城镇调查失业率.*?([+-]?\d+(?:\.\d+)?)%", r"失业率.*?([+-]?\d+(?:\.\d+)?)%"],
+    }
+    labels = {"CN_消费": "中国社零", "CN_CPI": "中国CPI", "CN_PPI": "中国PPI", "CN_PMI": "中国PMI", "CN_UNRATE": "中国城镇调查失业率"}
 
-        value, prev, dt = _extract_latest_metric(
-            df_metric,
-            value_candidates,
-            ["month", "ann_date", "end_date", "date", "period"]
-        )
-        if value is None:
-            continue
-
-        key = {
-            "社零": "CN_消费",
-            "CPI": "CN_CPI",
-            "PPI": "CN_PPI",
-            "PMI": "CN_PMI",
-        }.get(label)
-
-        if key:
-            metrics[key] = {
-                "value": value,
-                "prev": prev,
-                "date": dt.strftime("%Y-%m-%d") if dt is not None else "未知",
-            }
-
-    # 如果 Tushare 没拿到消费数据，再尝试常见宏观接口
-    if "CN_消费" not in metrics:
-        for fn in ["cn_cx", "cn_retail"]:
-            df_metric = _safe_tushare_call(fn)
-            if df_metric.empty:
-                continue
-            value, prev, dt = _extract_latest_metric(
-                df_metric,
-                ["retail_yoy", "qv_yoy", "yoy", "value"],
-                ["month", "ann_date", "date", "period"]
-            )
-            if value is not None:
-                metrics["CN_消费"] = {
-                    "value": value, "prev": prev,
-                    "date": dt.strftime("%Y-%m-%d") if dt is not None else "未知"
-                }
+    for key, p_list in patterns.items():
+        value = None
+        for p in p_list:
+            m = re.search(p, nbs_text, flags=re.I | re.S)
+            if m:
+                value = _parse_num(m.group(1))
                 break
-
-    # 中国失业率
-    for fn in ["cn_sf", "cn_unemployment"]:
-        df_metric = _safe_tushare_call(fn)
-        if df_metric.empty:
-            continue
-        value, prev, dt = _extract_latest_metric(
-            df_metric,
-            ["unemployment", "unemployment_rate", "urban_unemployment", "value"],
-            ["month", "ann_date", "date", "period"]
-        )
         if value is not None:
-            metrics["CN_UNRATE"] = {
-                "value": value, "prev": prev,
-                "date": dt.strftime("%Y-%m-%d") if dt is not None else "未知"
-            }
-            break
+            metrics[key] = {"value": value, "prev": None, "date": "近期官方发布", "unit": "%", "source": "国家统计局/官方网页"}
+            print(f"   ✅ {labels[key]}: {value}")
+        else:
+            print(f"   ℹ️ {labels[key]}: 当前未解析到可靠结构化数值，保留官方文本给AI")
 
-    # ---------- 美国 BLS ----------
-    us_unrate_rows = _fetch_bls_series("LNS14000000", "美国失业率")
-    us_cpi_rows = _fetch_bls_series("CUUR0000SA0", "美国CPI")
-    us_nfp_rows = _fetch_bls_series("CES0000000001", "美国非农")
-
-    us_unrate = _latest_bls_value(us_unrate_rows)
-    us_unrate_prev = _previous_bls_value(us_unrate_rows)
-    if us_unrate is not None:
-        metrics["US_UNRATE"] = {
-            "value": us_unrate,
-            "prev": us_unrate_prev,
-            "date": f"{us_unrate_rows[-1]['year']}-{us_unrate_rows[-1]['period']}"
+    if pbc_context:
+        metrics["CN_PBC_TEXT"] = {
+            "value": None, "prev": None, "date": get_bj_time().strftime("%Y-%m-%d"),
+            "text": pbc_context, "source": "中国人民银行官方网页",
         }
 
-    us_cpi_index = _latest_bls_value(us_cpi_rows)
-    us_cpi_prev_index = _previous_bls_value(us_cpi_rows)
-    # CPI index -> 不直接伪装成同比；只在这里保存指数变化，显示同比时由相邻年度计算较复杂，交给 AI结合标题/数据判断
-    if us_cpi_index is not None:
-        metrics["US_CPI"] = {
-            "value": us_cpi_index,
-            "prev": us_cpi_prev_index,
-            "date": f"{us_cpi_rows[-1]['year']}-{us_cpi_rows[-1]['period']}"
-        }
-
-    us_nfp = _latest_bls_value(us_nfp_rows)
-    us_nfp_prev = _previous_bls_value(us_nfp_rows)
-    if us_nfp is not None:
-        # CES0000000001 是总非农就业水平（千人），这里作为就业规模趋势，不把它误称为月度新增非农
-        metrics["US_NFP"] = {
-            "value": us_nfp,
-            "prev": us_nfp_prev,
-            "date": f"{us_nfp_rows[-1]['year']}-{us_nfp_rows[-1]['period']}"
-        }
-
-    # FRED PCE Price Index：转换为近似同比，使用最近12个月变化
-    pce_latest, pce_prev, pce_dt = _fred_csv_series("PCEPI", "美国PCE物价指数")
-    pce_prev_year = None
-    if pce_latest is not None:
-        try:
-            url = "https://fred.stlouisfed.org/graph/fredgraph.csv?id=PCEPI"
-            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-            with urllib.request.urlopen(req, timeout=12) as resp:
-                content = resp.read().decode("utf-8")
-            pce_df = pd.read_csv(pd.io.common.StringIO(content))
-            pce_df[pce_df.columns[1]] = pd.to_numeric(pce_df[pce_df.columns[1]], errors="coerce")
-            pce_df[pce_df.columns[0]] = pd.to_datetime(pce_df[pce_df.columns[0]], errors="coerce")
-            pce_df = pce_df.dropna().sort_values(pce_df.columns[0])
-            if len(pce_df) >= 13:
-                latest_val = float(pce_df.iloc[-1][pce_df.columns[1]])
-                yoy_base = float(pce_df.iloc[-13][pce_df.columns[1]])
-                pce_yoy = (latest_val / yoy_base - 1) * 100 if yoy_base else None
-                pce_prev_year = pce_yoy
-        except Exception:
-            pce_prev_year = None
-
-    if pce_prev_year is not None:
-        metrics["US_PCE"] = {
-            "value": pce_prev_year,
-            "prev": None,
-            "date": pce_dt.strftime("%Y-%m-%d") if pce_dt is not None else "未知"
-        }
+    metrics.update(_build_us_metrics())
 
     regime = _economic_regime_from_metrics(metrics)
 
     lines = ["【📊 中美关键经济数据】"]
-
     display_map = [
-        ("CN_消费", "中国社零/消费"),
+        ("CN_消费", "中国社会消费品零售"),
         ("CN_CPI", "中国CPI"),
         ("CN_PPI", "中国PPI"),
         ("CN_PMI", "中国制造业PMI"),
         ("CN_UNRATE", "中国城镇调查失业率"),
+        ("US_CPI", "美国CPI同比"),
         ("US_UNRATE", "美国失业率"),
-        ("US_CPI", "美国CPI指数"),
-        ("US_NFP", "美国非农就业总量"),
-        ("US_PCE", "美国PCE同比估算"),
+        ("US_NFP", "美国新增非农就业近似"),
+        ("US_PCE", "美国PCE同比"),
+        ("US_CORE_PCE", "美国核心PCE同比"),
     ]
 
     for key, label in display_map:
         d = metrics.get(key)
         if not d:
-            lines.append(f"❓ {label}: 暂无可用数据")
+            lines.append(f"❓ {label}: 暂无可靠结构化数值")
             continue
-
-        val = d["value"]
+        val = d.get("value")
         prev = d.get("prev")
-        prev_text = f"，前值/上一期≈{prev}" if prev is not None else ""
-        lines.append(
-            f"• {label}: {val:.2f}{prev_text}（数据期: {d.get('date','未知')}）"
-        )
+        if val is None:
+            lines.append(f"❓ {label}: 已连接数据源，但当前不输出未经确认的数字")
+            continue
+        prev_text = f" | 前值={prev:.2f}" if prev is not None else ""
+        lines.append(f"• {label}: {val:.2f}{d.get('unit','%')}{prev_text} | 数据期={d.get('date','未知')} | 来源={d.get('source','网络')}")
 
-    # 政策目标基线
-    lines.append("")
-    lines.append("【🇨🇳 政策目标/基线参考】")
-    lines.append("• 中国宏观判断应同时比较政府工作报告年度目标、当前实际数据与边际变化，不能只看绝对值。")
-    lines.append("• 社零/PMI/就业偏弱时，优先考虑政策加码与内需修复，而非机械追逐周期股。")
+    if nbs_context:
+        lines.append("")
+        lines.append("【🇨🇳 国家统计局近期官方文本】")
+        lines.extend([f"• {x}" for x in nbs_context[:10]])
 
-    lines.append("")
-    lines.append("【🧭 宏观状态机结果】")
-    lines.append(f"• 宏观评分（-10~+10）: {regime['宏观评分']:+d}")
-    lines.append(f"• 主要信号: {'；'.join(regime['信号'][:8]) if regime['信号'] else '当前数据不足以形成强方向'}")
-    lines.append(f"• 行业偏向: {', '.join(regime['行业偏向']) if regime['行业偏向'] else '中性'}")
-    lines.append("")
-    lines.append("【执行规则】")
-    lines.append("经济数据不是独立买入信号；必须与重要人物讲话、10Y、美元、金银铜油、美股板块和A股技术/资金面交叉验证。")
-    lines.append("若经济数据与人物讲话方向一致，则提高宏观传导置信度；若相互冲突，则降低置信度，等待价格确认。")
+    if pbc_context:
+        lines.append("")
+        lines.append("【🏦 中国人民银行近期官方文本】")
+        lines.extend([f"• {x}" for x in pbc_context[:8]])
+
+    lines.extend([
+        "", "【🇺🇸 美国宏观解释规则】",
+        "• CPI必须使用同比口径，不能把CPI指数水平直接当成通胀率。",
+        "• 非农这里使用非农就业总量的月度变化作为近似新增就业，明确标记为近似值。",
+        "• PCE优先BEA，FRED仅作为官方分发渠道失败时的fallback。",
+        "", "【🧭 宏观状态机结果】",
+        f"• 宏观评分（-10~+10）: {regime['宏观评分']:+d}",
+        f"• 主要信号: {'；'.join(regime['信号'][:12]) if regime['信号'] else '数据不足以形成强方向'}",
+        f"• 行业偏向: {', '.join(regime['行业偏向']) if regime['行业偏向'] else '中性'}",
+        "", "【执行规则】",
+        "经济数据决定优先寻找的产业链，不直接机械给单只股票加分。",
+        "重要人物讲话必须与经济数据、10Y、美元、金银铜油和美股板块交叉验证。",
+        "没有可靠一致预期值时，禁止虚构‘高于预期/低于预期’。",
+    ])
 
     return "\n".join(lines), metrics, regime
 
-
-# ==========================================
-# 2. 宏观新闻采集
-# ==========================================
-def _parse_rss_date(date_str: str):
-    if not date_str:
-        return None
-    try:
-        dt = email.utils.parsedate_to_datetime(date_str.strip())
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=datetime.timezone.utc)
-        return dt.astimezone(BEIJING_TZ)
-    except Exception:
-        pass
-    for fmt in ("%a, %d %b %Y %H:%M:%S", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
-        try:
-            dt = datetime.datetime.strptime(date_str.strip()[:25], fmt)
-            return dt.replace(tzinfo=BEIJING_TZ)
-        except Exception:
-            pass
-    return None
-
-def _get_macro_news_time_tag(dt_obj):
-    if dt_obj is None:
-        return "[📑前日-低权重]", "20% → 5分"
-    now_bj = get_bj_time()
-    delta = now_bj - dt_obj
-    hours = delta.total_seconds() / 3600
-    if hours <= 6:
-        return "[🔥今日最新-权重最高]", "满分25分"
-    elif delta.days == 0 or (delta.days == 1 and hours <= 24):
-        return "[📰今日-高权重]", "80% → 20分"
-    elif delta.days <= 2 or (delta.days == 2 and hours <= 48):
-        return "[📄昨日-中等权重]", "50% → 12分"
-    elif delta.days <= 3 or (delta.days == 3 and hours <= 72):
-        return "[📑前日-低权重]", "20% → 5分"
-    else:
-        return "[📑前日-低权重]", "20% → 5分"
-
-def get_free_macro_news():
-    print("📡 [阶段2] 正在抓取全球财经与A股新闻...")
-    news_entries = []
-    sources = [
-        ("新浪A股热点", "https://rss.sina.com.cn/roll/finance/hot_roll.xml"),
-        ("华尔街日报(宏观)", "https://feeds.a.dj.com/rss/RSSMarketsMain.xml"),
-        ("CNBC(宏观)", "https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss01&id=10000664"),
-    ]
-
-    for source_name, url in sources:
-        try:
-            req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-            with urllib.request.urlopen(req, timeout=10) as response:
-                xml_data = response.read()
-            root = ET.fromstring(xml_data)
-            items = root.findall('.//item')[:20]
-            for item in items:
-                title = item.find('title')
-                pub_date = item.find('pubDate')
-                if title is not None:
-                    time_str = pub_date.text[:25] if pub_date is not None else ""
-                    dt_obj = _parse_rss_date(time_str)
-                    if dt_obj is None:
-                        continue
-                    if (get_bj_time() - dt_obj).days > 7:
-                        continue
-                    tag, weight_desc = _get_macro_news_time_tag(dt_obj)
-                    news_entries.append((dt_obj, source_name, time_str, title.text, tag, weight_desc))
-            print(f"   ✅ {source_name} 节点抓取成功")
-        except Exception as e:
-            print(f"   ⚠️ {source_name} 节点抓取失败: {e}")
-
-    if not news_entries:
-        return "暂无实时新闻，请基于昨日收盘及底层产业逻辑推演。"
-
-    news_entries.sort(key=lambda x: x[0], reverse=True)
-    today_str = get_bj_time().strftime('%Y-%m-%d')
-    yesterday_str = (get_bj_time() - datetime.timedelta(days=1)).strftime('%Y-%m-%d')
-    two_days_ago_str = (get_bj_time() - datetime.timedelta(days=2)).strftime('%Y-%m-%d')
-
-    grouped = {"今日最新": [], "今日": [], "昨日": [], "前日": []}
-    for dt_obj, source_name, time_str, title_text, tag, weight_desc in news_entries:
-        date_key = dt_obj.strftime('%Y-%m-%d')
-        if date_key == today_str:
-            if "🔥" in tag:
-                bucket = "今日最新"
-            else:
-                bucket = "今日"
-        elif date_key == yesterday_str:
-            bucket = "昨日"
-        elif date_key == two_days_ago_str:
-            bucket = "前日"
-        else:
-            bucket = "前日"
-        grouped[bucket].append(f"{tag} [{source_name}] {time_str} - {title.text}")
-
-    output_lines = []
-    for bucket in ["今日最新", "今日", "昨日", "前日"]:
-        if grouped[bucket]:
-            output_lines.append(f"\n【{bucket}】")
-            output_lines.extend(grouped[bucket])
-
-    news_lines = "\n".join(output_lines).strip()
-    print(f"✅ 盘前新闻矩阵组装完毕，共 {len(news_entries)} 条，已按时效递减排序。")
-    return news_lines
 
 # ==========================================
 # 3. 获取国际宏观大宗数据
