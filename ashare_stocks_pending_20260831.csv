@@ -1,0 +1,3 @@
+Ticker,Name,Industry,Tag,Amount,Daily_Pct,Hold_Period,Stop_Loss,Score,ATR_Pct,周期共振,Scan_Ref_Price
+000338.SZ,潍柴动力,汽车配件,Core_Dragon,5513740.20834,2.4083,4-7天,24.9元,64,5.65,False,27.71
+301666.SZ,大普微,IT设备,Core_Dragon,4033829.22062,1.4194,3-6天,440.0元,70,8.16,False,500.0
