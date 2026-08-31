@@ -1,0 +1,3 @@
+Ticker,Name,Industry,Tag,Amount,Daily_Pct,Hold_Period,Stop_Loss,Score,ATR_Pct,周期共振,Scan_Ref_Price
+002155.SZ,湖南黄金,黄金,Core_Dragon,5331445.44351,7.0318,3-6天,26.8元,70,4.6,False,28.45
+301666.SZ,大普微,IT设备,Core_Dragon,4033829.22062,1.4194,3-5天,440.0元,64,8.16,False,500.0
