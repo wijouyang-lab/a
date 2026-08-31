@@ -1,4 +1,4 @@
-# 消息+逻辑推演驱动版 | 事件→产业链→受益标的 | 个股新闻深度版 | Top5详细分析+评分版
+tushare只有k线数据。其他数据应该来自于网络。# 消息+逻辑推演驱动版 | 事件→产业链→受益标的 | 个股新闻深度版 | Top5详细分析+评分版
 # -*- coding: utf-8 -*-
 import pandas as pd
 import numpy as np
