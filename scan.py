@@ -616,6 +616,116 @@ def _parse_num(v):
         return float(m.group()) if m else None
 
 
+
+# ============================================================
+# 2.1 宏观新闻采集
+# ============================================================
+def _parse_rss_date(date_str: str):
+    if not date_str:
+        return None
+    try:
+        dt = email.utils.parsedate_to_datetime(str(date_str).strip())
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=datetime.timezone.utc)
+        return dt.astimezone(BEIJING_TZ)
+    except Exception:
+        pass
+    for fmt in ("%a, %d %b %Y %H:%M:%S", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
+        try:
+            dt = datetime.datetime.strptime(str(date_str).strip()[:25], fmt)
+            return dt.replace(tzinfo=BEIJING_TZ)
+        except Exception:
+            continue
+    return None
+
+
+def _get_macro_news_time_tag(dt_obj):
+    if dt_obj is None:
+        return "[📑前日-低权重]", "20% → 5分"
+    delta = get_bj_time() - dt_obj
+    hours = delta.total_seconds() / 3600
+    if hours <= 6:
+        return "[🔥今日最新-权重最高]", "满分25分"
+    if hours <= 24:
+        return "[📰今日-高权重]", "80% → 20分"
+    if hours <= 48:
+        return "[📄昨日-中等权重]", "50% → 12分"
+    if hours <= 72:
+        return "[📑前日-低权重]", "20% → 5分"
+    return "[📑前日-低权重]", "20% → 5分"
+
+
+def get_free_macro_news():
+    print("📡 [阶段2] 正在抓取全球财经与A股新闻...")
+    news_entries = []
+    sources = [
+        ("新浪A股热点", "https://rss.sina.com.cn/roll/finance/hot_roll.xml"),
+        ("CNBC Markets", "https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss01&id=10000664"),
+        ("Google News Macro", "https://news.google.com/rss/search?q=China+stocks+economy+markets+tariff+Fed+when:2d&hl=zh-CN&gl=CN&ceid=CN:zh-Hans"),
+        ("Google News A-share", "https://news.google.com/rss/search?q=A股+政策+行业+公司+when:2d&hl=zh-CN&gl=CN&ceid=CN:zh-Hans"),
+    ]
+
+    for source_name, url in sources:
+        try:
+            raw = _http_get_text(url, timeout=12, retries=2)
+            if not raw:
+                continue
+            root = ET.fromstring(raw)
+            for item in root.findall('.//item')[:40]:
+                title_node = item.find('title')
+                date_node = item.find('pubDate')
+                if title_node is None or not title_node.text:
+                    continue
+                title_text = _normalise_event_text(title_node.text)
+                dt_obj = _parse_rss_date(date_node.text if date_node is not None else '')
+                if dt_obj is None:
+                    continue
+                age_hours = (get_bj_time() - dt_obj).total_seconds() / 3600
+                if age_hours < -2 or age_hours > 72:
+                    continue
+                tag, weight_desc = _get_macro_news_time_tag(dt_obj)
+                news_entries.append((dt_obj, source_name, title_text, tag, weight_desc))
+            print(f"   ✅ {source_name} 节点抓取成功")
+        except Exception as e:
+            print(f"   ⚠️ {source_name} 节点抓取失败: {e}")
+
+    # 去重
+    unique = {}
+    for dt_obj, source_name, title_text, tag, weight_desc in news_entries:
+        key = re.sub(r"\W+", "", title_text.lower())[:180]
+        if key not in unique:
+            unique[key] = (dt_obj, source_name, title_text, tag, weight_desc)
+
+    news_entries = sorted(unique.values(), key=lambda x: x[0], reverse=True)
+
+    if not news_entries:
+        return "暂无实时新闻，请基于最近交易日及产业链逻辑推演。"
+
+    today_str = get_bj_time().strftime('%Y-%m-%d')
+    yesterday_str = (get_bj_time() - datetime.timedelta(days=1)).strftime('%Y-%m-%d')
+    grouped = {"今日最新": [], "今日": [], "昨日": [], "前日": []}
+
+    for dt_obj, source_name, title_text, tag, weight_desc in news_entries:
+        d = dt_obj.strftime('%Y-%m-%d')
+        if d == today_str:
+            bucket = "今日最新" if "🔥" in tag else "今日"
+        elif d == yesterday_str:
+            bucket = "昨日"
+        else:
+            bucket = "前日"
+        grouped[bucket].append(
+            f"{tag} [{source_name}] {dt_obj.strftime('%m-%d %H:%M')} - {title_text}"
+        )
+
+    output_lines = []
+    for bucket in ("今日最新", "今日", "昨日", "前日"):
+        if grouped[bucket]:
+            output_lines.append(f"\n【{bucket}】")
+            output_lines.extend(grouped[bucket][:30])
+
+    print(f"✅ 盘前新闻矩阵组装完毕，共 {len(news_entries)} 条，已按时效递减排序。")
+    return "\n".join(output_lines).strip()
+
 def _get_fed_official_events():
     url = "https://www.federalreserve.gov/newsevents/speech/2026-speeches.htm"
     raw = _http_get_text(url, timeout=15, retries=2, headers={"Referer": "https://www.federalreserve.gov/"})
