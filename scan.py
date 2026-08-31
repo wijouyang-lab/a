@@ -165,8 +165,11 @@ def pre_scan_portfolio_review(macro_news_text, macro_data_text, price_map):
         return []
 
     try:
-        df = pd.read_csv(log_file)
-        df['Date'] = pd.to_datetime(df['Date'])
+        df = pd.read_csv(log_file, keep_default_na=False)
+        # pandas 2.x 兼容：显式转为 object 避免 StringDtype 写入崩溃
+        for col in df.columns:
+            df[col] = df[col].astype(object)
+        df['Date'] = pd.to_datetime(df['Date'], errors='coerce')
         cutoff = get_bj_time() - datetime.timedelta(days=30)
         recent = df[df['Date'] >= cutoff.replace(tzinfo=None)].copy()
 
@@ -658,6 +661,117 @@ def _get_fed_official_events():
             **_classify_person_event(block),
         })
     return events
+
+
+def _parse_rss_date(date_str):
+    """解析 RSS 日期字符串为 datetime 对象。"""
+    if not date_str:
+        return None
+    try:
+        dt = email.utils.parsedate_to_datetime(str(date_str).strip())
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=datetime.timezone.utc)
+        return dt.astimezone(BEIJING_TZ)
+    except Exception:
+        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d", "%a, %d %b %Y %H:%M:%S %Z"):
+            try:
+                return datetime.datetime.strptime(str(date_str).strip()[:19], fmt).replace(tzinfo=BEIJING_TZ)
+            except Exception:
+                pass
+    return None
+
+
+def _news_age_tag_bj(dt):
+    """根据北京时间返回新闻时效标签。"""
+    if dt is None:
+        return "[时间未知]"
+    delta_hours = (get_bj_time() - dt).total_seconds() / 3600
+    if delta_hours <= 6:
+        return "[🔥今日最新-权重最高]"
+    if delta_hours <= 24:
+        return "[📰今日-高权重]"
+    if delta_hours <= 48:
+        return "[📄昨日-中等权重]"
+    if delta_hours <= 72:
+        return "[📑前日-低权重]"
+    return None
+
+
+def get_free_macro_news():
+    """抓取中文宏观财经新闻，多层备用。"""
+    print("📡 [阶段1] 正在抓取中文宏观财经快讯...")
+
+    sources = [
+        ("新浪财经", "https://rss.sina.com.cn/roll/finance/hot_roll.xml"),
+        ("东方财富", "https://rss.eastmoney.com/rss/finance.xml"),
+        ("财新网", "https://china.caixin.com/rss.xml"),
+    ]
+
+    news_lines = []
+
+    for source_name, url in sources:
+        try:
+            raw = _http_get_text(url, timeout=8, retries=2)
+            if not raw:
+                continue
+            root = ET.fromstring(raw)
+            for item in root.findall(".//item")[:20]:
+                title = item.findtext("title", default="").strip()
+                date_text = item.findtext("pubDate", default="")
+                dt = _parse_rss_date(date_text)
+                tag = _news_age_tag_bj(dt)
+                if not title or tag is None:
+                    continue
+                ts = dt.strftime("%m-%d %H:%M") if dt else "时间未知"
+                news_lines.append(f"{tag}[{source_name}] {ts} - {title}")
+            print(f"   ✅ {source_name} 抓取成功")
+        except Exception as e:
+            print(f"   ⚠️ {source_name} 抓取失败: {str(e)[:100]}")
+
+    # 备用：Google News（中文财经）
+    if not news_lines:
+        try:
+            queries = [
+                "A股 宏观 政策 央行 财政部",
+                "美联储 通胀 利率 关税",
+                "中国经济 PMI CPI 社零",
+            ]
+            for q in queries:
+                try:
+                    encoded = urllib.parse.quote(q)
+                    url = f"https://news.google.com/rss/search?q={encoded}&hl=zh-CN&gl=CN&ceid=CN:zh-Hans"
+                    raw = _http_get_text(url, timeout=8, retries=1)
+                    if not raw:
+                        continue
+                    root = ET.fromstring(raw)
+                    for item in root.findall(".//item")[:10]:
+                        title = item.findtext("title", default="").strip()
+                        dt = _parse_rss_date(item.findtext("pubDate", default=""))
+                        tag = _news_age_tag_bj(dt)
+                        if title and tag:
+                            ts = dt.strftime("%m-%d %H:%M") if dt else "时间未知"
+                            news_lines.append(f"{tag}[Google News] {ts} - {title}")
+                except Exception:
+                    pass
+            if news_lines:
+                print(f"   ✅ Google News 备用抓取成功")
+        except Exception as e:
+            print(f"   ⚠️ Google News 备用失败: {e}")
+
+    if not news_lines:
+        return "暂无实时宏观新闻，请基于昨收盘及底层产业逻辑进行推演。"
+
+    # 去重
+    dedup = []
+    seen = set()
+    for line in news_lines:
+        key = re.sub(r"[^\u4e00-\u9fa5a-z0-9]+", "", line.lower())[-100:]
+        if key not in seen:
+            seen.add(key)
+            dedup.append(line)
+
+    print(f"✅ 中文宏观新闻矩阵完成，共 {len(dedup)} 条")
+    return "\n".join(dedup[:50])
 
 
 def get_key_person_events():
@@ -1230,7 +1344,7 @@ def get_global_macro_data():
 
     for key, (ticker, desc) in macro_tickers.items():
         try:
-            df = yf.download(ticker, period="5d", progress=False)
+            df = yf.download(ticker, period="5d", progress=False, threads=False)
             if df is None or df.empty:
                 results.append(f"❓ {desc} ({ticker}): 指标抓取受限")
                 continue
@@ -2246,16 +2360,16 @@ if __name__ == "__main__":
             df_pending = df_pending[pending_cols]
 
             # 添加 Scan_Ref_Price（盘前参考价）
-            if 'Open_Price' in pd.DataFrame(chosen).columns:
-                df_pending['Scan_Ref_Price'] = pd.DataFrame(chosen)['Open_Price']
-            elif 'Close' in pd.DataFrame(chosen).columns:
-                df_pending['Scan_Ref_Price'] = pd.DataFrame(chosen)['Close']
+            if 'Open_Price' in df_pending.columns:
+                df_pending['Scan_Ref_Price'] = df_pending['Open_Price']
+            elif 'Close' in df_pending.columns:
+                df_pending['Scan_Ref_Price'] = df_pending['Close']
             else:
                 df_pending['Scan_Ref_Price'] = 0
 
-            # 强制字符串类型
+            # 强制字符串类型（pandas 2.x 兼容）
             for col in df_pending.columns:
-                df_pending[col] = df_pending[col].astype(str)
+                df_pending[col] = df_pending[col].astype(object)
 
             # 写入 pending 文件
             df_pending.to_csv(pending_file, index=False, encoding='utf-8')
