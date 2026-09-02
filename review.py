@@ -19,6 +19,27 @@ import anthropic
 import tushare as ts
 import sys
 
+
+# ==========================================
+# 通用安全数值转换（必须定义在所有 KPI/风控逻辑之前）
+# ==========================================
+def safe_float(value, default=None):
+    """将价格、盈亏、估值等字段安全转换为 float。"""
+    try:
+        if value is None:
+            return default
+        if isinstance(value, str):
+            v = value.strip().replace("%", "").replace(",", "")
+            if not v or v.lower() in {"nan", "none", "null", "n/a", "na", "-"}:
+                return default
+        else:
+            v = value
+        result = float(v)
+        return result if pd.notna(result) else default
+    except (TypeError, ValueError):
+        return default
+
+
 # ==========================================
 # 环境变量校验
 # ==========================================
@@ -49,6 +70,7 @@ pro = ts.pro_api()
 # ==========================================
 # 1. 辅助函数
 # ==========================================
+
 def get_live_quote(ticker):
     try:
         bare_code = ticker.split('.')[0] if '.' in ticker else ticker
@@ -1434,7 +1456,9 @@ active_win_rate = (
 )
 
 closed_wins = sum(
-    1 for x in all_closed_trades if safe_float(x.get("pnl")) is not None and x.get("pnl", 0) > 0
+    1
+    for x in all_closed_trades
+    if (lambda p: p is not None and p > 0)(safe_float(x.get("pnl")))
 )
 closed_win_rate = (
     closed_wins / closed_count * 100
