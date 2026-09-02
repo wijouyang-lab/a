@@ -23,6 +23,17 @@ import sys
 # ==========================================
 # 通用安全数值转换（必须定义在所有 KPI/风控逻辑之前）
 # ==========================================
+def safe_int(value, default=None):
+    """安全整数转换；任何非法/空值均返回 default。"""
+    try:
+        f = safe_float(value, None)
+        if f is None:
+            return default
+        return int(f)
+    except (TypeError, ValueError, OverflowError):
+        return default
+
+
 def safe_float(value, default=None):
     """将价格、盈亏、估值等字段安全转换为 float。"""
     try:
