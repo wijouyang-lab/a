@@ -811,8 +811,8 @@ def build_attribution(active_item):
             base_reason += ' 现价仍站在MA20上方。'
         if macd and '偏空' not in macd:
             base_reason += ' MACD尚未确认明显转空。'
-    elif pnl <= -5:
-        base_reason = '股价已明显低于建仓成本，亏损主要来自持仓后的价格回撤。'
+    elif pnl < 0:
+        base_reason = f'当前持仓处于亏损状态（{pnl:.2f}%），亏损主要来自建仓后的价格回撤。'
         if ma20 is not None and cur is not None and cur < ma20:
             basis.append('现价跌破MA20')
         if ma50 is not None and cur is not None and cur < ma50:
@@ -826,7 +826,7 @@ def build_attribution(active_item):
         if score is not None and score >= 80:
             base_reason += ' 由于推荐评分较高，本次属于高信心预期未兑现，需要重点复盘评分因子。'
     else:
-        base_reason = '当前小幅盈利/亏损，尚未形成强趋势归因。'
+        base_reason = '当前盈亏接近持平，暂无明显方向性归因。'
         if ma20 is not None and cur is not None:
             base_reason += ' 现价与MA20关系：' + ('上方' if cur >= ma20 else '下方') + '。'
 
@@ -913,20 +913,22 @@ def get_trailing_stop_context_ashare(ticker, existing_stop=None, before_date_str
     """
     before_date_str = before_date_str or today_str
     hist = _indicator_frame_ashare(ticker, before_date_str)
-    if len(hist) < 55:
-        return {
-            'exec_stop': float(existing_stop) if existing_stop not in (None, '') else None,
-            'candidate': float(existing_stop) if existing_stop not in (None, '') else None,
-            'ma20': None, 'ma50': None, 'atr': None, 'atr_pct': None,
-            'macd_bearish': False, 'kdj_falling': False,
-            'method': '数据不足，沿用原止损'
-        }
-
+    # 不再要求55个交易日才能工作；各指标按自身所需最小样本独立计算。
     close = hist['close']
     high = hist['high']
     low = hist['low']
-    ma20 = float(close.rolling(20).mean().iloc[-1])
-    ma50 = float(close.rolling(50).mean().iloc[-1])
+    latest_close = float(close.iloc[-1]) if len(close) else 0.0
+    if latest_close <= 0:
+        return {
+            'exec_stop': safe_float(existing_stop),
+            'candidate': safe_float(existing_stop),
+            'ma20': None, 'ma50': None, 'atr': None, 'atr_pct': None,
+            'macd_bearish': False, 'kdj_falling': False,
+            'method': '行情数据不可用，沿用历史保护线'
+        }
+
+    ma20 = float(close.rolling(20, min_periods=20).mean().iloc[-1]) if len(close) >= 20 else None
+    ma50 = float(close.rolling(50, min_periods=50).mean().iloc[-1]) if len(close) >= 50 else None
 
     prev_close = close.shift(1)
     tr = pd.concat([
@@ -934,27 +936,23 @@ def get_trailing_stop_context_ashare(ticker, existing_stop=None, before_date_str
         (high - prev_close).abs(),
         (low - prev_close).abs()
     ], axis=1).max(axis=1)
-    atr = float(tr.rolling(14).mean().iloc[-1])
-    latest_close = float(close.iloc[-1])
-    if latest_close <= 0 or atr <= 0:
-        return {
-            'exec_stop': float(existing_stop) if existing_stop not in (None, '') else None,
-            'candidate': float(existing_stop) if existing_stop not in (None, '') else None,
-            'ma20': ma20, 'ma50': ma50, 'atr': atr, 'atr_pct': None,
-            'macd_bearish': False, 'kdj_falling': False,
-            'method': '技术数据不足，沿用原止损'
-        }
+    atr = float(tr.rolling(14, min_periods=14).mean().iloc[-1]) if len(tr) >= 14 else None
 
-    atr_pct = atr / latest_close * 100.0
-    stop_pct = max(3.0, min(12.0, atr_pct * 2.0))
-    candidates = [latest_close * (1 - stop_pct / 100.0)]
-    if ma20 > 0:
+    atr_pct = (atr / latest_close * 100.0) if atr is not None and atr > 0 else None
+    candidates = []
+    methods = []
+    if atr is not None and atr > 0 and atr_pct is not None:
+        stop_pct = max(3.0, min(12.0, atr_pct * 2.0))
+        candidates.append(latest_close * (1 - stop_pct / 100.0))
+        methods.append(f'ATR×2（{atr_pct:.2f}%波动）')
+    if ma20 is not None and ma20 > 0 and atr is not None:
         candidates.append(ma20 - atr)
-    if ma50 > 0:
+        methods.append('MA20-ATR')
+    if ma50 is not None and ma50 > 0 and atr is not None:
         candidates.append(ma50 - 1.5 * atr)
+        methods.append('MA50-1.5ATR')
 
-    # 趋势尚未破坏时，保护线跟随价格/均线抬高；不因为单日波动把保护线下移。
-    candidate = max(candidates)
+    candidate = max(candidates) if candidates else safe_float(existing_stop)
 
     macd_bearish = False
     kdj_falling = False
@@ -993,17 +991,31 @@ def get_trailing_stop_context_ashare(ticker, existing_stop=None, before_date_str
         old = None
     exec_stop = max(old, candidate) if old is not None else candidate
 
-    methods = ['MA20/MA50', f'ATR×{stop_pct/atr_pct:.1f}' if atr_pct else 'ATR', 'MACD/KDJ']
+    method_parts = []
+    if ma20 is not None:
+        method_parts.append('MA20-ATR')
+    if ma50 is not None:
+        method_parts.append('MA50-1.5ATR')
+    if atr_pct is not None:
+        method_parts.append(f'ATR×2（{atr_pct:.2f}%）')
+    if macd_bearish:
+        method_parts.append('MACD转弱')
+    if kdj_falling:
+        method_parts.append('KDJ转弱')
+    if not method_parts:
+        method_parts = ['历史保护线']
     if macd_bearish and kdj_falling:
-        methods.append('MACD+KDJ转弱加严')
+        method_parts.append('MACD+KDJ同步转弱加严')
     return {
-        'exec_stop': round(float(exec_stop), 2),
-        'candidate': round(float(candidate), 2),
-        'ma20': round(ma20, 2), 'ma50': round(ma50, 2),
-        'atr': round(atr, 3), 'atr_pct': round(atr_pct, 2),
+        'exec_stop': round(float(exec_stop), 2) if exec_stop is not None else None,
+        'candidate': round(float(candidate), 2) if candidate is not None else None,
+        'ma20': round(ma20, 2) if ma20 is not None else None,
+        'ma50': round(ma50, 2) if ma50 is not None else None,
+        'atr': round(atr, 3) if atr is not None else None,
+        'atr_pct': round(atr_pct, 2) if atr_pct is not None else None,
         'macd_bearish': macd_bearish,
         'kdj_falling': kdj_falling,
-        'method': '+'.join(methods)
+        'method': '+'.join(method_parts)
     }
 
 
