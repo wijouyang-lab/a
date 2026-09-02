@@ -2410,6 +2410,13 @@ def match_pool_to_report(pool_data, ai_html, default_stop_loss_pct):
     trap_zone_raw = ai_html[trap_start:]
 
     core_cards = [clean_fragment(c) for c in re.split(r'(?=<div[^>]*class="[^"]*core-card[^"]*")', core_zone_raw) if 'core-card' in c]
+
+    # 【修复】fallback：如果 AI 没输出 core-card，尝试按股票代码标题分割
+    if not core_cards:
+        for c in re.split(r'(?=<h3[^>]*>)', core_zone_raw):
+            if re.search(r'\(\d{6}\.[A-Z]{2}\)', c):
+                core_cards.append(clean_fragment(c))
+
     obs_items = [clean_fragment(c) for c in re.split(r'(?=<div[^>]*class="[^"]*obs-card[^"]*")', obs_zone_raw) if c.strip().startswith("<li>")]
     trap_items = [clean_fragment(c) for c in re.split(r'(?=<div[^>]*class="[^"]*trap-card[^"]*")', trap_zone_raw) if c.strip().startswith("<li>")]
 
@@ -2551,6 +2558,25 @@ if __name__ == "__main__":
         ai_report_html = sell_signal_card_html + current_holdings_card_html + ai_report_html
 
     chosen = match_pool_to_report(pool_with_news, ai_report_html, DEFAULT_STOP_LOSS_PCT)
+
+    # 【修复】过滤最近5天内已止损/清仓的标的，防止止损后立刻重新推荐
+    try:
+        if os.path.exists("review_history.csv"):
+            _rv = pd.read_csv("review_history.csv", on_bad_lines='skip', keep_default_na=False)
+            if {'Ticker', 'Review_Date', 'Status'}.issubset(_rv.columns):
+                _rv['Review_Date'] = pd.to_datetime(_rv['Review_Date'], errors='coerce')
+                _cutoff = get_bj_time() - datetime.timedelta(days=5)
+                _recent_exit = _rv[
+                    (_rv['Review_Date'] >= _cutoff.replace(tzinfo=None)) &
+                    (_rv['Status'].isin(['止损触发清仓', '突发清仓暂停']))
+                ]
+                _cooldown = set(_recent_exit['Ticker'].astype(str).str.strip().unique())
+                if _cooldown:
+                    _before = len(chosen)
+                    chosen = [c for c in chosen if c['Ticker'] not in _cooldown]
+                    print(f"🚫 scan 冷却期过滤：剔除 {len(_cooldown)} 只近期已止损标的，跳过 {_before - len(chosen)} 条")
+    except Exception as e:
+        print(f"⚠️ scan 冷却期过滤失败: {e}")
 
     # ============================================================
     # 【修复】生成 pending 文件，由 review.py 盘后补充
