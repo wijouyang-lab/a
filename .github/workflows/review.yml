@@ -3,19 +3,26 @@ name: A股盘后复盘
 on:
   workflow_dispatch:
 
+# scan / review 都会修改 main 下的 CSV。
+# 使用同一 concurrency group，避免两个工作流同时抢占 main。
+concurrency:
+  group: ashare-main
+  cancel-in-progress: false
+  queue: max
+
+permissions:
+  contents: write
+
 jobs:
   review:
     runs-on: ubuntu-latest
-    
+
     steps:
       - name: 检出代码
         uses: actions/checkout@v4
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           fetch-depth: 0
-
-      - name: 拉取最新代码
-        run: git pull origin main --ff-only
 
       - name: 设置Python
         uses: actions/setup-python@v5
@@ -43,15 +50,46 @@ jobs:
         run: python review.py
 
       - name: 提交账本和处理记录
+        shell: bash
         run: |
+          set -euo pipefail
+
           git add trade_history.csv review_history.csv
-          
+
           if ls ashare_stocks_pending_*.csv.processed 1> /dev/null 2>&1; then
             git add ashare_stocks_pending_*.csv.processed
           fi
-          
+
           git rm -f ashare_stocks_pending_*.csv 2>/dev/null || true
-          
-          git commit -m "chore: A股盘后补充成交 $(date +%Y-%m-%d)" || echo "无变更"
-          git push
-          echo "✅ A股成交记录已提交"
+
+          if git diff --cached --quiet; then
+            echo "ℹ️ 无变更，不需要提交"
+            exit 0
+          fi
+
+          git commit -m "chore: A股盘后补充成交 $(date +%Y-%m-%d)"
+
+          # review 运行期间如果远程 main 有新提交，先同步再推送。
+          # 最多重试 3 次；绝不 force push。
+          for attempt in 1 2 3; do
+            echo "🔄 同步远程 main，第 ${attempt}/3 次..."
+            git fetch origin main
+
+            if ! git rebase origin/main; then
+              echo "❌ rebase 冲突：远程 main 与本次复盘产生了无法自动合并的修改。"
+              echo "为避免覆盖其他 workflow 的提交，停止本次 push。"
+              git rebase --abort || true
+              exit 1
+            fi
+
+            if git push origin HEAD:main; then
+              echo "✅ A股成交记录已提交"
+              exit 0
+            fi
+
+            echo "⚠️ push 被远程更新拒绝，重新 fetch/rebase..."
+            sleep $((attempt * 2))
+          done
+
+          echo "❌ 连续 3 次 push 失败"
+          exit 1
