@@ -847,7 +847,7 @@ if os.path.exists(review_log_path) and os.path.getsize(review_log_path) > 0:
 # 6. 遍历持仓，执行动态止损
 # ==========================================
 active_list = []
-expired_list = []
+expired_list = []  # 保留变量以兼容旧报表；股票不再按持仓天数触发到期退出
 skipped_duplicate = 0
 
 print(f"开始处理 {len(recent_picks)} 条活跃持仓记录：股票动态持有，仅以移动止损/趋势破坏退出...")
