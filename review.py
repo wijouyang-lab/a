@@ -127,7 +127,7 @@ def _ensure_table_columns(log_file):
         default_cols = [
             "Date", "Ticker", "Name", "Tag", "Industry",
             "Open_Price", "Low_Price", "Close_Price", "Amount", "Daily_Pct",
-            "Hold_Period", "Stop_Loss", "Stop_Method", "Trail_Stop", "MA20", "MA50", "Score", "ATR_Pct", "周期共振", "Exit_Date", "Exit_Price", "PE_TTM", "EPS_TTM", "PB", "Earnings_Growth", "ROE", "估值评分", "估值结论"
+            "Hold_Period", "Stop_Loss", "Stop_Method", "Trail_Stop", "MA20", "MA50", "Score", "ATR_Pct", "周期共振", "Exit_Date", "Exit_Price", "PE_TTM", "EPS_TTM", "PB", "Earnings_Growth", "ROE", "估值评分", "估值结论", "Review_Risk_Status", "Review_Risk_Date", "Review_Stop_Distance_Pct", "Review_Risk_Note"
         ]
         return default_cols
 
@@ -137,7 +137,7 @@ def _ensure_table_columns(log_file):
     # 确保所有必要列存在
     required = ["Date", "Ticker", "Name", "Tag", "Industry",
                 "Open_Price", "Low_Price", "Close_Price", "Amount", "Daily_Pct",
-                "Hold_Period", "Stop_Loss", "Stop_Method", "Trail_Stop", "MA20", "MA50", "Score", "ATR_Pct", "周期共振", "Exit_Date", "Exit_Price", "PE_TTM", "EPS_TTM", "PB", "Earnings_Growth", "ROE", "估值评分", "估值结论"]
+                "Hold_Period", "Stop_Loss", "Stop_Method", "Trail_Stop", "MA20", "MA50", "Score", "ATR_Pct", "周期共振", "Exit_Date", "Exit_Price", "PE_TTM", "EPS_TTM", "PB", "Earnings_Growth", "ROE", "估值评分", "估值结论", "Review_Risk_Status", "Review_Risk_Date", "Review_Stop_Distance_Pct", "Review_Risk_Note"]
     missing = [c for c in required if c not in cols]
     if missing:
         # 添加缺失列（简单追加到末尾）
@@ -1105,6 +1105,44 @@ if os.path.exists(review_log_path) and os.path.getsize(review_log_path) > 0:
     except Exception as e:
         print(f"⚠️ T+1止损待执行记录读取失败：{e}")
 
+
+# ==========================================
+# 5.8 Review -> 次日 Scan 止损联动状态写回
+# ==========================================
+def write_review_risk_linkage(ticker, rec_date_str, risk_status, risk_date, stop_price=None, current_price=None, note=""):
+    """把 review 当天风控状态写回 trade_history.csv，供次日 scan 硬性联动读取。"""
+    if not os.path.exists(log_file):
+        return
+    try:
+        dfx = pd.read_csv(log_file, keep_default_na=False, on_bad_lines='warn')
+        required = [
+            'Review_Risk_Status', 'Review_Risk_Date',
+            'Review_Stop_Distance_Pct', 'Review_Risk_Note'
+        ]
+        for col in required:
+            if col not in dfx.columns:
+                dfx[col] = ''
+            dfx[col] = dfx[col].astype(object)
+        mask = (
+            dfx['Ticker'].astype(str).str.strip().eq(str(ticker).strip()) &
+            dfx['Date'].astype(str).str[:10].eq(str(rec_date_str)[:10])
+        )
+        if not mask.any():
+            return
+        dfx.loc[mask, 'Review_Risk_Status'] = str(risk_status or '')
+        dfx.loc[mask, 'Review_Risk_Date'] = str(risk_date or today_str)
+        if stop_price is not None and current_price is not None and float(current_price) > 0:
+            distance = (float(current_price) - float(stop_price)) / float(current_price) * 100.0
+            dfx.loc[mask, 'Review_Stop_Distance_Pct'] = round(distance, 2)
+        elif risk_status in {'STOP_TRIGGERED', 'T1_STOP_PENDING'}:
+            dfx.loc[mask, 'Review_Stop_Distance_Pct'] = 0
+        else:
+            dfx.loc[mask, 'Review_Stop_Distance_Pct'] = ''
+        dfx.loc[mask, 'Review_Risk_Note'] = str(note or '')
+        dfx.to_csv(log_file, index=False, encoding='utf-8')
+    except Exception as e:
+        print(f"⚠️ {ticker} Review→Scan 风控联动写回失败: {e}")
+
 # ==========================================
 # 6. 遍历持仓，执行动态止损
 # ==========================================
@@ -1213,7 +1251,25 @@ for ticker, group in recent_picks.groupby('Ticker'):
     exec_stop = stop_ctx.get('exec_stop')
     update_trade_history_trailing_stop_ashare(ticker, rec_date_str, stop_ctx)
 
+    # Review→Scan 风控联动：先计算“已触发 / T+1待执行 / 接近止损”。
     t1_stop_triggered_today = False
+    _risk_status = 'CLEAR'
+    _risk_note = '本次 Review 未发现触及或接近移动止损。'
+    _risk_distance = None
+    if exec_stop is not None and today_close is not None and float(today_close) > 0:
+        _risk_distance = (float(today_close) - float(exec_stop)) / float(today_close) * 100.0
+    if exec_stop is not None and today_low is not None and float(today_low) <= float(exec_stop):
+        if is_new_today:
+            _risk_status = 'T1_STOP_PENDING'
+            _risk_note = f'今日最低价 {float(today_low):.2f} 已触及/跌破移动止损 {float(exec_stop):.2f}；受T+1限制，次日执行。'
+        else:
+            _risk_status = 'STOP_TRIGGERED'
+            _risk_note = f'今日最低价 {float(today_low):.2f} 已触及/跌破移动止损 {float(exec_stop):.2f}；下一交易日进入执行/回避联动。'
+    elif _risk_distance is not None and _risk_distance <= 3.0:
+        _risk_status = 'STOP_NEAR'
+        _risk_note = f'收盘价距离移动止损仅 {_risk_distance:.2f}%，次日 Scan 强提醒，避免重新追入。'
+    write_review_risk_linkage(ticker, rec_date_str, _risk_status, today_str, exec_stop, today_close, _risk_note)
+
 
     # 先处理昨日触发、今日允许执行的 T+1 止损。
     if _ticker_key in pending_t1_stop and not is_new_today:
@@ -1249,11 +1305,10 @@ for ticker, group in recent_picks.groupby('Ticker'):
             continue
 
     # 今日最低价触发保护线。T+1 新仓只能记录待执行。
-    if exec_stop is not None and today_low is not None and float(today_low) <= float(exec_stop):
-        if is_new_today:
+    if _risk_status == 'T1_STOP_PENDING' and is_new_today:
             t1_stop_triggered_today = True
             print(f"⏳ [T+1锁定] {ticker} 今日最低价 {today_low:.2f} <= 移动止损 {exec_stop:.2f}，下一交易日执行")
-        elif (str(ticker), rec_date_str) not in already_archived:
+    if _risk_status == 'STOP_TRIGGERED' and (str(ticker), rec_date_str) not in already_archived:
             exit_price = min(float(exec_stop), float(today_open)) if today_open is not None and float(today_open) > 0 and float(today_open) < float(exec_stop) else float(exec_stop)
             pnl = round((exit_price - rec_price) / rec_price * 100, 2) if rec_price > 0 else 0.0
             try:
@@ -1299,6 +1354,9 @@ for ticker, group in recent_picks.groupby('Ticker'):
         'MA50': stop_ctx.get('ma50', 'N/A'), 'ATR_Pct': stop_ctx.get('atr_pct', 'N/A'),
         'MACD状态': '偏空' if stop_ctx.get('macd_bearish') else '未转空',
         'KDJ状态': 'J线回落' if stop_ctx.get('kdj_falling') else '未明显转弱',
+        'Review_Risk_Status': _risk_status, 'Review_Risk_Date': today_str,
+        'Review_Stop_Distance_Pct': round(_risk_distance, 2) if _risk_distance is not None else '',
+        'Review_Risk_Note': _risk_note,
         'PE_TTM': first_row.get('PE_TTM', ''), 'EPS_TTM': first_row.get('EPS_TTM', ''),
         'PB': first_row.get('PB', ''), 'Earnings_Growth': first_row.get('Earnings_Growth', ''),
         'ROE': first_row.get('ROE', ''), '估值评分': first_row.get('估值评分', ''), '估值结论': first_row.get('估值结论', '')
@@ -1476,7 +1534,8 @@ archive_cols = [
     "MA20","MA50","ATR_Pct","Rec_Count","Status","Score","PE_TTM","EPS_TTM","PB",
     "Earnings_Growth","ROE","估值评分","估值结论",
     "盈利原因","亏损原因","风控动作指令",
-    "Scan_Version","Scan_Version_Start"
+    "Scan_Version","Scan_Version_Start",
+    "Review_Risk_Status","Review_Risk_Date","Review_Stop_Distance_Pct","Review_Risk_Note"
 ]
 
 # 兼容旧 review_history：有旧列就保留数据，缺失的新列补空，并统一表头。
@@ -1513,7 +1572,9 @@ try:
             "估值评分": item.get('估值评分',''), "估值结论": item.get('估值结论',''),
             "盈利原因": item.get('盈利原因',''), "亏损原因": item.get('亏损原因',''), "风控动作指令": item.get('风控动作指令',''),
             "Scan_Version": SCAN_VERSION_HASH,
-            "Scan_Version_Start": SCAN_VERSION_START.strftime('%Y-%m-%d')
+            "Scan_Version_Start": SCAN_VERSION_START.strftime('%Y-%m-%d'),
+            "Review_Risk_Status": item.get('Review_Risk_Status', ''), "Review_Risk_Date": item.get('Review_Risk_Date', ''),
+            "Review_Stop_Distance_Pct": item.get('Review_Stop_Distance_Pct', ''), "Review_Risk_Note": item.get('Review_Risk_Note', '')
         })
 
     for item in expired_list:
@@ -1528,7 +1589,9 @@ try:
             "PB": '', "Earnings_Growth": '', "ROE": '', "估值评分": '', "估值结论": '',
             "盈利原因": item.get('盈利原因',''), "亏损原因": item.get('亏损原因',''), "风控动作指令": item.get('风控动作指令',''),
             "Scan_Version": SCAN_VERSION_HASH,
-            "Scan_Version_Start": SCAN_VERSION_START.strftime('%Y-%m-%d')
+            "Scan_Version_Start": SCAN_VERSION_START.strftime('%Y-%m-%d'),
+            "Review_Risk_Status": item.get('Review_Risk_Status', ''), "Review_Risk_Date": item.get('Review_Risk_Date', ''),
+            "Review_Stop_Distance_Pct": item.get('Review_Stop_Distance_Pct', ''), "Review_Risk_Note": item.get('Review_Risk_Note', '')
         })
 
     if rows_to_append:
