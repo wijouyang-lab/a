@@ -482,6 +482,56 @@ print(f"📌 今日 pending 成功导入/确认的标的：{sorted(_today_pendin
 # 当前复盘日期：必须在加载账本/今日新增筛选之前定义
 today_str = get_bj_time().strftime('%Y-%m-%d')
 
+# ==========================================
+# Scan 版本隔离
+# ==========================================
+# scan.py 每次代码发生变化时维护 scan_version.txt：
+#     md5,YYYY-MM-DD
+# 当前 review 的绩效/KPI 只统计当前 Scan 版本起始日之后产生的推荐。
+# 历史版本继续保留在 review_history.csv，但绝不进入当前胜率。
+SCAN_VERSION_FILE = "scan_version.txt"
+
+
+def get_scan_version_info():
+    version_hash = "UNKNOWN"
+    version_start_date = None
+
+    try:
+        if os.path.exists(SCAN_VERSION_FILE):
+            with open(SCAN_VERSION_FILE, "r", encoding="utf-8") as f:
+                content = f.read().strip()
+            parts = content.split(",", 1)
+            if parts:
+                version_hash = parts[0].strip() or "UNKNOWN"
+            if len(parts) > 1:
+                dt = pd.to_datetime(parts[1].strip(), errors="coerce")
+                if not pd.isna(dt):
+                    version_start_date = dt.normalize()
+    except Exception as e:
+        print(f"⚠️ 读取 {SCAN_VERSION_FILE} 失败：{e}")
+
+    # 缺失版本标记时，只统计今天，宁可少算也不能把旧版本混入。
+    if version_start_date is None:
+        version_start_date = pd.Timestamp(today_str).normalize()
+        print("⚠️ 未发现有效 Scan 版本起始日：当前 KPI 仅统计今天产生的推荐。")
+
+    print(
+        f"🧬 当前 Scan 版本：{version_hash} | "
+        f"版本起始日：{version_start_date.strftime('%Y-%m-%d')}"
+    )
+    return version_hash, version_start_date
+
+
+SCAN_VERSION_HASH, SCAN_VERSION_START = get_scan_version_info()
+
+
+def is_current_scan_version_date(value):
+    dt = pd.to_datetime(value, errors="coerce")
+    if pd.isna(dt):
+        return False
+    return dt.normalize() >= SCAN_VERSION_START
+
+
 log_file = "trade_history.csv"
 if not os.path.exists(log_file):
     print("⚠️ 交易账本不存在，退出。")
@@ -601,7 +651,7 @@ if recent_picks.empty:
 # ==========================================
 # 4. 获取历史行情（含 OHLC）
 # ==========================================
-start_hist = (get_bj_time() - datetime.timedelta(days=120)).strftime('%Y%m%d')
+start_hist = (get_bj_time() - datetime.timedelta(days=60)).strftime('%Y%m%d')
 end_hist = get_bj_time().strftime('%Y%m%d')
 all_tickers = recent_picks['Ticker'].unique().tolist()
 
@@ -669,7 +719,7 @@ def get_trailing_stop_context_ashare(ticker, existing_stop=None, before_date_str
     """
     before_date_str = before_date_str or today_str
     hist = _indicator_frame_ashare(ticker, before_date_str)
-    if len(hist) < 20:
+    if len(hist) < 55:
         return {
             'exec_stop': float(existing_stop) if existing_stop not in (None, '') else None,
             'candidate': float(existing_stop) if existing_stop not in (None, '') else None,
@@ -796,7 +846,6 @@ def update_trade_history_trailing_stop_ashare(ticker, rec_date_str, stop_context
 
 # 加载历史归档去重
 already_archived = set()
-cooldown_tickers = set()
 review_log_path = "review_history.csv"
 if os.path.exists(review_log_path) and os.path.getsize(review_log_path) > 0:
     try:
@@ -807,19 +856,7 @@ if os.path.exists(review_log_path) and os.path.getsize(review_log_path) > 0:
             )]
             already_archived = set(zip(archived_rows['Ticker'].astype(str), archived_rows['Rec_Date'].astype(str)))
             print(f"📌 已加载历史归档 {len(already_archived)} 条")
-        # 【修复】止损后冷却期：最近5天内已止损/清仓的标的禁止重新进入持仓
-        if {'Ticker', 'Review_Date', 'Status'}.issubset(existing_review.columns):
-            existing_review['Review_Date'] = pd.to_datetime(existing_review['Review_Date'], errors='coerce')
-            _cutoff = get_bj_time() - datetime.timedelta(days=5)
-            _recent_exit = existing_review[
-                (existing_review['Review_Date'] >= _cutoff.replace(tzinfo=None)) &
-                (existing_review['Status'].isin(['止损触发清仓', '突发清仓暂停']))
-            ]
-            cooldown_tickers = set(_recent_exit['Ticker'].astype(str).str.strip().unique())
-            if cooldown_tickers:
-                print(f"🚫 冷却期过滤：最近5天内已止损/清仓 {len(cooldown_tickers)} 只：{sorted(cooldown_tickers)}")
-    except Exception as e:
-        print(f"⚠️ 归档/冷却期读取失败: {e}")
+    except:
         pass
 
 # ==========================================
@@ -870,11 +907,6 @@ _ALL_HOLDING_TAGS = {'Core_Double_Dragon', 'Core_Dragon', 'Sub_Pioneer'}
 for ticker, group in recent_picks.groupby('Ticker'):
     group = group.sort_values('Date').copy()
     _ticker_key = str(ticker).strip()
-
-    # 【修复】跳过处于止损后冷却期的标的（5天内已止损/清仓的不重新进入持仓）
-    if _ticker_key in cooldown_tickers:
-        print(f"🚫 {_ticker_key} 处于止损后冷却期（5天），跳过")
-        continue
 
     if _ticker_key in _today_pending_imported:
         today_rows = group[group['Date'].dt.strftime('%Y-%m-%d').eq(today_str)].copy()
@@ -961,15 +993,6 @@ for ticker, group in recent_picks.groupby('Ticker'):
 
     stop_ctx = get_trailing_stop_context_ashare(ticker, existing_stop=existing_stop, before_date_str=today_str)
     exec_stop = stop_ctx.get('exec_stop')
-
-    # 【修复】技术指标数据不足且没有历史止损时，使用买入价默认止损
-    if exec_stop is None and rec_price > 0:
-        exec_stop = round(rec_price * 0.95, 2)
-        stop_ctx['exec_stop'] = exec_stop
-        stop_ctx['candidate'] = exec_stop
-        stop_ctx['method'] = '默认止损(买入价-5%)'
-        print(f"⚠️ {ticker} 技术指标数据不足，启用默认止损 {exec_stop}")
-
     update_trade_history_trailing_stop_ashare(ticker, rec_date_str, stop_ctx)
 
     t1_stop_triggered_today = False
@@ -1133,6 +1156,15 @@ client = anthropic.Anthropic(
 prompt = f'''
 你是顶级量化风控总监。以下是今日需要复盘的 A 股标的数据：
 
+【Scan 版本隔离——最高优先级】
+当前 Scan 版本：{SCAN_VERSION_HASH}
+当前 Scan 版本起始日：{SCAN_VERSION_START.strftime("%Y-%m-%d")}
+当前版本胜率、评分有效性、盈利贡献、亏损率、风控有效性，只能统计 Rec_Date >= 当前版本起始日的交易。
+旧版本 scan 的胜率、盈亏、评分表现不得混入当前版本 KPI，不得用旧版本表现评价当前版本。
+旧版本数据可以继续保存在 review_history.csv，但仅用于历史查看。
+当前版本样本不足时，必须明确写“当前版本样本不足，暂不能形成稳定胜率结论”。
+
+
 【持仓中（周期内，需要给出风控指令）】：
 {active_list}
 
@@ -1164,11 +1196,11 @@ prompt = f'''
     (严格遵守A股T+1：今日新增只能持有观察；今日若触发止损，只记录为T+1待执行；非新仓才可正常执行止损/减仓)</p>
 </div>
 
-<h2 style="color: #37474f; border-bottom: 2px solid #cfd8dc; padding-bottom: 5px; margin-top: 40px;">📁 已超期归档 - 策略复盘评价</h2>
+<h2 style="color: #37474f; border-bottom: 2px solid #cfd8dc; padding-bottom: 5px; margin-top: 40px;">📁 已关闭交易 - 策略复盘评价</h2>
 <div style="background: #f5f5f5; padding: 20px; margin-bottom: 15px; border-radius: 8px; border: 1px solid #e0e0e0;">
-    <h3 style="margin: 0 0 10px 0;">[首次推荐日] | [股票名称] ([代码]) | 评分[推荐评分]/100 | 期满日:[期满日]</h3>
+    <h3 style="margin: 0 0 10px 0;">[首次推荐日] | [股票名称] ([代码]) | 评分[推荐评分]/100 | 关闭日:[关闭日]</h3>
     <p><b>持股状态:</b> 动态持有 | <b>当前移动止损位:</b> [止损价] | <b>止损方法:</b> [Stop_Method]</p>
-    <p><b>买入成本:</b> ¥[首次推荐价] → <b>期满日价格:</b> ¥[期满日价格] | <b>策略实际盈亏:</b> <span style="font-weight:bold; color:[盈利#d32f2f/亏损#388e3c];">[期满日盈亏(%)]%</span></p>
+    <p><b>买入成本:</b> ¥[首次推荐价] → <b>实际退出价格:</b> ¥[退出价格] | <b>策略实际盈亏:</b> <span style="font-weight:bold; color:[盈利#d32f2f/亏损#388e3c];">[期满日盈亏(%)]%</span></p>
     <p><span style="background: #455a64; color: #fff; padding: 2px 6px; border-radius: 4px; font-size: 12px;">策略复盘</span>
     (评价这次策略是否成功，归因分析盈亏原因；若为T+1止损，则说明触发日与实际执行日的差异)</p>
 </div>
@@ -1199,7 +1231,8 @@ archive_cols = [
     "Review_Date","Ticker","Name","Tag","Rec_Date","Rec_Price","Cur_Price","Days_Held",
     "PnL_Pct","Maturity_PnL","Hold_Period","Stop_Loss","Stop_Method","Trail_Stop",
     "MA20","MA50","ATR_Pct","Rec_Count","Status","Score","PE_TTM","EPS_TTM","PB",
-    "Earnings_Growth","ROE","估值评分","估值结论"
+    "Earnings_Growth","ROE","估值评分","估值结论",
+    "Scan_Version","Scan_Version_Start"
 ]
 
 # 兼容旧 review_history：有旧列就保留数据，缺失的新列补空，并统一表头。
@@ -1233,7 +1266,9 @@ try:
             "Status": 'T+1止损待执行' if _status == 'T+1止损待执行' else '持仓中', "Score": item.get('推荐评分',''),
             "PE_TTM": item.get('PE_TTM',''), "EPS_TTM": item.get('EPS_TTM',''), "PB": item.get('PB',''),
             "Earnings_Growth": item.get('Earnings_Growth',''), "ROE": item.get('ROE',''),
-            "估值评分": item.get('估值评分',''), "估值结论": item.get('估值结论','')
+            "估值评分": item.get('估值评分',''), "估值结论": item.get('估值结论',''),
+            "Scan_Version": SCAN_VERSION_HASH,
+            "Scan_Version_Start": SCAN_VERSION_START.strftime('%Y-%m-%d')
         })
 
     for item in expired_list:
@@ -1245,7 +1280,9 @@ try:
             "Stop_Loss": item.get('止损价',''), "Stop_Method": item.get('Stop_Method',''), "Trail_Stop": item.get('止损价',''),
             "MA20": '', "MA50": '', "ATR_Pct": item.get('ATR_Pct',''), "Rec_Count": item.get('系统连续推荐次数',''),
             "Status": item.get('结算类型','止损触发清仓'), "Score": item.get('推荐评分',''), "PE_TTM": '', "EPS_TTM": '',
-            "PB": '', "Earnings_Growth": '', "ROE": '', "估值评分": '', "估值结论": ''
+            "PB": '', "Earnings_Growth": '', "ROE": '', "估值评分": '', "估值结论": '',
+            "Scan_Version": SCAN_VERSION_HASH,
+            "Scan_Version_Start": SCAN_VERSION_START.strftime('%Y-%m-%d')
         })
 
     if rows_to_append:
@@ -1258,124 +1295,180 @@ except Exception as e:
 # ==========================================
 # 9. KPI 计算与邮件 HTML 组装
 # ==========================================
+# review_history.csv 是永久历史库；当前 KPI 只看当前 Scan 版本。
+# 过滤条件：Rec_Date >= SCAN_VERSION_START。
+
+ALL_CLOSED_STATUSES = {
+    "已超期归档",
+    "突发清仓暂停",
+    "止损触发清仓",
+    "周期到期清仓",
+}
+
 historical_closed = []
-_INVALID_H = {'', 'n/a', 'nan', 'none'}
+_INVALID_H = {"", "n/a", "nan", "none", "null"}
+
 if os.path.exists(review_log) and os.path.getsize(review_log) > 0:
     try:
-        existing_review = pd.read_csv(review_log, on_bad_lines='skip')
-        closed_rows = existing_review[existing_review['Status'].isin(['已超期归档', '突发清仓暂停', '止损触发清仓', '周期到期清仓'])]
-        for _, r in closed_rows.iterrows():
-            try:
-                pnl_val = r['PnL_Pct']
-                if pd.notna(pnl_val) and str(pnl_val).strip().lower() not in _INVALID_H:
-                    pnl = float(pnl_val)
-                else:
-                    pnl_mat = r['Maturity_PnL']
-                    if pd.notna(pnl_mat) and str(pnl_mat).strip().lower() not in _INVALID_H:
-                        pnl = float(pnl_mat)
-                    else:
-                        continue
-            except:
-                continue
-            prevented = 0.0
-            try:
-                sl_val = str(r.get('Stop_Loss', 'N/A')).strip()
-                cur_val = str(r.get('Cur_Price', 'N/A')).strip()
-                if sl_val not in _INVALID_H and cur_val not in _INVALID_H:
-                    sl_price = float(sl_val)
-                    cur_price = float(cur_val)
-                    prevented = round((sl_price - cur_price) / sl_price * 100, 2) if sl_price > 0 else 0.0
-            except:
-                pass
-            historical_closed.append({
-                'ticker': r.get('Ticker', ''),
-                'name': r.get('Name', ''),
-                'pnl': pnl,
-                'prevented': prevented,
-                'status': r.get('Status', '已超期归档')
-            })
-    except:
-        pass
+        existing_review = pd.read_csv(
+            review_log,
+            keep_default_na=False,
+            on_bad_lines="skip",
+        )
 
-all_closed_trades = []
-for h in historical_closed:
-    all_closed_trades.append(h)
+        if {"Status", "Rec_Date"}.issubset(existing_review.columns):
+            closed_rows = existing_review[
+                existing_review["Status"].astype(str).str.strip().isin(ALL_CLOSED_STATUSES)
+            ].copy()
+
+            closed_rows["Rec_Date_DT"] = pd.to_datetime(
+                closed_rows["Rec_Date"], errors="coerce"
+            )
+            closed_rows = closed_rows[
+                closed_rows["Rec_Date_DT"].notna()
+                & (closed_rows["Rec_Date_DT"].dt.normalize() >= SCAN_VERSION_START)
+            ].copy()
+
+            seen_keys = set()
+            for _, r in closed_rows.iterrows():
+                try:
+                    pnl = safe_float(r.get("PnL_Pct"))
+                    if pnl is None:
+                        pnl = safe_float(r.get("Maturity_PnL"))
+                    if pnl is None:
+                        continue
+
+                    ticker = clean_text(r.get("Ticker"))
+                    rec_date = clean_text(r.get("Rec_Date"))
+                    status = clean_text(r.get("Status"))
+                    key = (ticker, rec_date, status)
+                    if key in seen_keys:
+                        continue
+                    seen_keys.add(key)
+
+                    prevented = 0.0
+                    sl_price = safe_float(r.get("Stop_Loss"))
+                    close_price = safe_float(r.get("Cur_Price"))
+                    if sl_price is not None and close_price is not None and sl_price > 0:
+                        prevented = round(
+                            (sl_price - close_price) / sl_price * 100,
+                            2,
+                        )
+
+                    historical_closed.append({
+                        "ticker": ticker,
+                        "name": clean_text(r.get("Name")),
+                        "pnl": pnl,
+                        "prevented": prevented,
+                        "status": status,
+                        "rec_date": rec_date,
+                        "scan_version": clean_text(r.get("Scan_Version")) or SCAN_VERSION_HASH,
+                    })
+                except Exception:
+                    continue
+
+        print(
+            f"📊 当前 Scan 版本 KPI：起始 {SCAN_VERSION_START.strftime('%Y-%m-%d')}，"
+            f"历史已结算 {len(historical_closed)} 笔"
+        )
+    except Exception as e:
+        print(f"⚠️ 当前版本 KPI 读取失败：{e}")
+
+# 本次运行的新关闭交易已经写入 review_history；再次并入时严格去重。
+current_closed_keys = {
+    (x.get("ticker", ""), x.get("rec_date", ""), x.get("status", ""))
+    for x in historical_closed
+}
+
 for item in expired_list:
-    try:
-        pnl = float(item['期满日盈亏(%)']) if item['期满日盈亏(%)'] != "无数据" else 0.0
-    except:
-        pnl = 0.0
-    all_closed_trades.append({
-        'ticker': item['代码'], 'name': item['名称'], 'pnl': pnl,
-        'prevented': 0.0, 'status': item.get('结算类型', '周期到期清仓')
+    rec_date = clean_text(item.get("首次推荐日"))
+    if not is_current_scan_version_date(rec_date):
+        continue
+
+    pnl = safe_float(item.get("期满日盈亏(%)"))
+    if pnl is None:
+        continue
+
+    status = clean_text(item.get("结算类型"), "周期到期清仓")
+    key = (clean_text(item.get("代码")), rec_date, status)
+    if key in current_closed_keys:
+        continue
+
+    current_closed_keys.add(key)
+    historical_closed.append({
+        "ticker": clean_text(item.get("代码")),
+        "name": clean_text(item.get("名称")),
+        "pnl": pnl,
+        "prevented": 0.0,
+        "status": status,
+        "rec_date": rec_date,
+        "scan_version": SCAN_VERSION_HASH,
     })
 
-active_count = len(active_list)
+# 当前版本 Active；旧版本仍可显示在报告，但不能污染当前版本 KPI。
+current_version_active = [
+    x for x in active_list
+    if is_current_scan_version_date(x.get("首次推荐日"))
+]
+
+all_closed_trades = historical_closed
+
+all_active_count = len(active_list)
+active_count = len(current_version_active)
 closed_count = len(all_closed_trades)
 total_count = active_count + closed_count
 
-new_today_count = sum(1 for x in active_list if x.get('今日新增') == '是')
+new_today_count = sum(
+    1 for x in current_version_active if x.get("今日新增") == "是"
+)
 
-_win_rate_pool = [x for x in active_list if isinstance(x['当前盈亏(%)'], (int, float))]
-active_wins = sum(1 for x in _win_rate_pool if x['当前盈亏(%)'] > 0)
-active_win_rate = (active_wins / len(_win_rate_pool) * 100) if _win_rate_pool else 0.0
+active_pnl = [
+    safe_float(x.get("当前盈亏(%)"))
+    for x in current_version_active
+]
+active_pnl = [p for p in active_pnl if p is not None]
+active_wins = sum(1 for p in active_pnl if p > 0)
+active_win_rate = (
+    active_wins / len(active_pnl) * 100
+    if active_pnl else 0.0
+)
 
-closed_wins = sum(1 for x in all_closed_trades if x['pnl'] > 0)
-closed_win_rate = (closed_wins / closed_count * 100) if closed_count > 0 else 0.0
+closed_wins = sum(
+    1 for x in all_closed_trades if safe_float(x.get("pnl")) is not None and x.get("pnl", 0) > 0
+)
+closed_win_rate = (
+    closed_wins / closed_count * 100
+    if closed_count else 0.0
+)
 
-effective_risk = sum(1 for x in all_closed_trades if x['prevented'] >= -2.0)
-risk_rate = (effective_risk / closed_count * 100) if closed_count > 0 else 0.0
+effective_risk = sum(
+    1 for x in all_closed_trades
+    if x.get("status") in {"止损触发清仓", "周期到期清仓", "突发清仓暂停"}
+    and x.get("prevented", 0.0) >= -2.0
+)
+risk_rate = (
+    effective_risk / closed_count * 100
+    if closed_count else 0.0
+)
+
+all_pnl_list = (
+    active_pnl
+    + [
+        x["pnl"] for x in all_closed_trades
+        if isinstance(x.get("pnl"), (int, float))
+    ]
+)
 
 super_threshold = 15.0
-all_pnl_list = [x['当前盈亏(%)'] for x in active_list if isinstance(x['当前盈亏(%)'], (int, float))] + [x['pnl'] for x in all_closed_trades]
 super_winners = [p for p in all_pnl_list if p >= super_threshold]
 super_winner_contribution = sum(super_winners)
 other_winners = [p for p in all_pnl_list if 0.0 < p < super_threshold]
-other_winner_avg = (sum(other_winners) / len(other_winners)) if other_winners else 0.0
+other_winner_avg = (
+    sum(other_winners) / len(other_winners)
+    if other_winners else 0.0
+)
 losers = [p for p in all_pnl_list if p < 0.0]
-loser_avg = (sum(losers) / len(losers)) if losers else 0.0
-
-kpi_html = f"""
-<div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 15px; margin-bottom: 20px;">
-    <div style="background: #ffffff; border: 1px solid #eef2f5; border-radius: 10px; padding: 15px; box-shadow: 0 4px 6px rgba(0,0,0,0.02); border-top: 4px solid #1565c0;">
-        <div style="font-size: 13px; color: #7f8c8d; margin-bottom: 5px;">📊 总推荐笔数</div>
-        <div style="font-size: 24px; font-weight: bold; color: #2c3e50; margin-bottom: 5px;">{total_count}</div>
-        <div style="font-size: 12px; color: #95a5a6;">活跃持仓 {active_count} 笔（含今日新增 {new_today_count} 笔） · 历史归档 {closed_count} 笔</div>
-    </div>
-    <div style="background: #ffffff; border: 1px solid #eef2f5; border-radius: 10px; padding: 15px; box-shadow: 0 4px 6px rgba(0,0,0,0.02); border-top: 4px solid #2ecc71;">
-        <div style="font-size: 13px; color: #7f8c8d; margin-bottom: 5px;">📈 活跃持仓胜率</div>
-        <div style="font-size: 24px; font-weight: bold; color: #2ecc71; margin-bottom: 5px;">{active_win_rate:.2f}%</div>
-        <div style="font-size: 12px; color: #95a5a6;">{active_wins} 赢 / {len(_win_rate_pool) - active_wins} 亏（含今日新增 {new_today_count} 笔）</div>
-    </div>
-    <div style="background: #ffffff; border: 1px solid #eef2f5; border-radius: 10px; padding: 15px; box-shadow: 0 4px 6px rgba(0,0,0,0.02); border-top: 4px solid #e67e22;">
-        <div style="font-size: 13px; color: #7f8c8d; margin-bottom: 5px;">📉 已归档实现胜率</div>
-        <div style="font-size: 24px; font-weight: bold; color: #e67e22; margin-bottom: 5px;">{closed_win_rate:.2f}%</div>
-        <div style="font-size: 12px; color: #95a5a6;">{closed_wins} 赢 / {closed_count - closed_wins} 亏</div>
-    </div>
-    <div style="background: #ffffff; border: 1px solid #eef2f5; border-radius: 10px; padding: 15px; box-shadow: 0 4px 6px rgba(0,0,0,0.02); border-top: 4px solid #95a5a6;">
-        <div style="font-size: 13px; color: #7f8c8d; margin-bottom: 5px;">🛡️ 风控拦截率</div>
-        <div style="font-size: 24px; font-weight: bold; color: #95a5a6; margin-bottom: 5px;">{risk_rate:.2f}%</div>
-        <div style="font-size: 12px; color: #95a5a6;">{effective_risk}/{closed_count} 次避险离场有效防范深度回撤</div>
-    </div>
-</div>
-<div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 15px; margin-bottom: 25px;">
-    <div style="background: #ffffff; border: 1px solid #eef2f5; border-radius: 10px; padding: 15px; box-shadow: 0 4px 6px rgba(0,0,0,0.02); border-top: 4px solid #9b59b6;">
-        <div style="font-size: 13px; color: #7f8c8d; margin-bottom: 5px;">🏆 超级赢家贡献</div>
-        <div style="font-size: 24px; font-weight: bold; color: #9b59b6; margin-bottom: 5px;">+{super_winner_contribution:.2f}%</div>
-        <div style="font-size: 12px; color: #95a5a6;">超级赢家(>{super_threshold}%)累计涨幅</div>
-    </div>
-    <div style="background: #ffffff; border: 1px solid #eef2f5; border-radius: 10px; padding: 15px; box-shadow: 0 4px 6px rgba(0,0,0,0.02); border-top: 4px solid #1abc9c;">
-        <div style="font-size: 13px; color: #7f8c8d; margin-bottom: 5px;">💰 其余盈利平均</div>
-        <div style="font-size: 24px; font-weight: bold; color: #1abc9c; margin-bottom: 5px;">+{other_winner_avg:.2f}%</div>
-        <div style="font-size: 12px; color: #95a5a6;">扣除超级赢家后的盈利均值</div>
-    </div>
-    <div style="background: #ffffff; border: 1px solid #eef2f5; border-radius: 10px; padding: 15px; box-shadow: 0 4px 6px rgba(0,0,0,0.02); border-top: 4px solid #e74c3c;">
-        <div style="font-size: 13px; color: #7f8c8d; margin-bottom: 5px;">⚠️ 亏损标的平均</div>
-        <div style="font-size: 24px; font-weight: bold; color: #e74c3c; margin-bottom: 5px;">{loser_avg:.2f}%</div>
-        <div style="font-size: 12px; color: #95a5a6;">所有亏损标的的平均跌幅</div>
-    </div>
-</div>
-"""
+loser_avg = sum(losers) / len(losers) if losers else 0.0
 
 full_html = f"""<!DOCTYPE html><html><head><meta charset='utf-8'>
 <style>
@@ -1385,7 +1478,7 @@ full_html = f"""<!DOCTYPE html><html><head><meta charset='utf-8'>
 <body>
     <div class='card'>
         <h2 style='color: #2c3e50; margin-top: 0; margin-bottom: 20px; font-size: 26px; border-bottom: 3px solid #1565c0; padding-bottom: 10px; display: flex; align-items: center; gap: 10px;'>
-            <span>📊 A股盘后复盘与风控审查报告</span>
+            <span>📊 A股盘后复盘与风控审查报告</span> <span style='font-size:13px;color:#78909c;'>Scan版本 {SCAN_VERSION_HASH[:10]} · 起始 {SCAN_VERSION_START.strftime('%Y-%m-%d')}</span>
         </h2>
         {kpi_html}
         {ai_html}
