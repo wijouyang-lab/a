@@ -734,6 +734,149 @@ def _indicator_frame_ashare(ticker, before_date_str):
     return sub.dropna(subset=['high', 'low', 'close']).copy()
 
 
+
+def _previous_stop_method_from_group(group):
+    """优先读取账本中最近一次已经计算好的止损方法，避免技术数据短缺时只显示笼统的“数据不足”。"""
+    try:
+        for _, rr in group.sort_values('Date').iloc[::-1].iterrows():
+            method = clean_text(rr.get('Stop_Method'))
+            if method and method not in INVALID_STRINGS:
+                return method
+    except Exception:
+        pass
+    return ''
+
+
+def build_attribution(active_item):
+    """确定性生成逐笔盈亏归因、止损解释和风控动作，AI 只负责扩展，不负责提供底层事实。"""
+    pnl = safe_float(active_item.get('当前盈亏(%)'))
+    cur = safe_float(active_item.get('现价'))
+    cost = safe_float(active_item.get('首次推荐价'))
+    stop = safe_float(active_item.get('止损价'))
+    ma20 = safe_float(active_item.get('MA20'))
+    ma50 = safe_float(active_item.get('MA50'))
+    atr_pct = safe_float(active_item.get('ATR_Pct'))
+    score = safe_float(active_item.get('推荐评分'))
+    rec_count = safe_int(active_item.get('系统连续推荐次数'), 0) or 0
+    macd = clean_text(active_item.get('MACD状态'))
+    kdj = clean_text(active_item.get('KDJ状态'))
+    valuation = clean_text(active_item.get('估值结论'))
+    t1 = clean_text(active_item.get('风控状态'))
+
+    basis = []
+    if pnl is None:
+        base_reason = '当前盈亏数据不足，无法进行可靠归因。'
+    elif pnl >= 5:
+        base_reason = '股价相对建仓成本已形成明显正收益。'
+        if ma20 is not None and cur is not None and cur > ma20:
+            basis.append('现价高于MA20')
+        if ma50 is not None and cur is not None and cur > ma50:
+            basis.append('现价高于MA50')
+        if macd and '未转空' in macd:
+            basis.append('MACD未明显转空')
+        if kdj and '未明显转弱' in kdj:
+            basis.append('KDJ未明显转弱')
+        if rec_count >= 3:
+            basis.append(f'连续推荐{rec_count}次，趋势/信号具有持续性')
+        if valuation and valuation not in INVALID_STRINGS:
+            basis.append(f'估值结论为{valuation}')
+        if basis:
+            base_reason += ' 主要支撑：' + '、'.join(basis) + '。'
+    elif pnl > 0:
+        base_reason = '当前仍处于盈利状态，主要由现价高于建仓成本形成。'
+        if ma20 is not None and cur is not None and cur > ma20:
+            base_reason += ' 现价仍站在MA20上方。'
+        if macd and '偏空' not in macd:
+            base_reason += ' MACD尚未确认明显转空。'
+    elif pnl <= -5:
+        base_reason = '股价已明显低于建仓成本，亏损主要来自持仓后的价格回撤。'
+        if ma20 is not None and cur is not None and cur < ma20:
+            basis.append('现价跌破MA20')
+        if ma50 is not None and cur is not None and cur < ma50:
+            basis.append('现价跌破MA50')
+        if macd and '偏空' in macd:
+            basis.append('MACD偏空')
+        if kdj and '回落' in kdj:
+            basis.append('KDJ走弱')
+        if basis:
+            base_reason += ' 技术原因：' + '、'.join(basis) + '。'
+        if score is not None and score >= 80:
+            base_reason += ' 由于推荐评分较高，本次属于高信心预期未兑现，需要重点复盘评分因子。'
+    else:
+        base_reason = '当前小幅盈利/亏损，尚未形成强趋势归因。'
+        if ma20 is not None and cur is not None:
+            base_reason += ' 现价与MA20关系：' + ('上方' if cur >= ma20 else '下方') + '。'
+
+    if pnl is not None and pnl > 0:
+        profit_reason = base_reason
+        loss_reason = ''
+    elif pnl is not None and pnl < 0:
+        profit_reason = ''
+        loss_reason = base_reason
+    else:
+        profit_reason = ''
+        loss_reason = '暂无明显盈利或亏损，归因为中性。'
+
+    # 确保止损方法始终有可读值
+    stop_method = clean_text(active_item.get('Stop_Method'))
+    if not stop_method or stop_method in {'数据不足，沿用原止损', '技术数据不足，沿用原止损'}:
+        stop_method = clean_text(active_item.get('Stop_Method')) or '原始止损/历史保护线'
+
+    if t1 == 'T+1止损待执行':
+        action = '持有观察；止损已触发但受A股T+1限制，下一交易日按可执行价格处理。'
+    elif stop is not None and cur is not None and cur > 0:
+        gap_pct = (cur - stop) / cur * 100
+        if gap_pct <= 3:
+            action = f'止损位距离现价仅约{gap_pct:.1f}%，进入高风险区，优先观察是否失守并准备执行风控。'
+        elif macd == '偏空' and kdj == 'J线回落':
+            action = 'MACD与KDJ同步转弱，继续持有需收紧风控；若价格失守移动止损，执行退出。'
+        elif pnl is not None and pnl >= 10:
+            action = '盈利明显，继续持有但将移动止损跟随趋势上移，优先锁定已有利润。'
+        else:
+            action = '继续动态持有，以移动止损、MA20/MA50及MACD/KDJ趋势破坏作为退出依据。'
+    else:
+        action = '继续动态持有；当前技术数据不足时沿用已有保护线，不使用固定持仓天数强制退出。'
+
+    return {
+        '盈利原因': profit_reason,
+        '亏损原因': loss_reason,
+        '止损方法': stop_method,
+        '风控动作指令': action,
+        'ATR_Pct': atr_pct,
+    }
+
+
+def build_attribution_html(active_list, expired_list):
+    """确定性生成HTML归因区，防止AI漏掉逐笔盈利/亏损原因或止损方法。"""
+    blocks = []
+    all_items = [('持仓中', x) for x in active_list] + [('已关闭', x) for x in expired_list]
+    for state, item in all_items:
+        attr = build_attribution(item)
+        pnl = safe_float(item.get('当前盈亏(%)')) if state == '持仓中' else safe_float(item.get('期满日盈亏(%)'))
+        pnl_text = 'N/A' if pnl is None else f'{pnl:.2f}%'
+        pnl_color = '#d32f2f' if pnl is not None and pnl > 0 else '#388e3c'
+        reason_title = '盈利原因' if pnl is not None and pnl > 0 else '亏损原因'
+        reason_body = attr['盈利原因'] if pnl is not None and pnl > 0 else attr['亏损原因']
+        if not reason_body:
+            reason_body = '暂无。'
+        stop_method = clean_text(item.get('Stop_Method')) or attr['止损方法']
+        stop_price = clean_text(item.get('止损价')) or clean_text(item.get('Trail_Stop')) or 'N/A'
+        blocks.append(f"""
+<div style='background:#fafafa;border:1px solid #e0e0e0;padding:16px;margin:0 0 12px 0;border-radius:8px;'>
+  <div style='font-weight:bold;color:#263238;margin-bottom:8px;'>{'🟢' if state == '持仓中' else '📁'} {state}：{clean_text(item.get('名称'))} ({clean_text(item.get('代码'))})</div>
+  <div><b>实际盈亏：</b><span style='font-weight:bold;color:{pnl_color};'>{pnl_text}</span></div>
+  <div><b>{reason_title}：</b>{reason_body}</div>
+  <div><b>当前移动止损：</b>{stop_price}　<b>止损方法：</b>{stop_method}</div>
+  <div><b>风控动作：</b>{attr['风控动作指令']}</div>
+</div>""")
+    if not blocks:
+        return ''
+    return """
+<h2 style='color:#1565c0;border-bottom:2px solid #1565c0;padding-bottom:5px;'>🔎 逐笔盈亏归因与止损方法（程序确定性生成）</h2>
+<p style='color:#546e7a;'>以下字段由程序根据实际价格、MA20/MA50、MACD、KDJ、ATR、推荐评分及移动止损数据生成；不会因AI漏项而缺失。</p>
+""" + ''.join(blocks)
+
+
 def get_trailing_stop_context_ashare(ticker, existing_stop=None, before_date_str=None):
     """
     A股动态移动止损：MA20 / MA50 + ATR + MACD / KDJ。
@@ -1014,6 +1157,12 @@ for ticker, group in recent_picks.groupby('Ticker'):
             break
 
     stop_ctx = get_trailing_stop_context_ashare(ticker, existing_stop=existing_stop, before_date_str=today_str)
+    # 技术历史不足时，不把“数据不足”当作最终展示值；优先沿用账本中上一轮真实止损方法。
+    _prev_method = _previous_stop_method_from_group(group)
+    if _prev_method and str(stop_ctx.get('method', '')).strip() in {'', '数据不足，沿用原止损', '技术数据不足，沿用原止损'}:
+        stop_ctx['method'] = _prev_method + '（本次技术数据不足，沿用）'
+    elif str(stop_ctx.get('method', '')).strip() in {'', '数据不足，沿用原止损', '技术数据不足，沿用原止损'}:
+        stop_ctx['method'] = '历史移动止损保护线（本次技术数据不足）'
     exec_stop = stop_ctx.get('exec_stop')
     update_trade_history_trailing_stop_ashare(ticker, rec_date_str, stop_ctx)
 
@@ -1046,7 +1195,9 @@ for ticker, group in recent_picks.groupby('Ticker'):
                 '首次推荐日': rec_date_str, '首次推荐价': rec_price, '期满日': '', '期满日价格': exit_price,
                 '期满日盈亏(%)': pnl, '持仓天数': days_held, '系统连续推荐次数': len(group),
                 '结算类型': '止损触发清仓', '执行说明': '昨日触发止损，A股T+1今日开盘执行',
-                'Stop_Method': stop_ctx.get('method', 'MA20/MA50 + ATR + MACD/KDJ')
+                'Stop_Method': stop_ctx.get('method', 'MA20/MA50 + ATR + MACD/KDJ'),
+                'Trail_Stop': exec_stop if exec_stop is not None else 'N/A', 'MA20': stop_ctx.get('ma20', 'N/A'), 'MA50': stop_ctx.get('ma50', 'N/A'), 'ATR_Pct': stop_ctx.get('atr_pct', 'N/A'),
+                'MACD状态': '偏空' if stop_ctx.get('macd_bearish') else '未转空', 'KDJ状态': 'J线回落' if stop_ctx.get('kdj_falling') else '未明显转弱'
             })
             continue
 
@@ -1080,7 +1231,9 @@ for ticker, group in recent_picks.groupby('Ticker'):
                 '首次推荐日': rec_date_str, '首次推荐价': rec_price, '期满日': '', '期满日价格': exit_price,
                 '期满日盈亏(%)': pnl, '持仓天数': days_held, '系统连续推荐次数': len(group),
                 '结算类型': '止损触发清仓', '执行说明': '移动止损触发，按可执行价格模拟结算',
-                'Stop_Method': stop_ctx.get('method', 'MA20/MA50 + ATR + MACD/KDJ')
+                'Stop_Method': stop_ctx.get('method', 'MA20/MA50 + ATR + MACD/KDJ'),
+                'Trail_Stop': exec_stop if exec_stop is not None else 'N/A', 'MA20': stop_ctx.get('ma20', 'N/A'), 'MA50': stop_ctx.get('ma50', 'N/A'), 'ATR_Pct': stop_ctx.get('atr_pct', 'N/A'),
+                'MACD状态': '偏空' if stop_ctx.get('macd_bearish') else '未转空', 'KDJ状态': 'J线回落' if stop_ctx.get('kdj_falling') else '未明显转弱'
             })
             continue
 
@@ -1103,6 +1256,17 @@ for ticker, group in recent_picks.groupby('Ticker'):
         'PB': first_row.get('PB', ''), 'Earnings_Growth': first_row.get('Earnings_Growth', ''),
         'ROE': first_row.get('ROE', ''), '估值评分': first_row.get('估值评分', ''), '估值结论': first_row.get('估值结论', '')
     })
+    _attr = build_attribution(active_list[-1])
+    active_list[-1].update(_attr)
+
+# 已关闭交易也强制补齐确定性归因字段
+for _i, _item in enumerate(expired_list):
+    _attr = build_attribution({
+        **_item,
+        '当前盈亏(%)': _item.get('期满日盈亏(%)'),
+        '现价': _item.get('期满日价格'),
+    })
+    expired_list[_i].update(_attr)
 
 # ==========================================================
 # 今日新仓最终一致性校验：任何 pending 导入的股票都必须在 active_list。
@@ -1149,7 +1313,13 @@ if _missing_today:
             'T+1锁定': '是',
             '风控状态': 'T+1锁定',
             '系统连续推荐次数': 1,
+            'Stop_Method': _r.get('Stop_Method', '原始止损/历史保护线'),
+            'Trail_Stop': _sl,
+            'MA20': _r.get('MA20', ''), 'MA50': _r.get('MA50', ''), 'ATR_Pct': _r.get('ATR_Pct', ''),
+            'MACD状态': _r.get('MACD状态', '未转空'), 'KDJ状态': _r.get('KDJ状态', '未明显转弱'),
         })
+        _attr = build_attribution(active_list[-1])
+        active_list[-1].update(_attr)
     _active_today_tickers = {str(x.get('代码', '')).strip() for x in active_list if x.get('今日新增') == '是'}
     _missing_today = sorted(_today_pending_imported - _active_today_tickers)
     if _missing_today:
@@ -1194,6 +1364,11 @@ prompt = f'''
 {expired_list}
 
 在风控判断或策略复盘时，请结合推荐评分进行验证：高分票（80分以上）如果出现明显亏损，需要特别指出"高信心预期未兑现"；低分票（60分以下）如果反而盈利良好，也需要指出"评分体系可能过于保守"。
+
+【逐笔归因与止损方法——必须输出】
+1. 每一只股票必须写盈利原因或亏损原因，并引用已有数据事实。
+2. 每一只股票必须明确止损方法 Stop_Method；不得留空、不得只写“移动止损”。
+3. 每一只股票必须给出具体风控动作指令。
 
 【A股T+1交易规则——必须严格遵守】
 1. "今日新增"="是"代表今天开盘建立的新仓，当天绝对禁止卖出、止损清仓或减仓。
@@ -1254,6 +1429,7 @@ archive_cols = [
     "PnL_Pct","Maturity_PnL","Hold_Period","Stop_Loss","Stop_Method","Trail_Stop",
     "MA20","MA50","ATR_Pct","Rec_Count","Status","Score","PE_TTM","EPS_TTM","PB",
     "Earnings_Growth","ROE","估值评分","估值结论",
+    "盈利原因","亏损原因","风控动作指令",
     "Scan_Version","Scan_Version_Start"
 ]
 
@@ -1289,6 +1465,7 @@ try:
             "PE_TTM": item.get('PE_TTM',''), "EPS_TTM": item.get('EPS_TTM',''), "PB": item.get('PB',''),
             "Earnings_Growth": item.get('Earnings_Growth',''), "ROE": item.get('ROE',''),
             "估值评分": item.get('估值评分',''), "估值结论": item.get('估值结论',''),
+            "盈利原因": item.get('盈利原因',''), "亏损原因": item.get('亏损原因',''), "风控动作指令": item.get('风控动作指令',''),
             "Scan_Version": SCAN_VERSION_HASH,
             "Scan_Version_Start": SCAN_VERSION_START.strftime('%Y-%m-%d')
         })
@@ -1303,6 +1480,7 @@ try:
             "MA20": '', "MA50": '', "ATR_Pct": item.get('ATR_Pct',''), "Rec_Count": item.get('系统连续推荐次数',''),
             "Status": item.get('结算类型','止损触发清仓'), "Score": item.get('推荐评分',''), "PE_TTM": '', "EPS_TTM": '',
             "PB": '', "Earnings_Growth": '', "ROE": '', "估值评分": '', "估值结论": '',
+            "盈利原因": item.get('盈利原因',''), "亏损原因": item.get('亏损原因',''), "风控动作指令": item.get('风控动作指令',''),
             "Scan_Version": SCAN_VERSION_HASH,
             "Scan_Version_Start": SCAN_VERSION_START.strftime('%Y-%m-%d')
         })
@@ -1542,6 +1720,7 @@ full_html = f"""<!DOCTYPE html><html><head><meta charset='utf-8'>
             <span>📊 A股盘后复盘与风控审查报告</span> <span style='font-size:13px;color:#78909c;'>Scan版本 {SCAN_VERSION_HASH[:10]} · 起始 {SCAN_VERSION_START.strftime('%Y-%m-%d')}</span>
         </h2>
         {kpi_html}
+        {build_attribution_html(active_list, expired_list)}
         {ai_html}
     </div>
 </body></html>"""
