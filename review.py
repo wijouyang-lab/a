@@ -23,17 +23,6 @@ import sys
 # ==========================================
 # 通用安全数值转换（必须定义在所有 KPI/风控逻辑之前）
 # ==========================================
-def safe_int(value, default=None):
-    """安全整数转换；任何非法/空值均返回 default。"""
-    try:
-        f = safe_float(value, None)
-        if f is None:
-            return default
-        return int(f)
-    except (TypeError, ValueError, OverflowError):
-        return default
-
-
 def safe_float(value, default=None):
     """将价格、盈亏、估值等字段安全转换为 float。"""
     try:
@@ -831,7 +820,13 @@ def build_attribution(active_item):
     # 确保止损方法始终有可读值
     stop_method = clean_text(active_item.get('Stop_Method'))
     if not stop_method or stop_method in {'数据不足，沿用原止损', '技术数据不足，沿用原止损'}:
-        stop_method = clean_text(active_item.get('Stop_Method')) or '原始止损/历史保护线'
+        technical_parts = []
+        if ma20 is not None: technical_parts.append('MA20')
+        if ma50 is not None: technical_parts.append('MA50')
+        if atr_pct is not None: technical_parts.append(f'ATR({atr_pct:.2f}%)')
+        if macd: technical_parts.append('MACD')
+        if kdj: technical_parts.append('KDJ')
+        stop_method = ' + '.join(technical_parts) + '移动保护线' if technical_parts else '历史原始止损/保护线'
 
     if t1 == 'T+1止损待执行':
         action = '持有观察；止损已触发但受A股T+1限制，下一交易日按可执行价格处理。'
@@ -1267,8 +1262,12 @@ for ticker, group in recent_picks.groupby('Ticker'):
         'PB': first_row.get('PB', ''), 'Earnings_Growth': first_row.get('Earnings_Growth', ''),
         'ROE': first_row.get('ROE', ''), '估值评分': first_row.get('估值评分', ''), '估值结论': first_row.get('估值结论', '')
     })
-    _attr = build_attribution(active_list[-1])
-    active_list[-1].update(_attr)
+# 对所有活跃持仓逐只补齐确定性归因字段；不能只处理 active_list[-1]。
+for _i, _item in enumerate(active_list):
+    _attr = build_attribution(_item)
+    active_list[_i].update(_attr)
+
+print(f"✅ 已为 {len(active_list)} 只活跃持仓生成逐笔盈利/亏损原因、止损方法和风控动作")
 
 # 已关闭交易也强制补齐确定性归因字段
 for _i, _item in enumerate(expired_list):
@@ -1329,8 +1328,11 @@ if _missing_today:
             'MA20': _r.get('MA20', ''), 'MA50': _r.get('MA50', ''), 'ATR_Pct': _r.get('ATR_Pct', ''),
             'MACD状态': _r.get('MACD状态', '未转空'), 'KDJ状态': _r.get('KDJ状态', '未明显转弱'),
         })
-        _attr = build_attribution(active_list[-1])
-        active_list[-1].update(_attr)
+        # 最终一致性修复后，对刚补入的今日新仓逐只补齐归因字段。
+        for _i, _item in enumerate(active_list):
+            if not _item.get('盈利原因') and not _item.get('亏损原因'):
+                _attr = build_attribution(_item)
+                active_list[_i].update(_attr)
     _active_today_tickers = {str(x.get('代码', '')).strip() for x in active_list if x.get('今日新增') == '是'}
     _missing_today = sorted(_today_pending_imported - _active_today_tickers)
     if _missing_today:
@@ -1378,8 +1380,9 @@ prompt = f'''
 
 【逐笔归因与止损方法——必须输出】
 1. 每一只股票必须写盈利原因或亏损原因，并引用已有数据事实。
-2. 每一只股票必须明确止损方法 Stop_Method；不得留空、不得只写“移动止损”。
+2. 每一只股票必须明确止损方法 Stop_Method，并优先写明 MA20/MA50/ATR/MACD/KDJ 的实际组合。
 3. 每一只股票必须给出具体风控动作指令。
+4. 程序生成的“逐笔盈亏归因与止损方法”区块已经包含在最终 HTML 中，不得省略。
 
 【A股T+1交易规则——必须严格遵守】
 1. "今日新增"="是"代表今天开盘建立的新仓，当天绝对禁止卖出、止损清仓或减仓。
