@@ -900,10 +900,16 @@ def build_attribution_html(active_list, expired_list):
 </div>""")
     if not blocks:
         return ''
-    return """
-<h2 style='color:#1565c0;border-bottom:2px solid #1565c0;padding-bottom:5px;'>🔎 逐笔盈亏归因与止损方法（程序确定性生成）</h2>
-<p style='color:#546e7a;'>以下字段由程序根据实际价格、MA20/MA50、MACD、KDJ、ATR、推荐评分及移动止损数据生成；不会因AI漏项而缺失。</p>
-""" + ''.join(blocks)
+    active_blocks = []
+    expired_blocks = []
+    for b, (state, _) in zip(blocks, all_items):
+        (active_blocks if state == '持仓中' else expired_blocks).append(b)
+    html_parts = []
+    if active_blocks:
+        html_parts.append("<h2 style='color:#1565c0;border-bottom:2px solid #1565c0;padding-bottom:5px;'>📊 持仓中 - 风控纪律核对单</h2><p style='color:#546e7a;'>每只股票在同一张卡片内统一展示盈亏原因、当前移动止损、止损方法、技术状态及风控动作；不再拆成独立归因区块。</p>" + ''.join(active_blocks))
+    if expired_blocks:
+        html_parts.append("<h2 style='color:#37474f;border-bottom:2px solid #cfd8dc;padding-bottom:5px;margin-top:40px;'>📁 已关闭交易 - 策略复盘评价</h2>" + ''.join(expired_blocks))
+    return ''.join(html_parts)
 
 
 def get_trailing_stop_context_ashare(ticker, existing_stop=None, before_date_str=None):
@@ -1413,11 +1419,11 @@ prompt = f'''
 
 在风控判断或策略复盘时，请结合推荐评分进行验证：高分票（80分以上）如果出现明显亏损，需要特别指出"高信心预期未兑现"；低分票（60分以下）如果反而盈利良好，也需要指出"评分体系可能过于保守"。
 
-【逐笔归因与止损方法——必须输出】
+【逐笔归因与止损方法——程序已经直接生成到唯一的持仓卡片中】
 1. 每一只股票必须写盈利原因或亏损原因，并引用已有数据事实。
 2. 每一只股票必须明确止损方法 Stop_Method，并优先写明 MA20/MA50/ATR/MACD/KDJ 的实际组合。
 3. 每一只股票必须给出具体风控动作指令。
-4. 程序生成的“逐笔盈亏归因与止损方法”区块已经包含在最终 HTML 中，不得省略。
+4. 不要再输出单独的“逐笔盈亏归因与止损方法”区块。也不要重复输出“持仓中 - 风控纪律核对单”；持仓卡片已经由程序直接生成。你只负责总体评价、策略洞察和已关闭交易的文字补充。
 
 【A股T+1交易规则——必须严格遵守】
 1. "今日新增"="是"代表今天开盘建立的新仓，当天绝对禁止卖出、止损清仓或减仓。
@@ -1431,15 +1437,6 @@ prompt = f'''
 <div style="background: #eceff1; border-left: 6px solid #455a64; padding: 20px; margin-bottom: 25px; border-radius: 8px;">
     <h3 style="margin-top: 0; color: #263238;">⚖️ 盘后总体风控审查</h3>
     <p>(总结持仓中标的整体盈亏状况，以及本次新归档标的的策略胜率评估，特别指出评分与实际表现是否存在明显反差；若有今日新增标的，在此提一句今日共新增几只)</p>
-</div>
-
-<h2 style="color: #1565c0; border-bottom: 2px solid #1565c0; padding-bottom: 5px;">📊 持仓中 - 风控纪律核对单</h2>
-<div style="background: #fff; padding: 20px; margin-bottom: 15px; border-radius: 8px; border: 1px solid #e0e0e0; box-shadow: 0 2px 8px rgba(0,0,0,0.05);">
-    <h3 style="margin: 0 0 10px 0;">[若"今日新增"="是"则在最前面加一个 🆕今日新增 徽章] [首次推荐日] | [股票名称] ([代码]) | 评分[推荐评分]/100 | 系统连续推荐[N]次 | 动态持有</h3>
-    <p><b>持股状态:</b> 动态持有 | <b>当前移动止损位:</b> [止损价] | <b>止损方法:</b> [Stop_Method]</p>
-    <p><b>买入成本:</b> ¥[首次推荐价] ➔ <b>现价:</b> ¥[现价]（今日开盘价 ¥[今日开盘价]） | <b>当前盈亏:</b> <span style="font-weight:bold; color:[盈利#d32f2f/亏损#388e3c];">[当前盈亏(%)]%</span></p>
-    <p><span style="background: #607d8b; color: #fff; padding: 2px 6px; border-radius: 4px; font-size: 12px;">风控动作指令</span>
-    (严格遵守A股T+1：今日新增只能持有观察；今日若触发止损，只记录为T+1待执行；非新仓才可正常执行止损/减仓)</p>
 </div>
 
 <h2 style="color: #37474f; border-bottom: 2px solid #cfd8dc; padding-bottom: 5px; margin-top: 40px;">📁 已关闭交易 - 策略复盘评价</h2>
