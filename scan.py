@@ -237,10 +237,18 @@ def pre_scan_portfolio_review(macro_news_text, macro_data_text, price_map):
 【你的任务】：
 审查每只持仓股票，判断今日消息面、全球宏观数据以及大宗商品价格异动，是否对该股票产生了严重的负面冲击，从而需要立即强制清仓。
 
-判断标准（满足任意一条即建议清仓）：
-1. 今日新闻中有该公司或其所在行业的直接突发重大负面消息
-2. 宏观事件或大宗商品剧烈震荡导致该行业的产业链逻辑根本性反论
-3. 美债收益率持续狂飙或重要宏观数据导致全球资金流向根本扭转，影响整体A股高位核心板块的估值底层逻辑
+【重要风控纪律】：
+- 股票采用动态持有，不存在固定持仓天数。
+- 严禁因为“持股1-2天、3-5天、超过某个天数、Hold_Period到期”等原因单独建议清仓。持仓天数只能用于统计，不能作为清仓依据。
+- 正常技术走弱、短期商品回撤、单日波动，不足以构成“突发清仓”；应由 review.py 的 MA20/MA50 + ATR + MACD/KDJ 移动止损统一处理。
+- 阶段0只处理“消息/宏观/产业逻辑发生重大、即时、不可忽略变化”的突发风险。
+
+判断标准（满足任意一条才可建议清仓）：
+1. 今日/最近24小时有该公司或其所在行业的直接重大负面事件，并且能够明确影响盈利、监管、供应链、融资或核心商业逻辑。
+2. 宏观事件或大宗商品剧烈变化导致该行业原有产业链逻辑出现实质性反转，而不是普通价格波动。
+3. 美债收益率、美元或重大宏观数据发生超预期且具有持续性的重定价，并且有明确证据表明该持仓的估值/盈利逻辑已被破坏。
+
+【禁止事项】：不能引用“持股时间太短/太长”“已经超过1-2天”“Hold_Period”等作为清仓理由。若只有技术面或价格波动风险，请输出 action="持有"，让盘后 review.py 的动态移动止损模块处理。
 
 【输出格式】：
 严格输出一个 JSON 数组，每个元素包含：
@@ -1390,7 +1398,7 @@ def get_key_economic_data():
         "CN_消费": [r"社会消费品零售总额.*?(?:增长|同比).*?([+-]?\d+(?:\.\d+)?)%", r"社零.*?([+-]?\d+(?:\.\d+)?)%"],
         "CN_CPI": [r"居民消费价格.*?(?:同比|上涨|下降).*?([+-]?\d+(?:\.\d+)?)%", r"CPI.*?([+-]?\d+(?:\.\d+)?)%"],
         "CN_PPI": [r"工业生产者出厂价格.*?(?:同比|上涨|下降).*?([+-]?\d+(?:\.\d+)?)%", r"PPI.*?([+-]?\d+(?:\.\d+)?)%"],
-        "CN_PMI": [r"(?:制造业)?采购经理指数.*?([+-]?\d+(?:\.\d+)?)", r"PMI.*?([+-]?\d+(?:\.\d+)?)"],
+        "CN_PMI": [r"(?:制造业)?采购经理指数[^0-9]{0,100}((?:4[0-9](?:\.\d+)?|5[0-9](?:\.\d+)?))", r"PMI[^0-9]{0,40}((?:4[0-9](?:\.\d+)?|5[0-9](?:\.\d+)?))"],
         "CN_UNRATE": [r"城镇调查失业率.*?([+-]?\d+(?:\.\d+)?)%", r"失业率.*?([+-]?\d+(?:\.\d+)?)%"],
     }
     labels = {"CN_消费": "中国社零", "CN_CPI": "中国CPI", "CN_PPI": "中国PPI", "CN_PMI": "中国PMI", "CN_UNRATE": "中国城镇调查失业率"}
@@ -1747,6 +1755,25 @@ def get_stock_news(ticker_code: str, ticker_name: str, max_items: int = 5) -> li
                 news_entries.append((ctime_dt, f"{tag}[新浪/{media}][{ctime}] {title}"))
     except Exception:
         pass
+
+    # 最后兜底：Google News RSS（公司名 + 股票代码），避免东财/Yahoo同时失效时变成 0/100。
+    if not news_entries:
+        try:
+            query = urllib.parse.quote(f"{code} {ticker_name} 股票")
+            google_url = f"https://news.google.com/rss/search?q={query}&hl=zh-CN&gl=CN&ceid=CN:zh-Hans"
+            req = urllib.request.Request(google_url, headers={'User-Agent': 'Mozilla/5.0'})
+            with urllib.request.urlopen(req, timeout=8) as resp:
+                root = ET.fromstring(resp.read())
+            for item in root.findall('.//item')[:8]:
+                title = item.findtext('title', default='').strip()
+                pub = item.findtext('pubDate', default='')
+                dt = _parse_rss_date(pub)
+                if title and dt and (get_bj_time() - dt).total_seconds() <= 72 * 3600:
+                    tag = _get_stock_news_time_tag(dt)
+                    if tag:
+                        news_entries.append((dt, f"{tag}[Google News][{dt.strftime('%m-%d %H:%M')}] {title}"))
+        except Exception:
+            pass
 
     news_entries.sort(key=lambda x: x[0], reverse=True)
     return [entry[1] for entry in news_entries[:max_items]]
