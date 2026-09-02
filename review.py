@@ -1494,6 +1494,43 @@ other_winner_avg = (
 losers = [p for p in all_pnl_list if p < 0.0]
 loser_avg = sum(losers) / len(losers) if losers else 0.0
 
+
+# 当前版本 KPI HTML：只使用当前 Scan 版本的数据。
+_current_sample = active_count + closed_count
+_current_closed_label = (
+    f"{closed_wins}/{closed_count} = {closed_win_rate:.1f}%"
+    if closed_count else "0/0 = 暂无"
+)
+_current_active_label = (
+    f"{active_wins}/{len(active_pnl)} = {active_win_rate:.1f}%"
+    if active_pnl else "0/0 = 暂无"
+)
+_sample_note = (
+    "当前版本样本不足，暂不能形成稳定胜率结论"
+    if _current_sample < 10
+    else "当前版本样本量已达到基础观察门槛"
+)
+
+kpi_html = f"""
+<div style='background:#e3f2fd;border-left:6px solid #1565c0;padding:18px;margin-bottom:20px;border-radius:8px;'>
+  <h3 style='margin:0 0 10px 0;color:#0d47a1;'>🧬 当前 Scan 版本 KPI（严格隔离旧版本）</h3>
+  <p style='margin:5px 0;'><b>Scan 版本：</b>{SCAN_VERSION_HASH}</p>
+  <p style='margin:5px 0;'><b>版本起始日：</b>{SCAN_VERSION_START.strftime('%Y-%m-%d')}</p>
+  <p style='margin:5px 0;'><b>当前版本持仓胜率：</b>{_current_active_label}</p>
+  <p style='margin:5px 0;'><b>当前版本已结算胜率：</b>{_current_closed_label}</p>
+  <p style='margin:5px 0;'><b>当前版本样本：</b>{_current_sample} 笔（当前持仓 {active_count}，已结算 {closed_count}）</p>
+  <p style='margin:8px 0 0 0;color:#546e7a;'><b>统计纪律：</b>仅统计 Rec_Date ≥ {SCAN_VERSION_START.strftime('%Y-%m-%d')}；旧版 Scan 的历史胜率、盈利贡献、亏损率均不参与本次 KPI。</p>
+  <p style='margin:8px 0 0 0;color:#ef6c00;'><b>样本提示：</b>{_sample_note}</p>
+</div>
+
+<div style='background:#fafafa;border:1px solid #e0e0e0;padding:16px;margin-bottom:20px;border-radius:8px;'>
+  <p style='margin:0 0 8px 0;'><b>当前版本风控概览：</b>风险有效率 {risk_rate:.1f}%</p>
+  <p style='margin:0 0 8px 0;'><b>当前版本大赢家贡献（≥15%）：</b>{super_winner_contribution:.2f}%</p>
+  <p style='margin:0 0 8px 0;'><b>其他盈利平均：</b>{other_winner_avg:.2f}%</p>
+  <p style='margin:0;'><b>亏损平均：</b>{loser_avg:.2f}%</p>
+</div>
+"""
+
 full_html = f"""<!DOCTYPE html><html><head><meta charset='utf-8'>
 <style>
     body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; background: #f4f6f8; padding: 20px; }}
