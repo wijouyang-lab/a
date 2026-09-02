@@ -1,4 +1,0 @@
-Ticker,Name,Industry,Tag,Amount,Daily_Pct,Hold_Period,Stop_Loss,Score,ATR_Pct,周期共振,Scan_Ref_Price
-600036.SH,招商银行,银行,Core_Dragon,4659959.162,1.8445,6-10天,38.0元,70,1.63,False,0
-600900.SH,长江电力,水力发电,Core_Dragon,3507221.78,1.1036,8-12天,26.8元,66,1.54,False,0
-601166.SH,兴业银行,银行,Core_Dragon,3018725.751,2.3375,6-10天,16.6元,72,1.92,False,0
