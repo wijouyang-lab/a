@@ -40,6 +40,29 @@ def safe_float(value, default=None):
         return default
 
 
+def clean_text(value, default=""):
+    """安全清理文本字段，避免 None/NaN 直接进入报告。"""
+    if value is None:
+        return default
+    try:
+        if pd.isna(value):
+            return default
+    except Exception:
+        pass
+    return str(value).strip()
+
+
+def safe_int(value, default=None):
+    """安全转换整数，不让空字符串/NaN 导致 review 崩溃。"""
+    f = safe_float(value, None)
+    if f is None:
+        return default
+    try:
+        return int(f)
+    except (TypeError, ValueError, OverflowError):
+        return default
+
+
 # ==========================================
 # 环境变量校验
 # ==========================================
