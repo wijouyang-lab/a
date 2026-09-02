@@ -237,18 +237,10 @@ def pre_scan_portfolio_review(macro_news_text, macro_data_text, price_map):
 【你的任务】：
 审查每只持仓股票，判断今日消息面、全球宏观数据以及大宗商品价格异动，是否对该股票产生了严重的负面冲击，从而需要立即强制清仓。
 
-【重要风控纪律】：
-- 股票采用动态持有，不存在固定持仓天数。
-- 严禁因为“持股1-2天、3-5天、超过某个天数、Hold_Period到期”等原因单独建议清仓。持仓天数只能用于统计，不能作为清仓依据。
-- 正常技术走弱、短期商品回撤、单日波动，不足以构成“突发清仓”；应由 review.py 的 MA20/MA50 + ATR + MACD/KDJ 移动止损统一处理。
-- 阶段0只处理“消息/宏观/产业逻辑发生重大、即时、不可忽略变化”的突发风险。
-
-判断标准（满足任意一条才可建议清仓）：
-1. 今日/最近24小时有该公司或其所在行业的直接重大负面事件，并且能够明确影响盈利、监管、供应链、融资或核心商业逻辑。
-2. 宏观事件或大宗商品剧烈变化导致该行业原有产业链逻辑出现实质性反转，而不是普通价格波动。
-3. 美债收益率、美元或重大宏观数据发生超预期且具有持续性的重定价，并且有明确证据表明该持仓的估值/盈利逻辑已被破坏。
-
-【禁止事项】：不能引用“持股时间太短/太长”“已经超过1-2天”“Hold_Period”等作为清仓理由。若只有技术面或价格波动风险，请输出 action="持有"，让盘后 review.py 的动态移动止损模块处理。
+判断标准（满足任意一条即建议清仓）：
+1. 今日新闻中有该公司或其所在行业的直接突发重大负面消息
+2. 宏观事件或大宗商品剧烈震荡导致该行业的产业链逻辑根本性反论
+3. 美债收益率持续狂飙或重要宏观数据导致全球资金流向根本扭转，影响整体A股高位核心板块的估值底层逻辑
 
 【输出格式】：
 严格输出一个 JSON 数组，每个元素包含：
@@ -377,37 +369,60 @@ def build_current_holdings_card(latest_price_map):
 # 0d. 【新增】读取昨日止损标的，生成联动警告
 # ==========================================
 def get_stop_loss_hit_warning():
+    """读取上一交易日 review 风控状态，形成次日 Scan 硬性联动。"""
     log_file = "trade_history.csv"
     if not os.path.exists(log_file):
         return ""
-
     try:
-        df = pd.read_csv(log_file, keep_default_na=False)
-        if 'Tag' not in df.columns or 'Exit_Date' not in df.columns:
+        df = pd.read_csv(log_file, keep_default_na=False, on_bad_lines='skip')
+        required = {'Ticker', 'Review_Risk_Status', 'Review_Risk_Date'}
+        if not required.issubset(df.columns):
+            # 兼容旧账本：继续读取已经实际清仓的 Stop_Loss_Hit。
+            if 'Tag' not in df.columns or 'Exit_Date' not in df.columns:
+                return ""
+            hit_df = df[df['Tag'].astype(str).str.strip() == 'Stop_Loss_Hit'].copy()
+            if hit_df.empty:
+                return ""
+            hit_df = hit_df.sort_values('Exit_Date', ascending=False).head(5)
+            details = [f"{r.get('Name', r.get('Ticker',''))}({r.get('Ticker','')}) @ {r.get('Exit_Date','未知日期')}" for _, r in hit_df.iterrows()]
+            return ("\n⚠️ 【昨日/近期止损风控联动警告】：以下标的已实际止损清仓，今日严禁重新进入 Top 1-5 核心推荐。\n"
+                    f"涉及标的：{', '.join(details)}\n")
+
+        df['Review_Risk_Date_DT'] = pd.to_datetime(df['Review_Risk_Date'], errors='coerce')
+        today_dt = pd.to_datetime(today_str)
+        # 只读取最近一个已经结束的交易日；不会把更早历史状态无限期带入今日。
+        valid = df[df['Review_Risk_Date_DT'].notna() & (df['Review_Risk_Date_DT'] < today_dt)].copy()
+        if valid.empty:
             return ""
+        latest_date = valid['Review_Risk_Date_DT'].max()
+        valid = valid[valid['Review_Risk_Date_DT'] == latest_date].copy()
+        valid['Ticker'] = valid['Ticker'].astype(str).str.strip()
+        # 同一 ticker 取最后一条账本记录。
+        valid = valid.sort_values('Review_Risk_Date_DT').groupby('Ticker', as_index=False).tail(1)
 
-        hit_df = df[df['Tag'].astype(str).str.strip() == 'Stop_Loss_Hit'].copy()
-        if hit_df.empty:
-            return ""
-
-        hit_df = hit_df.sort_values('Exit_Date', ascending=False).head(5)
-        tickers = hit_df['Ticker'].unique().tolist()
-        if not tickers:
-            return ""
-
-        details = []
-        for _, row in hit_df.iterrows():
-            name = row.get('Name', row['Ticker'])
-            exit_date = row.get('Exit_Date', '未知日期')
-            details.append(f"{name}({row['Ticker']}) @ {exit_date}")
-
-        return (
-            f"\n⚠️ 【昨日/近期止损风控联动警告】：以下标的在最近交易中被系统标记为「止损触发清仓」（Stop_Loss_Hit），"
-            f"今日选股严禁将其列入 Top 1-5 核心推荐，仅允许在「诱多对照组」中作为反面案例提及。\n"
-            f"涉及标的：{', '.join(details)}\n"
-        )
+        hard = valid[valid['Review_Risk_Status'].isin({'STOP_TRIGGERED', 'T1_STOP_PENDING'})]
+        near = valid[valid['Review_Risk_Status'] == 'STOP_NEAR']
+        lines = []
+        if not hard.empty:
+            details = []
+            for _, r in hard.iterrows():
+                status = str(r.get('Review_Risk_Status')).strip()
+                label = 'T+1待执行止损' if status == 'T1_STOP_PENDING' else '已触发移动止损'
+                stop = str(r.get('Stop_Loss','')).strip()
+                note = str(r.get('Review_Risk_Note','')).strip()
+                details.append(f"{r.get('Name',r['Ticker'])}({r['Ticker']})【{label}】止损={stop or 'N/A'} {note}")
+            lines.append("🚨 【Review→Scan 硬性止损联动】：以下标的昨日已触发/待执行移动止损，今日禁止进入 Top 1-5 核心推荐、禁止新增追踪仓；仅可作为风控反面案例。\n" + '\n'.join(details))
+        if not near.empty:
+            details = []
+            for _, r in near.iterrows():
+                distance = str(r.get('Review_Stop_Distance_Pct','')).strip()
+                stop = str(r.get('Stop_Loss','')).strip()
+                note = str(r.get('Review_Risk_Note','')).strip()
+                details.append(f"{r.get('Name',r['Ticker'])}({r['Ticker']})：距止损 {distance or 'N/A'}%，止损={stop or 'N/A'} {note}")
+            lines.append("⚠️ 【Review→Scan 接近止损提醒】：以下标的昨日距离移动止损≤3%，今日不得作为 Top 1-5 核心追涨推荐；若进入候选池必须标注高风险。\n" + '\n'.join(details))
+        return '\n\n'.join(lines) + ('\n' if lines else '')
     except Exception as e:
-        print(f"⚠️ 读取止损警告失败: {e}")
+        print(f"⚠️ 读取 Review→Scan 止损联动失败: {e}")
         return ""
 
 # ==========================================
@@ -476,154 +491,6 @@ def get_top_300_pool():
 
     return full_pool, codes, trade_date
 
-
-# ==========================================
-# 1.5 基本面估值：PE / EPS / PB / 盈利增长
-# ==========================================
-def _safe_float_value(value):
-    try:
-        if value is None:
-            return None
-        v = float(value)
-        return v if pd.notna(v) else None
-    except Exception:
-        return None
-
-def enrich_pool_with_fundamentals_ashare(pool_data, limit=100):
-    """A股估值层：Tushare daily_basic + fina_indicator。失败只缺失，不阻塞扫描。"""
-    if not pool_data:
-        return pool_data
-    targets = pool_data[:max(20, min(limit, len(pool_data)))]
-    codes = [str(x.get('Ticker','')).strip() for x in targets if str(x.get('Ticker','')).strip()]
-    valuation_map = {}
-    db = pd.DataFrame()
-    try:
-        trade_date = get_bj_time().strftime('%Y%m%d')
-        db = pro.daily_basic(trade_date=trade_date, fields='ts_code,close,pe,pe_ttm,pb,ps_ttm,dv_ttm,total_mv,circ_mv')
-        if db is None or db.empty:
-            prev = (get_bj_time() - datetime.timedelta(days=1)).strftime('%Y%m%d')
-            db = pro.daily_basic(trade_date=prev, fields='ts_code,close,pe,pe_ttm,pb,ps_ttm,dv_ttm,total_mv,circ_mv')
-    except Exception as e:
-        print(f'⚠️ [估值] daily_basic 获取失败: {e}')
-    if db is not None and not db.empty:
-        for _, r in db.iterrows():
-            code = str(r.get('ts_code','')).strip()
-            if code in codes:
-                valuation_map[code] = {
-                    'PE': _safe_float_value(r.get('pe')),
-                    'PE_TTM': _safe_float_value(r.get('pe_ttm')),
-                    'PB': _safe_float_value(r.get('pb')),
-                    'PS_TTM': _safe_float_value(r.get('ps_ttm')),
-                    'Dividend_Yield_TTM': _safe_float_value(r.get('dv_ttm')),
-                }
-    for item in targets:
-        code = str(item.get('Ticker','')).strip()
-        d = valuation_map.setdefault(code, {})
-        try:
-            fi = pro.fina_indicator(ts_code=code, fields='ts_code,end_date,eps,bps,roe,netprofit_yoy')
-            if fi is not None and not fi.empty:
-                fi = fi.sort_values('end_date').drop_duplicates('end_date', keep='last')
-                r = fi.iloc[-1]
-                d['EPS_TTM'] = _safe_float_value(r.get('eps'))
-                d['BPS'] = _safe_float_value(r.get('bps'))
-                d['ROE'] = _safe_float_value(r.get('roe'))
-                d['Earnings_Growth'] = _safe_float_value(r.get('netprofit_yoy'))
-        except Exception:
-            pass
-    for item in pool_data:
-        code = str(item.get('Ticker','')).strip(); d = valuation_map.get(code, {})
-        item['PE'] = d.get('PE'); item['PE_TTM'] = d.get('PE_TTM'); item['PE_Forward'] = None
-        item['EPS_TTM'] = d.get('EPS_TTM'); item['PB'] = d.get('PB'); item['BPS'] = d.get('BPS')
-        item['ROE'] = d.get('ROE'); item['Earnings_Growth'] = d.get('Earnings_Growth')
-        item['PS_TTM'] = d.get('PS_TTM'); item['Dividend_Yield_TTM'] = d.get('Dividend_Yield_TTM')
-    groups = {}
-    for item in pool_data:
-        groups.setdefault(str(item.get('Industry','其他')), []).append(item)
-    for items in groups.values():
-        pe_vals=[x['PE_TTM'] for x in items if isinstance(x.get('PE_TTM'),(int,float)) and x['PE_TTM']>0]
-        pb_vals=[x['PB'] for x in items if isinstance(x.get('PB'),(int,float)) and x['PB']>0]
-        pe_med=float(pd.Series(pe_vals).median()) if pe_vals else None; pb_med=float(pd.Series(pb_vals).median()) if pb_vals else None
-        for item in items:
-            fs=0; labels=[]; eps=item.get('EPS_TTM'); pe=item.get('PE_TTM'); pb=item.get('PB'); growth=item.get('Earnings_Growth'); roe=item.get('ROE')
-            if isinstance(eps,(int,float)) and eps>0: fs+=5; labels.append('EPS为正')
-            elif isinstance(eps,(int,float)) and eps<0: fs-=4; labels.append('EPS为负')
-            if isinstance(pe,(int,float)) and pe>0:
-                if pe_med is not None and pe<=pe_med*1.15: fs+=5; labels.append('PE低于行业中枢')
-                elif pe<=25: fs+=3; labels.append('PE合理')
-                elif pe>45: fs-=3; labels.append('PE偏高')
-            if isinstance(pb,(int,float)) and pb>0:
-                if pb_med is not None and pb<=pb_med*1.15: fs+=4; labels.append('PB低于行业中枢')
-                elif pb>12: fs-=2; labels.append('PB偏高')
-            if isinstance(growth,(int,float)) and growth>10: fs+=2; labels.append('净利润同比>10%')
-            if isinstance(roe,(int,float)) and roe>=12: fs+=2; labels.append('ROE>=12%')
-            item['估值评分']=int(max(0,min(20,fs))); item['估值结论']='、'.join(labels) if labels else '估值数据不足/待核实'
-            item['综合基础评分']=int(item.get('技术评分',0))+item['估值评分']
-    print('✅ [估值] PE / EPS / PB / 盈利增长已纳入A股候选池')
-    return pool_data
-
-# ==========================================
-# 1.6 事件 Regime Gate + 跨市场信号
-# ==========================================
-def build_event_regime_gate_ashare(macro_news_text, macro_data_text, us_sector_text, key_person_text='', economic_text='', macro_regime=None):
-    text=f'{macro_news_text}\n{macro_data_text}\n{us_sector_text}\n{key_person_text}\n{economic_text}'.lower()
-    gate={'market_regime':'NEUTRAL','confidence':'low','hard_avoid_sectors':[],'watch_sectors':[],'buy_dip_sectors':[],'reasons':[],'event_flags':[]}
-    hawkish_words=['warsh','powell','waller','bowman','hawkish','higher for longer','rate hike','higher rates','inflation remains','tariff inflation','加息','偏鹰','高利率','通胀仍高']
-    dovish_words=['rate cut','rate cuts','easing','lower rates','dovish','disinflation','降息','偏鸽','货币宽松','通胀回落']
-    hawkish=any(x in text for x in hawkish_words); dovish=any(x in text for x in dovish_words)
-    pce_cpi=re.search(r'(?:cpi|核心pce|core pce|pce)[^0-9]{0,25}([0-9]+(?:\.[0-9]+)?)',text,re.I)
-    ten=re.search(r'(?:10y|10-year|10年期|10y_us_bond)[^0-9]{0,20}([0-9]+(?:\.[0-9]+)?)',text,re.I)
-    confirmed=hawkish and (pce_cpi or ten)
-    if confirmed:
-        gate['market_regime']='HAWKISH_REPRICING'; gate['confidence']='high'; gate['event_flags'].append('Fed/利率鹰派重定价'); gate['reasons'].append('政策/人物讲话与通胀或利率证据同向')
-    elif hawkish:
-        gate['market_regime']='HAWKISH_WATCH'; gate['confidence']='medium'; gate['event_flags'].append('鹰派事件待价格确认')
-    elif dovish:
-        gate['market_regime']='DOVISH_WATCH'; gate['confidence']='medium'; gate['event_flags'].append('鸽派事件')
-    if ten:
-        try:
-            tv=float(ten.group(1))
-            if confirmed and tv>=4.5:
-                gate['watch_sectors'] += ['成长科技','高估值成长']; gate['reasons'].append(f'美10Y={tv:.2f}偏高，成长估值压力增强')
-        except Exception: pass
-    etf_to_a={'SOXX':['半导体','芯片','封测','晶圆','半导体材料','半导体设备'],'SMH':['半导体','芯片','封测','晶圆','半导体材料','半导体设备'],'XLK':['科技','AI算力','光模块','CPO','云计算','数据中心'],'ARKK':['AI','基因','新能源汽车','自动驾驶'],'XLE':['石油','煤炭','天然气','能源'],'XLF':['银行','保险','券商','金融'],'XLV':['医药','创新药','医疗器械','CXO'],'XLY':['消费','汽车','零售','白酒'],'XLI':['军工','航空','制造','机器人'],'XLB':['有色金属','化工','矿业']}
-    neg=[]
-    for line in str(us_sector_text or '').splitlines():
-        m=re.search(r'([A-Z]+)\s*:\s*([+-]?[0-9]+(?:\.[0-9]+)?)%',line)
-        if m and float(m.group(2))<=-1.5: neg += etf_to_a.get(m.group(1),[])
-    neg=list(dict.fromkeys(neg))
-    if confirmed:
-        for sec in ['科技','半导体','成长科技','AI算力','有色金属','高估值成长']:
-            if sec in neg: gate['hard_avoid_sectors'].append(sec)
-    for sec in neg:
-        if sec not in gate['hard_avoid_sectors']: gate['buy_dip_sectors'].append(sec)
-    for k in ('hard_avoid_sectors','watch_sectors','buy_dip_sectors'): gate[k]=list(dict.fromkeys(gate[k]))
-    return gate
-
-def format_event_regime_gate_ashare(gate):
-    return ('【🚦 事件驱动 Regime Gate】\n' f"状态={gate.get('market_regime')} | 置信度={gate.get('confidence')}\n" f"硬回避={', '.join(gate.get('hard_avoid_sectors',[])) or '无'}\n" f"观察={', '.join(gate.get('watch_sectors',[])) or '无'}\n" f"BUY_DIP={', '.join(gate.get('buy_dip_sectors',[])) or '无'}\n" f"事件={', '.join(gate.get('event_flags',[])) or '无'}\n" f"原因={'; '.join(gate.get('reasons',[])) or '无'}\n" '硬回避只对当前事件+当前行业价格共同确认时生效，不形成永久黑名单。')
-
-def analyze_market_signals_ashare(combined_news_text, client):
-    if not combined_news_text or len(combined_news_text.strip())<50: return {'signals':[]}
-    prompt=f'''你是A股跨市场策略研究员。请识别过去72小时新闻、政策、海外市场与大宗数据中的结构性信号，区分AVOID、BUY_DIP、POSITIVE_CATALYST、ROTATION、CONTRARIAN。不要因为短期下跌自动认定基本面受损，也不要因为商品单日上涨自动认定产业链利多。\n{combined_news_text[:12000]}\n仅输出JSON：{{"signals":[{{"type":"AVOID|BUY_DIP|POSITIVE_CATALYST|ROTATION|CONTRARIAN","sector_cn":"中文板块","affected_subsectors":[],"unaffected_subsectors":[],"surface_news":"","real_signal":"","transmission_chain":"","reasoning":"","actionable":"","confidence":"high|medium|low","duration_days":1}}]}}'''
-    try:
-        raw=''
-        with client.messages.stream(model=TARGET_MODEL,max_tokens=12000,messages=[{'role':'user','content':prompt}]) as stream:
-            for t in stream.text_stream: raw+=t
-        a,b=raw.find('{'),raw.rfind('}')
-        if a<0 or b<0: return {'signals':[]}
-        return {'signals':json.loads(raw[a:b+1]).get('signals',[])}
-    except Exception as e:
-        print(f'⚠️ [跨市场信号] 调用失败: {e}'); return {'signals':[]}
-
-def build_market_signal_text_ashare(result):
-    signals=(result or {}).get('signals',[])
-    if not signals: return '【跨市场信号分析】暂无结构性信号'
-    title={'AVOID':'🔴 回避','BUY_DIP':'💚 逢低','POSITIVE_CATALYST':'🟢 正向催化','ROTATION':'🔄 资金轮动','CONTRARIAN':'🟠 反向机会'}
-    out=['【跨市场信号分析】']
-    for typ in title:
-        for x in [s for s in signals if s.get('type')==typ]:
-            out.append(f"{title[typ]} {x.get('sector_cn','')} | {x.get('real_signal','')} | 传导={x.get('transmission_chain','')} | 建议={x.get('actionable','')} | 置信度={x.get('confidence','low')} | 持续={x.get('duration_days','?')}天")
-    return '\n'.join(out)
 
 # ==========================================
 # 2. 【新版】重要人物讲话 + 关键经济数据 + 宏观状态机
@@ -1398,7 +1265,7 @@ def get_key_economic_data():
         "CN_消费": [r"社会消费品零售总额.*?(?:增长|同比).*?([+-]?\d+(?:\.\d+)?)%", r"社零.*?([+-]?\d+(?:\.\d+)?)%"],
         "CN_CPI": [r"居民消费价格.*?(?:同比|上涨|下降).*?([+-]?\d+(?:\.\d+)?)%", r"CPI.*?([+-]?\d+(?:\.\d+)?)%"],
         "CN_PPI": [r"工业生产者出厂价格.*?(?:同比|上涨|下降).*?([+-]?\d+(?:\.\d+)?)%", r"PPI.*?([+-]?\d+(?:\.\d+)?)%"],
-        "CN_PMI": [r"(?:制造业)?采购经理指数[^0-9]{0,100}((?:4[0-9](?:\.\d+)?|5[0-9](?:\.\d+)?))", r"PMI[^0-9]{0,40}((?:4[0-9](?:\.\d+)?|5[0-9](?:\.\d+)?))"],
+        "CN_PMI": [r"(?:制造业)?采购经理指数.*?([+-]?\d+(?:\.\d+)?)", r"PMI.*?([+-]?\d+(?:\.\d+)?)"],
         "CN_UNRATE": [r"城镇调查失业率.*?([+-]?\d+(?:\.\d+)?)%", r"失业率.*?([+-]?\d+(?:\.\d+)?)%"],
     }
     labels = {"CN_消费": "中国社零", "CN_CPI": "中国CPI", "CN_PPI": "中国PPI", "CN_PMI": "中国PMI", "CN_UNRATE": "中国城镇调查失业率"}
@@ -1488,10 +1355,6 @@ def get_global_macro_data():
     print("🌐 [阶段2.6] 正在抓取国际宏观与大宗商品核心指标数据...")
     macro_tickers = {
         "10Y_US_Bond": ("^TNX", "美国10年期国债收益率"),
-        "5Y_US_Bond": ("^FVX", "美国5年期国债收益率"),
-        "SP500": ("^GSPC", "标普500指数"),
-        "NASDAQ": ("^IXIC", "纳斯达克指数"),
-        "DXY": ("DX-Y.NYB", "美元指数"),
         "VIX": ("^VIX", "美股恐慌指数VIX"),
         "Gold": ("GC=F", "COMEX黄金期货"),
         "Silver": ("SI=F", "COMEX白银期货"),
@@ -1517,10 +1380,8 @@ def get_global_macro_data():
             if key == "VIX":
                 vix_value = close_val
                 results.append(f"{sign} {desc} ({ticker}): {round(close_val, 2)} (当日变动: {pct_chg:+.2f}%)")
-            elif key in {"10Y_US_Bond", "5Y_US_Bond"}:
+            elif key == "10Y_US_Bond":
                 results.append(f"{sign} {desc} ({ticker}): {round(close_val, 3)}% (当日变动: {pct_chg:+.2f}%)")
-            elif key in {"SP500", "NASDAQ", "DXY"}:
-                results.append(f"{sign} {desc} ({ticker}): {round(close_val, 3)} (当日变动: {pct_chg:+.2f}%)")
             else:
                 results.append(f"{sign} {desc} ({ticker}): ${round(close_val, 2)} (当日变动: {pct_chg:+.2f}%)")
         except Exception:
@@ -1755,25 +1616,6 @@ def get_stock_news(ticker_code: str, ticker_name: str, max_items: int = 5) -> li
                 news_entries.append((ctime_dt, f"{tag}[新浪/{media}][{ctime}] {title}"))
     except Exception:
         pass
-
-    # 最后兜底：Google News RSS（公司名 + 股票代码），避免东财/Yahoo同时失效时变成 0/100。
-    if not news_entries:
-        try:
-            query = urllib.parse.quote(f"{code} {ticker_name} 股票")
-            google_url = f"https://news.google.com/rss/search?q={query}&hl=zh-CN&gl=CN&ceid=CN:zh-Hans"
-            req = urllib.request.Request(google_url, headers={'User-Agent': 'Mozilla/5.0'})
-            with urllib.request.urlopen(req, timeout=8) as resp:
-                root = ET.fromstring(resp.read())
-            for item in root.findall('.//item')[:8]:
-                title = item.findtext('title', default='').strip()
-                pub = item.findtext('pubDate', default='')
-                dt = _parse_rss_date(pub)
-                if title and dt and (get_bj_time() - dt).total_seconds() <= 72 * 3600:
-                    tag = _get_stock_news_time_tag(dt)
-                    if tag:
-                        news_entries.append((dt, f"{tag}[Google News][{dt.strftime('%m-%d %H:%M')}] {title}"))
-        except Exception:
-            pass
 
     news_entries.sort(key=lambda x: x[0], reverse=True)
     return [entry[1] for entry in news_entries[:max_items]]
@@ -2130,7 +1972,7 @@ def load_evolved_rules() -> str:
     except Exception as e:
         return ""
 
-def generate_ai_report(pool_data, macro_news_text, macro_data_text, us_sector_text, removed_tickers, embargo_text="", sector_tech_data=None, key_person_text="", economic_data_text="", macro_regime=None, event_regime_text="", market_signal_text=""):
+def generate_ai_report(pool_data, macro_news_text, macro_data_text, us_sector_text, removed_tickers, embargo_text="", sector_tech_data=None, key_person_text="", economic_data_text="", macro_regime=None):
     print("🧠 [阶段4] 召唤 AI 大脑...")
     client = anthropic.Anthropic(
         api_key=os.environ.get("CLAWSOCKET_API_KEY"),
@@ -2151,10 +1993,6 @@ def generate_ai_report(pool_data, macro_news_text, macro_data_text, us_sector_te
             "MACD金叉": "✅是" if d.get("MACD金叉") else "否",
             "KDJ_J": d.get("KDJ_J", "N/A"), "量比": d.get("量比", "N/A"),
             "看涨形态": d.get("看涨形态", []),
-            "PE_TTM": d.get("PE_TTM"), "EPS_TTM": d.get("EPS_TTM"), "PB": d.get("PB"),
-            "盈利增长(%)": d.get("Earnings_Growth"), "ROE(%)": d.get("ROE"),
-            "估值评分(满分20)": d.get("估值评分", 0), "估值结论": d.get("估值结论", "数据不足"),
-            "综合基础评分": d.get("综合基础评分", d.get("技术评分",0)),
         }
         if d.get('个股新闻'):
             item["个股新闻"] = d['个股新闻']
@@ -2200,10 +2038,6 @@ def generate_ai_report(pool_data, macro_news_text, macro_data_text, us_sector_te
 
     {embargo_text}
 
-    {event_regime_text}
-
-    {market_signal_text}
-
     【🔥 重要人物讲话与政策预期变化】：
     {key_person_text}
 
@@ -2224,7 +2058,7 @@ def generate_ai_report(pool_data, macro_news_text, macro_data_text, us_sector_te
 
     {tech_sector_block}
 
-    【今日A股交易额 Top 100（含技术评分+估值+个股新闻）】：
+    【今日A股交易额 Top 100（含技术评分+个股新闻）】：
     {json.dumps(compact_pool, ensure_ascii=False)}
 
     【新闻时效权重规则——必须严格遵守】：
@@ -2265,17 +2099,7 @@ def generate_ai_report(pool_data, macro_news_text, macro_data_text, us_sector_te
     5. 若宏观状态机对某行业形成明显逆风，除非有更强的独立个股催化和技术共振，否则Top1-5降级。
     6. 宏观状态机是行业方向过滤器，不是机械加分器。
 
-    第八步（估值交叉验证——新增硬规则）：
-    1. PE_TTM、EPS、PB、盈利增长必须参与最终排序；估值明显过高且盈利增长无法匹配时降权。
-    2. 低PE但EPS为负或盈利恶化不得因为“便宜”而直接推荐。
-    3. 估值数据缺失时必须标注“估值数据不足”，不得虚构。
-
-    第九步（事件 Regime Gate + 跨市场信号校验）：
-    1. Regime Gate 是当天交易状态过滤器，不是永久黑名单。
-    2. 当前硬回避行业不得进入Top1-5，且程序最终入账层会再次硬过滤；BUY_DIP/CONTRARIAN只能作为观察或反向逻辑。
-    3. 跨市场信号必须结合A股行业价格确认。
-
-    第十步（最终选股交叉验证）：
+    第八步（最终选股交叉验证）：
     每只Top1-5必须回答“当前宏观状态 + 重要人物讲话 + 经济数据 + 大宗/美股 + A股行业 + 个股新闻 + 技术面”是否形成同向共振；如果存在明显冲突，必须降低评分并在报告中写明。
 
     【输出格式要求】（严格按以下HTML骨架输出，不要输出任何其他文字）：
@@ -2291,8 +2115,7 @@ def generate_ai_report(pool_data, macro_news_text, macro_data_text, us_sector_te
      <p><b>个股新闻核查:</b> ...</p>
      <p><b>技术确认:</b> ...</p>
      <p><b>推荐评分:</b> 评分:[xx]/100 — ...</p>
-     <p><b>估值:</b> PE_TTM:[xx] | EPS:[xx] | PB:[xx] | 盈利增长:[xx]% | 估值评分:[x]/20</p>
-       <p><b>风控底线:</b> 持有:[趋势未破则继续] | 止损:[xx元或-x%]</p>
+     <p><b>风控底线:</b> 周期:[x-x天] | 止损:[xx元或-x%]</p>
        </div>
 
     3. 观察池（用 <div class="card obs-card"> 包裹，里面用 <li> 列出）：
@@ -2410,13 +2233,6 @@ def match_pool_to_report(pool_data, ai_html, default_stop_loss_pct):
     trap_zone_raw = ai_html[trap_start:]
 
     core_cards = [clean_fragment(c) for c in re.split(r'(?=<div[^>]*class="[^"]*core-card[^"]*")', core_zone_raw) if 'core-card' in c]
-
-    # 【修复】fallback：如果 AI 没输出 core-card，尝试按股票代码标题分割
-    if not core_cards:
-        for c in re.split(r'(?=<h3[^>]*>)', core_zone_raw):
-            if re.search(r'\(\d{6}\.[A-Z]{2}\)', c):
-                core_cards.append(clean_fragment(c))
-
     obs_items = [clean_fragment(c) for c in re.split(r'(?=<div[^>]*class="[^"]*obs-card[^"]*")', obs_zone_raw) if c.strip().startswith("<li>")]
     trap_items = [clean_fragment(c) for c in re.split(r'(?=<div[^>]*class="[^"]*trap-card[^"]*")', trap_zone_raw) if c.strip().startswith("<li>")]
 
@@ -2444,17 +2260,12 @@ def match_pool_to_report(pool_data, ai_html, default_stop_loss_pct):
         if tag is None or tag == "Trap_Warning":
             continue
 
-        # 事件 Regime Gate 的硬回避必须在最终入账层再次执行，防止 AI 报告误选。
-        if tag == "Core_Dragon" and bool(item.get("Regime硬回避", False)):
-            print(f"🚫 [Regime Gate] 跳过硬回避行业标的：{ticker_code} {name}")
-            continue
-
         period_match = re.search(r'周期\s*[:：]\s*\[?(\d+[-~]\d+天|\d+天|观望)', chunk)
 
         if tag == "Observation":
             hold_period, stop_loss, score = "观望", "观望", "N/A"
         else:
-            hold_period = "动态持有"
+            hold_period = period_match.group(1).strip() if period_match else "5-12天"
             sl_match = re.search(r'止损\s*[:：]\s*\[?(\d{1,5}\.\d{1,2}元)', chunk)
             stop_loss_raw = sl_match.group(1).strip() if sl_match else None
 
@@ -2514,23 +2325,6 @@ if __name__ == "__main__":
     final_pool = calc_tech_indicators(full_pool, codes, trade_date)
     sector_tech_summary = screen_technical_setups(final_pool)
 
-    final_pool = enrich_pool_with_fundamentals_ashare(final_pool, limit=100)
-
-    _gate = build_event_regime_gate_ashare(
-        macro_news, macro_data_text, us_sector_text,
-        key_person_text=key_person_text, economic_text=economic_data_text, macro_regime=macro_regime
-    )
-    event_regime_text = format_event_regime_gate_ashare(_gate)
-    _signal_client = anthropic.Anthropic(api_key=os.environ.get('CLAWSOCKET_API_KEY'), base_url=os.environ.get('CLAWSOCKET_BASE_URL'))
-    _signal_result = analyze_market_signals_ashare(
-        macro_news + "\n" + key_person_text + "\n" + economic_data_text + "\n" + macro_data_text + "\n" + us_sector_text, _signal_client
-    )
-    market_signal_text = build_market_signal_text_ashare(_signal_result)
-
-    for _x in final_pool:
-        _industry = str(_x.get('Industry',''))
-        _x['Regime硬回避'] = any(k in _industry for k in _gate.get('hard_avoid_sectors', []))
-
     pool_with_news = enrich_pool_with_news(final_pool)
 
     ai_report_html = generate_ai_report(
@@ -2543,9 +2337,7 @@ if __name__ == "__main__":
         sector_tech_summary,
         key_person_text,
         economic_data_text,
-        macro_regime,
-        event_regime_text,
-        market_signal_text
+        macro_regime
     )
 
     # 注入卡片（已废弃，但保留空壳）
@@ -2558,25 +2350,6 @@ if __name__ == "__main__":
         ai_report_html = sell_signal_card_html + current_holdings_card_html + ai_report_html
 
     chosen = match_pool_to_report(pool_with_news, ai_report_html, DEFAULT_STOP_LOSS_PCT)
-
-    # 【修复】过滤最近5天内已止损/清仓的标的，防止止损后立刻重新推荐
-    try:
-        if os.path.exists("review_history.csv"):
-            _rv = pd.read_csv("review_history.csv", on_bad_lines='skip', keep_default_na=False)
-            if {'Ticker', 'Review_Date', 'Status'}.issubset(_rv.columns):
-                _rv['Review_Date'] = pd.to_datetime(_rv['Review_Date'], errors='coerce')
-                _cutoff = get_bj_time() - datetime.timedelta(days=5)
-                _recent_exit = _rv[
-                    (_rv['Review_Date'] >= _cutoff.replace(tzinfo=None)) &
-                    (_rv['Status'].isin(['止损触发清仓', '突发清仓暂停']))
-                ]
-                _cooldown = set(_recent_exit['Ticker'].astype(str).str.strip().unique())
-                if _cooldown:
-                    _before = len(chosen)
-                    chosen = [c for c in chosen if c['Ticker'] not in _cooldown]
-                    print(f"🚫 scan 冷却期过滤：剔除 {len(_cooldown)} 只近期已止损标的，跳过 {_before - len(chosen)} 条")
-    except Exception as e:
-        print(f"⚠️ scan 冷却期过滤失败: {e}")
 
     # ============================================================
     # 【修复】生成 pending 文件，由 review.py 盘后补充
@@ -2600,7 +2373,7 @@ if __name__ == "__main__":
             pending_file = f"ashare_stocks_pending_{get_bj_time().strftime('%Y%m%d')}.csv"
 
             # 准备待确认数据
-            pending_cols = ['Ticker', 'Name', 'Industry', 'Tag', 'Amount', 'Daily_Pct', 'Hold_Period', 'Stop_Loss', 'Score', 'ATR_Pct', '周期共振', 'PE_TTM', 'EPS_TTM', 'PB', 'Earnings_Growth', 'ROE', '估值评分', '估值结论', 'Regime硬回避']
+            pending_cols = ['Ticker', 'Name', 'Industry', 'Tag', 'Amount', 'Daily_Pct', 'Hold_Period', 'Stop_Loss', 'Score', 'ATR_Pct', '周期共振']
             df_pending = pd.DataFrame(chosen)
 
             # 确保列存在
