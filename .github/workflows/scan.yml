@@ -54,16 +54,17 @@ jobs:
         run: |
           set -euo pipefail
 
-          if ! ls ashare_stocks_pending_*.csv 1> /dev/null 2>&1; then
-            echo "⚠️ 未生成A股待确认文件"
-            exit 0
-          fi
+          # scan.py 会修改的文件全部暂存
+          git add ashare_stocks_pending_*.csv 2>/dev/null || true
+          for f in trade_history.csv review_history.csv forced_exit_log.csv scan_version.txt; do
+            [ -f "$f" ] && git add "$f" || true
+          done
 
-          git add ashare_stocks_pending_*.csv
-          git diff --cached --quiet && {
+          # 检查是否有任何待提交的变更（新增、修改、删除）
+          if git diff --cached --quiet; then
             echo "ℹ️ 没有新的待确认文件变更"
             exit 0
-          }
+          fi
 
           git commit -m "chore: A股盘前待确认 $(date +%Y-%m-%d)"
 
