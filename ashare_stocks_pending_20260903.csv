@@ -1,3 +1,0 @@
-Ticker,Name,Industry,Tag,Amount,Daily_Pct,Hold_Period,Stop_Loss,Score,ATR_Pct,周期共振,PE_TTM,EPS_TTM,PB,ROE,Earnings_Growth,估值评分,估值结论,Scan_Ref_Price
-603259.SH,药明康德,化学制药,Core_Dragon,6532139.629,1.0298,3-6天,141.57元,70,4.2,False,,3.8,,13.5915,29.4279,9,EPS盈利、ROE>10%、盈利增长>10%,0
-002015.SZ,协鑫能科,新型电力,Core_Dragon,3302057.57724,-2.124,3-5天,15.45元,66,5.66,False,,0.3465,,4.5322,5.5274,5,EPS盈利,0
