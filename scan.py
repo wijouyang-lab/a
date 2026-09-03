@@ -1836,74 +1836,92 @@ def calc_tech_indicators(full_pool, codes, trade_date):
 
 
 # ==========================================
-# 6.5 基本面/估值增强：PE / EPS / PB / ROE / 盈利增长
+# 6.5 基本面/估值增强（功能合并自美股 Scan）
 # ==========================================
-def _safe_num(v):
+def _safe_fundamental_number(value):
     try:
-        if v is None or pd.isna(v):
+        if value is None or pd.isna(value):
             return None
-        x = float(v)
+        x = float(value)
         return x if pd.notna(x) else None
     except Exception:
         return None
 
-def enrich_pool_with_fundamentals_ashare(pool_data, codes, trade_date, limit=80):
-    """在技术筛选后补充A股估值与盈利质量；数据不足不虚构。"""
+def enrich_pool_with_fundamentals(pool_data, codes, trade_date, limit=80):
+    """对技术候选补充 PE/EPS/PB/ROE/盈利增长，并形成行业相对估值评分。"""
     if not pool_data:
         return pool_data
-    ranked = sorted(pool_data, key=lambda x: x.get("技术评分", 0), reverse=True)
-    targets = ranked[:max(20, min(limit, len(ranked)))]
-    target_codes = [str(x.get("Ticker","")).strip() for x in targets if x.get("Ticker")]
-    db_map, fi_map = {}, {}
-    try:
-        db = pro.daily_basic(ts_code=",".join(target_codes), trade_date=trade_date, fields="ts_code,pe,pb")
-        if db is not None and not db.empty:
-            for _, r in db.iterrows():
-                db_map[str(r.get("ts_code"))] = {"PE_TTM": _safe_num(r.get("pe")), "PB": _safe_num(r.get("pb"))}
-    except Exception as e:
-        print(f"⚠️ A股 daily_basic 估值获取失败：{e}")
+    ranked=sorted(pool_data,key=lambda x:x.get('技术评分',0),reverse=True)
+    targets=ranked[:max(20,min(limit,len(ranked)))]
+    target_codes=[str(x.get('Ticker','')).strip() for x in targets if x.get('Ticker')]
+    valuation={}; finance={}
+    batch_size=40
+    for i in range(0,len(target_codes),batch_size):
+        batch=target_codes[i:i+batch_size]
+        try:
+            db=pro.daily_basic(ts_code=','.join(batch),trade_date=trade_date,fields='ts_code,pe,pe_ttm,pb')
+            if db is not None and not db.empty:
+                for _,r in db.iterrows():
+                    code=str(r.get('ts_code','')).strip()
+                    valuation[code]={
+                        'PE_TTM': _safe_fundamental_number(r.get('pe_ttm') if r.get('pe_ttm') is not None else r.get('pe')),
+                        'PB': _safe_fundamental_number(r.get('pb')),
+                    }
+        except Exception as e:
+            print(f'⚠️ daily_basic 估值批次失败：{e}')
+    # 只对最高技术候选补充财务质量，避免把 Scan 速度拖慢
     for code in target_codes[:30]:
         try:
-            fi = pro.fina_indicator(ts_code=code, period=trade_date,
-                                    fields="ts_code,eps,roe,netprofit_yoy")
-            if fi is not None and not fi.empty:
-                r = fi.iloc[0]
-                fi_map[code] = {"EPS_TTM": _safe_num(r.get("eps")), "ROE": _safe_num(r.get("roe")),
-                                "Earnings_Growth": _safe_num(r.get("netprofit_yoy"))}
+            fi=pro.fina_indicator(ts_code=code)
+            if fi is None or fi.empty:
+                continue
+            fi=fi.copy()
+            if 'end_date' in fi.columns:
+                fi['end_date_num']=pd.to_numeric(fi['end_date'],errors='coerce')
+                td=int(str(trade_date)) if str(trade_date).isdigit() else 99999999
+                fi=fi[fi['end_date_num']<=td]
+                fi=fi.sort_values('end_date_num')
+            r=fi.iloc[-1] if not fi.empty else None
+            if r is not None:
+                finance[code]={
+                    'EPS_TTM': _safe_fundamental_number(r.get('eps')),
+                    'ROE': _safe_fundamental_number(r.get('roe')),
+                    'Earnings_Growth': _safe_fundamental_number(r.get('netprofit_yoy')),
+                }
         except Exception:
             continue
-    by_industry = {}
+    # 行业内相对估值
+    by_industry={}
     for item in pool_data:
-        code = str(item.get("Ticker","")).strip()
-        vals = {}; vals.update(db_map.get(code, {})); vals.update(fi_map.get(code, {}))
-        for k in ("PE_TTM","EPS_TTM","PB","ROE","Earnings_Growth"):
-            item[k] = vals.get(k)
-        by_industry.setdefault(str(item.get("Industry") or "其他").strip(), []).append(item)
+        code=str(item.get('Ticker','')).strip()
+        vals={}; vals.update(valuation.get(code,{})); vals.update(finance.get(code,{}))
+        for k in ('PE_TTM','EPS_TTM','PB','ROE','Earnings_Growth'):
+            item[k]=vals.get(k)
+        by_industry.setdefault(str(item.get('Industry') or '其他').strip(),[]).append(item)
     for items in by_industry.values():
-        pe_vals=[x["PE_TTM"] for x in items if isinstance(x.get("PE_TTM"),(int,float)) and x["PE_TTM"]>0]
-        pb_vals=[x["PB"] for x in items if isinstance(x.get("PB"),(int,float)) and x["PB"]>0]
+        pe_vals=[x['PE_TTM'] for x in items if isinstance(x.get('PE_TTM'),(int,float)) and x['PE_TTM']>0]
+        pb_vals=[x['PB'] for x in items if isinstance(x.get('PB'),(int,float)) and x['PB']>0]
         pe_med=float(pd.Series(pe_vals).median()) if pe_vals else None
         pb_med=float(pd.Series(pb_vals).median()) if pb_vals else None
         for item in items:
             score=0; labels=[]
-            pe=item.get("PE_TTM"); pb=item.get("PB"); eps=item.get("EPS_TTM")
-            roe=item.get("ROE"); growth=item.get("Earnings_Growth")
+            pe=item.get('PE_TTM'); pb=item.get('PB'); eps=item.get('EPS_TTM'); roe=item.get('ROE'); growth=item.get('Earnings_Growth')
             if isinstance(eps,(int,float)):
-                if eps>0: score+=5; labels.append("EPS盈利")
-                elif eps<0: score-=4; labels.append("EPS为负")
+                if eps>0: score+=5; labels.append('EPS盈利')
+                elif eps<0: score-=4; labels.append('EPS为负')
             if isinstance(pe,(int,float)) and pe>0:
-                if pe_med is not None and pe<=pe_med*1.15: score+=5; labels.append("PE低于行业中枢")
-                elif pe<=25: score+=3; labels.append("PE尚可")
-                elif pe>45: score-=3; labels.append("PE偏高")
+                if pe_med is not None and pe<=pe_med*1.15: score+=5; labels.append('PE低于行业中枢')
+                elif pe<=25: score+=3; labels.append('PE尚可')
+                elif pe>45: score-=3; labels.append('PE偏高')
             if isinstance(pb,(int,float)) and pb>0:
-                if pb_med is not None and pb<=pb_med*1.15: score+=4; labels.append("PB低于行业中枢")
-                elif pb>12: score-=2; labels.append("PB偏高")
-            if isinstance(roe,(int,float)) and roe>10: score+=2; labels.append("ROE>10%")
-            if isinstance(growth,(int,float)) and growth>10: score+=2; labels.append("盈利增长>10%")
-            item["估值评分"]=int(max(0,min(20,score)))
-            item["估值结论"]="、".join(labels) if labels else "估值数据不足/需核实"
-            item["综合基础评分"]=int(item.get("技术评分",0))+item["估值评分"]
-    print("✅ A股估值增强完成：PE / EPS / PB / ROE / 盈利增长已纳入候选池")
+                if pb_med is not None and pb<=pb_med*1.15: score+=4; labels.append('PB低于行业中枢')
+                elif pb>12: score-=2; labels.append('PB偏高')
+            if isinstance(roe,(int,float)) and roe>10: score+=2; labels.append('ROE>10%')
+            if isinstance(growth,(int,float)) and growth>10: score+=2; labels.append('盈利增长>10%')
+            item['估值评分']=int(max(0,min(20,score)))
+            item['估值结论']='、'.join(labels) if labels else '估值数据不足/需核实'
+            item['综合基础评分']=int(item.get('技术评分',0))+item['估值评分']
+    print('✅ A股 Scan 已加入 PE/EPS/PB/ROE/盈利增长估值层')
     return pool_data
 
 # ==========================================
@@ -2060,9 +2078,11 @@ def generate_ai_report(pool_data, macro_news_text, macro_data_text, us_sector_te
             "乖离率(%)": d.get("乖离率(%)", "N/A"), "RSI": d.get("RSI", "N/A"),
             "MACD": d.get("MACD趋势", "N/A"),
             "技术评分(满分40)": d.get("技术评分", 0),
-            "估值评分(满分20)": d.get("估值评分", 0), "PE_TTM": d.get("PE_TTM", "N/A"),
-            "EPS_TTM": d.get("EPS_TTM", "N/A"), "PB": d.get("PB", "N/A"), "ROE": d.get("ROE", "N/A"),
-            "Earnings_Growth": d.get("Earnings_Growth", "N/A"), "估值结论": d.get("估值结论", "数据不足"),
+            "估值评分(满分20)": d.get("估值评分", 0),
+            "PE_TTM": d.get("PE_TTM", "N/A"), "EPS_TTM": d.get("EPS_TTM", "N/A"),
+            "PB": d.get("PB", "N/A"), "ROE": d.get("ROE", "N/A"),
+            "Earnings_Growth": d.get("Earnings_Growth", "N/A"),
+            "估值结论": d.get("估值结论", "数据不足"),
             "技术信号": d.get("技术信号", []),
             "周线共振": "🟢是" if d.get("周线共振") else "🔴否",
             "MACD金叉": "✅是" if d.get("MACD金叉") else "否",
@@ -2178,11 +2198,10 @@ def generate_ai_report(pool_data, macro_news_text, macro_data_text, us_sector_te
     每只Top1-5必须回答“当前宏观状态 + 重要人物讲话 + 经济数据 + 大宗/美股 + A股行业 + 个股新闻 + 技术面”是否形成同向共振；如果存在明显冲突，必须降低评分并在报告中写明。
 
     【基本面/估值硬规则】：
-    1. 最终排序必须同时考虑技术评分和估值评分，不得只凭技术形态选股。
-    2. PE/EPS/PB/ROE/盈利增长缺失时必须明确“数据不足”，禁止虚构。
-    3. PE/PB明显高于行业中枢且盈利增长不能匹配时降权；低PE但EPS为负或盈利恶化时不得仅因便宜加分。
-    4. 估值评分最高20分，技术评分最高40分；二者共同构成基础评分。
-    5. 股票采用动态持有，不设置固定持仓天数；退出依据以移动止损和趋势破坏为准。
+    1. 最终排序必须同时考虑技术评分与估值评分。
+    2. PE/EPS/PB/ROE/盈利增长缺失时必须写“数据不足”，禁止虚构。
+    3. PE/PB明显高于行业中枢且盈利增长无法匹配时降权；低PE但EPS为负/盈利恶化时不得仅凭便宜加分。
+    4. 估值评分最高20分，与技术评分共同形成基础评分，再结合宏观、产业链和新闻作最终排序。
 
     【输出格式要求】（严格按以下HTML骨架输出，不要输出任何其他文字）：
 
@@ -2406,7 +2425,7 @@ if __name__ == "__main__":
 
     final_pool = calc_tech_indicators(full_pool, codes, trade_date)
     sector_tech_summary = screen_technical_setups(final_pool)
-    final_pool = enrich_pool_with_fundamentals_ashare(final_pool, codes, trade_date, limit=80)
+    final_pool = enrich_pool_with_fundamentals(final_pool, codes, trade_date, limit=80)
 
     pool_with_news = enrich_pool_with_news(final_pool)
 
