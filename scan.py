@@ -19,6 +19,7 @@ import anthropic
 import time
 import random
 import email.utils
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # ==========================================
 # 启动前置校验：AI 凭证
@@ -368,66 +369,73 @@ def build_current_holdings_card(latest_price_map):
 # ==========================================
 # 0d. 【新增】读取昨日止损标的，生成联动警告
 # ==========================================
-def get_stop_loss_hit_warning():
-    """读取上一交易日 review 风控状态，形成次日 Scan 硬性联动。"""
+def get_review_risk_state():
+    """读取最近一个已完成交易日的 Review 风控状态。"""
     log_file = "trade_history.csv"
     if not os.path.exists(log_file):
-        return ""
+        return {"date": None, "hard": {}, "near": {}}
     try:
         df = pd.read_csv(log_file, keep_default_na=False, on_bad_lines='skip')
-        required = {'Ticker', 'Review_Risk_Status', 'Review_Risk_Date'}
+        required = {"Ticker", "Review_Risk_Status", "Review_Risk_Date"}
         if not required.issubset(df.columns):
-            # 兼容旧账本：继续读取已经实际清仓的 Stop_Loss_Hit。
-            if 'Tag' not in df.columns or 'Exit_Date' not in df.columns:
-                return ""
-            hit_df = df[df['Tag'].astype(str).str.strip() == 'Stop_Loss_Hit'].copy()
-            if hit_df.empty:
-                return ""
-            hit_df = hit_df.sort_values('Exit_Date', ascending=False).head(5)
-            details = [f"{r.get('Name', r.get('Ticker',''))}({r.get('Ticker','')}) @ {r.get('Exit_Date','未知日期')}" for _, r in hit_df.iterrows()]
-            return ("\n⚠️ 【昨日/近期止损风控联动警告】：以下标的已实际止损清仓，今日严禁重新进入 Top 1-5 核心推荐。\n"
-                    f"涉及标的：{', '.join(details)}\n")
-
+            return {"date": None, "hard": {}, "near": {}}
+        df['Ticker'] = df['Ticker'].astype(str).str.strip()
+        df['Review_Risk_Status'] = df['Review_Risk_Status'].astype(str).str.strip().str.upper()
         df['Review_Risk_Date_DT'] = pd.to_datetime(df['Review_Risk_Date'], errors='coerce')
-        today_dt = pd.to_datetime(today_str)
-        # 只读取最近一个已经结束的交易日；不会把更早历史状态无限期带入今日。
-        valid = df[df['Review_Risk_Date_DT'].notna() & (df['Review_Risk_Date_DT'] < today_dt)].copy()
+        today_dt = pd.Timestamp(get_bj_time().date())
+        valid = df[df['Review_Risk_Date_DT'].notna() &
+                   (df['Review_Risk_Date_DT'].dt.normalize() < today_dt) &
+                   df['Review_Risk_Status'].isin({'STOP_TRIGGERED','T1_STOP_PENDING','STOP_NEAR'})].copy()
         if valid.empty:
-            return ""
-        latest_date = valid['Review_Risk_Date_DT'].max()
-        valid = valid[valid['Review_Risk_Date_DT'] == latest_date].copy()
-        valid['Ticker'] = valid['Ticker'].astype(str).str.strip()
-        # 同一 ticker 取最后一条账本记录。
-        valid = valid.sort_values('Review_Risk_Date_DT').groupby('Ticker', as_index=False).tail(1)
-
-        hard = valid[valid['Review_Risk_Status'].isin({'STOP_TRIGGERED', 'T1_STOP_PENDING'})]
-        near = valid[valid['Review_Risk_Status'] == 'STOP_NEAR']
-        lines = []
-        if not hard.empty:
-            details = []
-            for _, r in hard.iterrows():
-                status = str(r.get('Review_Risk_Status')).strip()
-                label = 'T+1待执行止损' if status == 'T1_STOP_PENDING' else '已触发移动止损'
-                stop = str(r.get('Stop_Loss','')).strip()
-                note = str(r.get('Review_Risk_Note','')).strip()
-                details.append(f"{r.get('Name',r['Ticker'])}({r['Ticker']})【{label}】止损={stop or 'N/A'} {note}")
-            lines.append("🚨 【Review→Scan 硬性止损联动】：以下标的昨日已触发/待执行移动止损，今日禁止进入 Top 1-5 核心推荐、禁止新增追踪仓；仅可作为风控反面案例。\n" + '\n'.join(details))
-        if not near.empty:
-            details = []
-            for _, r in near.iterrows():
-                distance = str(r.get('Review_Stop_Distance_Pct','')).strip()
-                stop = str(r.get('Stop_Loss','')).strip()
-                note = str(r.get('Review_Risk_Note','')).strip()
-                details.append(f"{r.get('Name',r['Ticker'])}({r['Ticker']})：距止损 {distance or 'N/A'}%，止损={stop or 'N/A'} {note}")
-            lines.append("⚠️ 【Review→Scan 接近止损提醒】：以下标的昨日距离移动止损≤3%，今日不得作为 Top 1-5 核心追涨推荐；若进入候选池必须标注高风险。\n" + '\n'.join(details))
-        return '\n\n'.join(lines) + ('\n' if lines else '')
+            return {"date": None, "hard": {}, "near": {}}
+        valid['_risk_day'] = valid['Review_Risk_Date_DT'].dt.normalize()
+        latest_day = valid['_risk_day'].max()
+        valid = valid[valid['_risk_day'] == latest_day].sort_values('Review_Risk_Date_DT')
+        valid = valid.drop_duplicates('Ticker', keep='last')
+        hard, near = {}, {}
+        for _, row in valid.iterrows():
+            item = row.to_dict()
+            ticker = str(item.get('Ticker','')).strip()
+            if not ticker:
+                continue
+            status = item.get('Review_Risk_Status')
+            if status in {'STOP_TRIGGERED','T1_STOP_PENDING'}:
+                hard[ticker] = item
+            elif status == 'STOP_NEAR':
+                near[ticker] = item
+        return {"date": latest_day.strftime('%Y-%m-%d'), "hard": hard, "near": near}
     except Exception as e:
-        print(f"⚠️ 读取 Review→Scan 止损联动失败: {e}")
-        return ""
+        print(f"⚠️ 读取 Review→Scan 风控状态失败: {e}")
+        return {"date": None, "hard": {}, "near": {}}
 
-# ==========================================
-# 1. 获取交易额 Top 300
-# ==========================================
+
+def get_stop_loss_hit_warning():
+    """读取最近一次已完成交易日的 Review 风控状态，供 AI 与最终过滤共同使用。"""
+    state = get_review_risk_state()
+    risk_date = state.get('date')
+    hard = state.get('hard', {})
+    near = state.get('near', {})
+    if not risk_date or (not hard and not near):
+        return ""
+    parts = [f"【Review→Scan 风控联动日期：{risk_date}】"]
+    if hard:
+        details=[]
+        for ticker,r in hard.items():
+            status=str(r.get('Review_Risk_Status','')).upper()
+            label='T+1待执行止损' if status=='T1_STOP_PENDING' else '已触发移动止损'
+            name=str(r.get('Name',ticker)).strip(); stop=str(r.get('Stop_Loss','')).strip() or 'N/A'
+            note=str(r.get('Review_Risk_Note','')).strip()
+            details.append(f"{name}({ticker})【{label}】止损={stop}{(' | '+note) if note else ''}")
+        parts.append("🚨 【硬性止损联动】以下标的最近一次 Review 已触发/待执行移动止损：今日禁止进入 Top 1-5 核心推荐、禁止作为新增追踪仓。\n"+'\n'.join(details))
+    if near:
+        details=[]
+        for ticker,r in near.items():
+            name=str(r.get('Name',ticker)).strip(); distance=str(r.get('Review_Stop_Distance_Pct','')).strip() or 'N/A'; stop=str(r.get('Stop_Loss','')).strip() or 'N/A'
+            note=str(r.get('Review_Risk_Note','')).strip()
+            details.append(f"{name}({ticker})：距止损 {distance}%，止损={stop}{(' | '+note) if note else ''}")
+        parts.append("⚠️ 【接近止损联动】以下标的最近一次 Review 距离移动止损≤3%：今日不得作为 Top 1-5 核心追涨推荐；若进入候选池必须标注高风险。\n"+'\n'.join(details))
+    return '\n\n'.join(parts)+'\n'
+
 def get_top_300_pool():
     print(f"🔍 [阶段1] 正在拉取最近交易日的A股全市场数据，圈定 Top 300 主力资金池...")
     df_daily = None
@@ -905,54 +913,123 @@ def get_key_person_events():
     return "\n".join(lines)
 
 
+def _extract_html_links(raw_html, base_url):
+    """从官方列表页提取文章链接；不依赖第三方HTML解析库。"""
+    if not raw_html:
+        return []
+    links = []
+    seen = set()
+    for href, title in re.findall(r'href=[\"\']([^\"\']+)[\"\'][^>]*>(.*?)</a>', raw_html, flags=re.I | re.S):
+        href = html.unescape(href).strip()
+        title = _html_to_text(title)
+        if not href or href.startswith(('javascript:', '#', 'mailto:')):
+            continue
+        full = urllib.parse.urljoin(base_url, href)
+        key = (full, title)
+        if key in seen:
+            continue
+        seen.add(key)
+        links.append((full, title))
+    return links
+
+
 def _fetch_nbs_context():
-    urls = [
+    """优先抓取国家统计局“数据发布”列表，再进入相关最新文章。
+
+    旧版直接抓固定栏目页并依赖首页正文解析，容易在GitHub Actions遇到404/结构调整。
+    这里改成“列表页发现 + 文章页解析”的两级策略。
+    """
+    index_urls = [
         "https://www.stats.gov.cn/sj/zxfb/",
+        "https://www.stats.gov.cn/xxgk/sjfb/zxfb2020/",
         "https://www.stats.gov.cn/",
     ]
     keywords = [
         "社会消费品零售总额", "居民消费价格", "生产者价格", "采购经理指数",
-        "城镇调查失业率", "工业增加值", "固定资产投资", "国民经济",
+        "城镇调查失业率", "工业增加值", "固定资产投资", "国民经济", "消费者价格指数",
     ]
-    out = []
-    seen = set()
-    for url in urls:
-        raw = _http_get_text(url, timeout=15, retries=2, headers={"Referer": "https://www.stats.gov.cn/"})
+    out, seen_sent = [], set()
+
+    for index_url in index_urls:
+        raw = _http_get_text(index_url, timeout=15, retries=2, headers={"Referer": "https://www.stats.gov.cn/"})
         if not raw:
             continue
-        text = _html_to_text(raw)
-        for sent in re.split(r"[。！？]", text):
-            sent = sent.strip()
-            if len(sent) < 20 or not any(k in sent for k in keywords):
+
+        links = _extract_html_links(raw, index_url)
+        candidates = []
+        for href, title in links:
+            blob = f"{title} {href}"
+            if any(k in blob for k in keywords) or any(k in blob for k in ("国民经济", "采购经理", "社会消费", "CPI", "PPI", "失业")):
+                candidates.append((href, title))
+        # 列表页如果没有可识别标题，仍保留前30个站内链接作为弱兜底。
+        if not candidates:
+            candidates = links[:30]
+
+        for href, title in candidates[:24]:
+            article = _http_get_text(href, timeout=12, retries=1, headers={"Referer": index_url})
+            if not article:
                 continue
-            key = re.sub(r"\s+", "", sent)
-            if key not in seen:
-                seen.add(key)
-                out.append(sent[:600])
+            text = _html_to_text(article)
+            matched = [sent.strip() for sent in re.split(r"[。！？]", text)
+                       if len(sent.strip()) >= 20 and any(k in sent for k in keywords)]
+            for sent in matched[:5]:
+                key = re.sub(r"\s+", "", sent)
+                if key not in seen_sent:
+                    seen_sent.add(key)
+                    out.append(sent[:700])
+            if len(out) >= 20:
+                break
+        if out:
+            break
+
     return out[:20]
 
 
 def _fetch_pbc_context():
-    urls = [
+    """抓取人民银行公开页面；页面结构变化时只把官方文本作为弱数据源。"""
+    index_urls = [
         "https://www.pbc.gov.cn/goutongjiaoliu/113456/113469/index.html",
-        "https://www.pbc.gov.cn/diaochatongji/",
+        "https://www.pbc.gov.cn/",
     ]
-    keywords = ["社会融资规模", "M2", "人民币贷款", "货币政策"]
-    out = []
-    seen = set()
-    for url in urls:
-        raw = _http_get_text(url, timeout=15, retries=2, headers={"Referer": "https://www.pbc.gov.cn/"})
+    keywords = ["社会融资规模", "M2", "人民币贷款", "货币政策", "贷款市场报价利率", "LPR"]
+    out, seen_sent = [], set()
+
+    for index_url in index_urls:
+        raw = _http_get_text(index_url, timeout=15, retries=1, headers={"Referer": "https://www.pbc.gov.cn/"})
         if not raw:
             continue
-        text = _html_to_text(raw)
-        for sent in re.split(r"[。！？]", text):
-            sent = sent.strip()
-            if len(sent) < 20 or not any(k in sent for k in keywords):
+        links = _extract_html_links(raw, index_url)
+        candidates = [(href, title) for href, title in links
+                      if any(k in f"{title} {href}" for k in keywords)][:20]
+        if not candidates:
+            text = _html_to_text(raw)
+            for sent in re.split(r"[。！？]", text):
+                sent = sent.strip()
+                if len(sent) >= 20 and any(k in sent for k in keywords):
+                    key = re.sub(r"\s+", "", sent)
+                    if key not in seen_sent:
+                        seen_sent.add(key)
+                        out.append(sent[:700])
+
+        for href, title in candidates:
+            article = _http_get_text(href, timeout=12, retries=1, headers={"Referer": index_url})
+            if not article:
                 continue
-            key = re.sub(r"\s+", "", sent)
-            if key not in seen:
-                seen.add(key)
-                out.append(sent[:600])
+            text = _html_to_text(article)
+            for sent in re.split(r"[。！？]", text):
+                sent = sent.strip()
+                if len(sent) < 20 or not any(k in sent for k in keywords):
+                    continue
+                key = re.sub(r"\s+", "", sent)
+                if key not in seen_sent:
+                    seen_sent.add(key)
+                    out.append(sent[:700])
+                if len(out) >= 20:
+                    break
+            if len(out) >= 20:
+                break
+        if out:
+            break
     return out[:20]
 
 
@@ -1726,35 +1803,177 @@ def enrich_pool_with_news(pool_data: list) -> list:
 # ==========================================
 # 6. 定向计算技术指标
 # ==========================================
+def _tushare_daily_batch(batch, start_date, end_date, attempts=3):
+    """Tushare daily 批量请求：3次重试+指数退避。"""
+    last_err=None
+    for attempt in range(1, attempts+1):
+        try:
+            df=pro.daily(ts_code=','.join(batch), start_date=start_date, end_date=end_date)
+            if df is not None and not df.empty:
+                return df,None
+            last_err=RuntimeError('Tushare daily 返回空数据')
+        except Exception as e:
+            last_err=e
+            print(f"   ⚠️ Tushare 日线批次 {batch[0]}~{batch[-1]} 第{attempt}/{attempts}次失败: {str(e)[:140]}")
+        if attempt<attempts:
+            time.sleep(min(2*(2**(attempt-1)),8)+random.uniform(0.2,0.8))
+    return pd.DataFrame(),last_err
+
+
+def _tushare_history_batches(codes, trade_date, start_hist, batch_size=12):
+    """只拉日线；周线改由日线聚合，避免 weekly 再产生一轮502。"""
+    frames=[]; failed=[]
+    for i in range(0,len(codes),batch_size):
+        batch=codes[i:i+batch_size]
+        df_b,_=_tushare_daily_batch(batch,start_hist,trade_date,3)
+        if not df_b.empty:
+            frames.append(df_b)
+            print(f"   ✅ Tushare 日线批次 {i+1}-{i+len(batch)} 成功：{len(df_b)} 行")
+        else:
+            failed.extend(batch)
+            print(f"   ⚠️ Tushare 日线批次 {i+1}-{i+len(batch)} 最终失败，转备用源")
+        time.sleep(0.2)
+    return (pd.concat(frames,ignore_index=True) if frames else pd.DataFrame()), failed
+
+
+def _eastmoney_fetch_daily(code, start_date, end_date):
+    """Eastmoney历史日K备用源。"""
+    bare=str(code).split('.')[0]
+    suffix=str(code).upper().split('.')[-1] if '.' in str(code) else 'SZ'
+    market='1' if suffix=='SH' else '0'
+    url=("https://push2his.eastmoney.com/api/qt/stock/kline/get"
+         f"?secid={market}.{bare}&klt=101&fqt=0&beg={start_date}&end={end_date}"
+         "&fields1=f1,f2,f3,f4,f5,f6&fields2=f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61"
+         "&ut=fa5fd1943c7b386f172d6893dbfba10b")
+    req=urllib.request.Request(url,headers={'User-Agent':'Mozilla/5.0','Referer':'https://quote.eastmoney.com/'})
+    with urllib.request.urlopen(req,timeout=12) as resp:
+        obj=json.loads(resp.read().decode('utf-8',errors='ignore'))
+    rows=[]
+    for line in (((obj or {}).get('data') or {}).get('klines') or []):
+        parts=str(line).split(',')
+        if len(parts)<7: continue
+        try:
+            dt,op,cl,hi,lo,vol,amount=parts[:7]
+            rows.append({'ts_code':code,'trade_date':dt.replace('-',''),'open':float(op),'close':float(cl),'high':float(hi),'low':float(lo),'pre_close':None,'change':None,'pct_chg':None,'vol':float(vol),'amount':float(amount)})
+        except (TypeError,ValueError):
+            continue
+    return pd.DataFrame(rows)
+
+
+def _sina_fetch_daily(code, limit=320):
+    """新浪历史日K第二备用源。"""
+    ticker=str(code).strip().upper(); bare=ticker.split('.')[0]; suffix=ticker.split('.')[-1] if '.' in ticker else 'SZ'
+    symbol=('sh' if suffix=='SH' else 'sz')+bare
+    url=('https://money.finance.sina.com.cn/quotes_service/api/json_v2.php/'
+         f'CN_MarketData.getKLineData?symbol={symbol}&scale=240&ma=no&datalen={int(limit)}')
+    req=urllib.request.Request(url,headers={'User-Agent':'Mozilla/5.0'})
+    with urllib.request.urlopen(req,timeout=12) as resp:
+        obj=json.loads(resp.read().decode('gbk',errors='ignore'))
+    rows=[]
+    for item in obj or []:
+        try:
+            dt=str(item.get('day',''))
+            rows.append({'ts_code':ticker,'trade_date':dt.replace('-',''),'open':float(item['open']),'close':float(item['close']),'high':float(item['high']),'low':float(item['low']),'pre_close':None,'change':None,'pct_chg':None,'vol':float(item.get('volume',0)),'amount':float(item.get('amount',0))})
+        except (TypeError,ValueError,KeyError):
+            continue
+    return pd.DataFrame(rows)
+
+
+def _fetch_one_fallback(code,start_date,end_date):
+    east_err='未执行'
+    try:
+        df=_eastmoney_fetch_daily(code,start_date,end_date)
+        if df is not None and len(df)>=30:
+            return code,df,'Eastmoney'
+        east_err=f"Eastmoney返回{len(df) if df is not None else 0}行"
+    except Exception as e:
+        east_err=str(e)[:120]
+    try:
+        df=_sina_fetch_daily(code,320)
+        if df is not None and not df.empty:
+            dates=pd.to_datetime(df['trade_date'],format='%Y%m%d',errors='coerce')
+            lo=pd.to_datetime(start_date,format='%Y%m%d',errors='coerce'); hi=pd.to_datetime(end_date,format='%Y%m%d',errors='coerce')
+            df=df[dates.between(lo,hi)].copy()
+        if df is not None and len(df)>=30:
+            return code,df,'Sina'
+        return code,df if df is not None else pd.DataFrame(),f'Eastmoney={east_err}; Sina不足30行'
+    except Exception as e:
+        return code,pd.DataFrame(),f'Eastmoney={east_err}; Sina={str(e)[:120]}'
+
+
+def _fallback_daily_multi_source(codes,start_date,end_date,max_workers=8):
+    if not codes: return pd.DataFrame()
+    print(f"   🔁 启动多源K线备用：{len(codes)}只（Eastmoney→新浪）")
+    frames=[]; em=si=fail=0
+    with ThreadPoolExecutor(max_workers=max_workers) as ex:
+        futures={ex.submit(_fetch_one_fallback,c,start_date,end_date):c for c in codes}
+        for fut in as_completed(futures):
+            c=futures[fut]
+            try: code,df,src=fut.result()
+            except Exception as e:
+                fail+=1; print(f"   ⚠️ 备用K线 {c} 异常: {str(e)[:120]}"); continue
+            if df is not None and not df.empty:
+                frames.append(df); em += (src=='Eastmoney'); si += (src=='Sina')
+            else:
+                fail+=1; print(f"   ⚠️ 备用K线 {c} 最终失败: {src}")
+    print(f"   ✅ 备用K线完成：Eastmoney {em}只；新浪 {si}只；失败 {fail}只")
+    return pd.concat(frames,ignore_index=True) if frames else pd.DataFrame()
+
+
+def _daily_to_weekly(df_daily):
+    """由真实日线聚合周线。"""
+    if df_daily is None or df_daily.empty: return pd.DataFrame()
+    rows=[]
+    for code,g in df_daily.groupby('ts_code'):
+        g=g.copy().sort_values('trade_date')
+        dt=pd.to_datetime(g['trade_date'].astype(str),format='%Y%m%d',errors='coerce')
+        g=g.assign(_dt=dt).dropna(subset=['_dt'])
+        if g.empty: continue
+        w=g.set_index('_dt').resample('W-FRI',label='right',closed='right').agg({'open':'first','high':'max','low':'min','close':'last','vol':'sum','amount':'sum'}).dropna(subset=['open','close'])
+        if w.empty: continue
+        w=w.reset_index(); w['ts_code']=code; w['trade_date']=w['_dt'].dt.strftime('%Y%m%d'); w['pre_close']=w['close'].shift(1); w['pct_chg']=(w['close']/w['pre_close']-1)*100; w['change']=w['close']-w['pre_close']
+        rows.append(w[['ts_code','trade_date','open','high','low','close','pre_close','change','pct_chg','vol','amount']])
+    return pd.concat(rows,ignore_index=True) if rows else pd.DataFrame()
+
+
 def calc_tech_indicators(full_pool, codes, trade_date):
-    print("⚙️ [阶段3] 正在拉取日线+周线K线，分批计算技术指标...")
-    start_hist   = (get_bj_time() - datetime.timedelta(days=120)).strftime('%Y%m%d')
-    start_weekly = (get_bj_time() - datetime.timedelta(days=400)).strftime('%Y%m%d')
-    batch_size   = 40
+    print("⚙️ [阶段3] 正在拉取日线K线并由真实日线计算周线/技术指标...")
+    start_hist=(get_bj_time()-datetime.timedelta(days=220)).strftime('%Y%m%d')
+    df_hist,daily_failed_codes=_tushare_history_batches(codes,trade_date,start_hist,batch_size=12)
+    if daily_failed_codes:
+        df_fallback=_fallback_daily_multi_source(daily_failed_codes,start_hist,trade_date,max_workers=8)
+        if not df_fallback.empty:
+            df_hist=pd.concat([df_hist,df_fallback],ignore_index=True) if not df_hist.empty else df_fallback
+    if not df_hist.empty:
+        for col in ['open','high','low','close','vol','amount']:
+            df_hist[col]=pd.to_numeric(df_hist[col],errors='coerce')
+        df_hist['ts_code']=df_hist['ts_code'].astype(str).str.strip()
+        df_hist['trade_date']=df_hist['trade_date'].astype(str).str.replace('-','',regex=False)
+        df_hist=(df_hist.dropna(subset=['open','high','low','close'])
+                 .drop_duplicates(subset=['ts_code','trade_date'],keep='last')
+                 .sort_values(['ts_code','trade_date']))
 
-    all_hist = []
-    for i in range(0, len(codes), batch_size):
-        try:
-            df_b = pro.daily(ts_code=",".join(codes[i:i+batch_size]),
-                             start_date=start_hist, end_date=trade_date)
-            if df_b is not None and not df_b.empty:
-                all_hist.append(df_b)
-            time.sleep(0.12)
-        except Exception as e:
-            pass
-    df_hist = pd.concat(all_hist, ignore_index=True) if all_hist else pd.DataFrame()
+    # 不仅检查“请求失败”，还检查“批量请求成功但某些股票实际没有足够历史”。
+    # 这些股票继续进入备用源，避免 partial response 被误判为完整。
+    fallback_needed=[]
+    if not df_hist.empty:
+        counts=df_hist.groupby('ts_code')['trade_date'].nunique().to_dict()
+        fallback_needed=[c for c in codes if counts.get(c,0) < 60]
+    else:
+        fallback_needed=list(codes)
+    if fallback_needed:
+        already=set(df_hist['ts_code'].astype(str)) if not df_hist.empty else set()
+        # 只替换/补齐历史不足的股票，减少备用源压力。
+        print(f"   🔎 历史完整性检查：{len(fallback_needed)}只少于60根日K，启动定向备用补齐")
+        df_fallback2=_fallback_daily_multi_source(fallback_needed,start_hist,trade_date,max_workers=8)
+        if not df_fallback2.empty:
+            df_hist=pd.concat([df_hist,df_fallback2],ignore_index=True) if not df_hist.empty else df_fallback2
+            df_hist=df_hist.drop_duplicates(subset=['ts_code','trade_date'],keep='last').sort_values(['ts_code','trade_date'])
 
-    all_weekly = []
-    for i in range(0, len(codes), batch_size):
-        try:
-            df_w = pro.weekly(ts_code=",".join(codes[i:i+batch_size]),
-                              start_date=start_weekly, end_date=trade_date)
-            if df_w is not None and not df_w.empty:
-                all_weekly.append(df_w)
-            time.sleep(0.15)
-        except Exception as e:
-            pass
-    df_weekly = pd.concat(all_weekly, ignore_index=True) if all_weekly else pd.DataFrame()
+    df_weekly=_daily_to_weekly(df_hist)
+    daily_count=df_hist['ts_code'].nunique() if not df_hist.empty else 0
+    weekly_count=df_weekly['ts_code'].nunique() if not df_weekly.empty else 0
+    print(f"   📈 K线数据状态：日线 {daily_count}/{len(codes)}；周线 {weekly_count}/{len(codes)}（周线由真实日线聚合）")
 
     FALLBACK = [
         ("乖离率(%)", 0.0), ("RSI", 50.0), ("MACD趋势", "N/A"),
@@ -1792,12 +2011,14 @@ def calc_tech_indicators(full_pool, codes, trade_date):
         if df_hist.empty or code not in df_hist['ts_code'].values:
             for fld, dflt in FALLBACK:
                 full_pool[code].setdefault(fld, dflt)
+            full_pool[code]['技术数据有效'] = False
             continue
 
         sd = df_hist[df_hist['ts_code'] == code].sort_values('trade_date')
         if len(sd) < 30:
             for fld, dflt in FALLBACK:
                 full_pool[code].setdefault(fld, dflt)
+            full_pool[code]['技术数据有效'] = False
             continue
 
         cp  = sd['close'].values.astype(float)
@@ -1879,6 +2100,11 @@ def calc_tech_indicators(full_pool, codes, trade_date):
             if c2 < o2 and abs(c2-o2) > rng*0.3 and abs(c1-o1) < abs(c2-o2)*0.4 and c > o and c > (o2+c2)/2:
                 patterns.append("启明星")
         full_pool[code]["看涨形态"] = patterns
+        full_pool[code]['技术数据有效'] = bool(
+            len(sd) >= 60 and np.isfinite(full_pool[code].get('RSI', np.nan))
+            and np.isfinite(full_pool[code].get('ATR', np.nan)) and full_pool[code].get('ATR', 0) > 0
+            and full_pool[code].get('MACD趋势') in {'走强','走弱'} and weekly_count > 0
+        )
 
     final_pool = sorted(list(full_pool.values()), key=lambda x: x.get("Amount", 0), reverse=True)
     return final_pool
@@ -2412,6 +2638,16 @@ if __name__ == "__main__":
         import sys; sys.exit(1)
 
     final_pool = calc_tech_indicators(full_pool, codes, trade_date)
+
+    # 【硬性数据质量闸门】
+    # 技术指标依赖真实K线；如果日线覆盖不足，绝不能拿默认值(0/50/False)继续给AI选股。
+    tech_ready = sum(1 for item in final_pool if item.get('技术数据有效') is True)
+    coverage = tech_ready / max(len(final_pool), 1)
+    print(f"📊 技术数据有效覆盖率: {tech_ready}/{len(final_pool)} ({coverage:.1%})")
+    if coverage < 0.80:
+        print("🚨 技术数据覆盖率低于80%，为防止默认指标污染选股结果，本次扫描安全退出，不生成伪技术信号。")
+        import sys; sys.exit(1)
+
     sector_tech_summary = screen_technical_setups(final_pool)
     final_pool = enrich_pool_with_public_valuation(final_pool, limit=80)
 
@@ -2440,6 +2676,17 @@ if __name__ == "__main__":
         ai_report_html = sell_signal_card_html + current_holdings_card_html + ai_report_html
 
     chosen = match_pool_to_report(pool_with_news, ai_report_html, DEFAULT_STOP_LOSS_PCT)
+
+    # Review→Scan 硬性风控：AI即使再次选中，也不能重新新增止损/临界止损标的。
+    review_risk_state = get_review_risk_state()
+    hard_blocked = set(review_risk_state.get('hard', {}).keys())
+    near_blocked = set(review_risk_state.get('near', {}).keys())
+    if hard_blocked or near_blocked:
+        before_risk=len(chosen)
+        chosen=[x for x in chosen if str(x.get('Ticker','')).strip() not in hard_blocked and str(x.get('Ticker','')).strip() not in near_blocked]
+        removed_risk=before_risk-len(chosen)
+        if removed_risk:
+            print(f"🛡️ Review→Scan 风控过滤 {removed_risk} 只：止损/临界止损标的不得重新进入新增推荐")
 
     # ============================================================
     # 【修复】生成 pending 文件，由 review.py 盘后补充
