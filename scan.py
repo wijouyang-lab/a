@@ -720,13 +720,34 @@ def _news_age_tag_bj(dt):
     return None
 
 
+def _parse_rss_items_tolerant(raw, limit=30):
+    """标准XML失败时使用正则容错解析，避免单个RSS源破坏整批新闻。"""
+    if not raw:
+        return []
+    try:
+        root = ET.fromstring(raw)
+        return [{"title": (x.findtext("title", "") or "").strip(), "pubDate": x.findtext("pubDate", "") or ""}
+                for x in root.findall(".//item")[:limit]]
+    except Exception:
+        items=[]
+        for block in re.findall(r"<item\b[^>]*>(.*?)</item>", raw, re.I|re.S)[:limit]:
+            mt=re.search(r"<title\b[^>]*>(.*?)</title>",block,re.I|re.S)
+            md=re.search(r"<(?:pubDate|published|date)\b[^>]*>(.*?)</(?:pubDate|published|date)>",block,re.I|re.S)
+            def clean(v):
+                v=re.sub(r"<!\[CDATA\[(.*?)\]\]>",r"\1",v or "",flags=re.S)
+                return html.unescape(re.sub(r"<[^>]+>"," ",v)).strip()
+            title=clean(mt.group(1) if mt else "")
+            if title: items.append({"title":title,"pubDate":clean(md.group(1) if md else "")})
+        return items
+
 def get_free_macro_news():
     """抓取中文宏观财经新闻，多层备用。"""
     print("📡 [阶段1] 正在抓取中文宏观财经快讯...")
 
     sources = [
         ("新浪财经", "https://rss.sina.com.cn/roll/finance/hot_roll.xml"),
-        ("东方财富", "https://rss.eastmoney.com/rss/finance.xml"),
+        ("Google News-A股", "https://news.google.com/rss/search?q=" + urllib.parse.quote("A股 政策 央行 财政部 经济") + "&hl=zh-CN&gl=CN&ceid=CN:zh-Hans"),
+        ("Google News-财经", "https://news.google.com/rss/search?q=" + urllib.parse.quote("中国经济 CPI PPI PMI 社零") + "&hl=zh-CN&gl=CN&ceid=CN:zh-Hans"),
         ("财新网", "https://china.caixin.com/rss.xml"),
     ]
 
@@ -737,10 +758,13 @@ def get_free_macro_news():
             raw = _http_get_text(url, timeout=8, retries=2)
             if not raw:
                 continue
-            root = ET.fromstring(raw)
-            for item in root.findall(".//item")[:20]:
-                title = item.findtext("title", default="").strip()
-                date_text = item.findtext("pubDate", default="")
+            parsed_items = _parse_rss_items_tolerant(raw, limit=20)
+            if not parsed_items:
+                print(f"   ⚠️ {source_name} 返回内容但未解析到RSS条目")
+                continue
+            for item in parsed_items:
+                title = item.get("title", "").strip()
+                date_text = item.get("pubDate", "")
                 dt = _parse_rss_date(date_text)
                 tag = _news_age_tag_bj(dt)
                 if not title or tag is None:
@@ -752,7 +776,7 @@ def get_free_macro_news():
             print(f"   ⚠️ {source_name} 抓取失败: {str(e)[:100]}")
 
     # 备用：Google News（中文财经）
-    if not news_lines:
+    if True:
         try:
             queries = [
                 "A股 宏观 政策 央行 财政部",
@@ -766,10 +790,9 @@ def get_free_macro_news():
                     raw = _http_get_text(url, timeout=8, retries=1)
                     if not raw:
                         continue
-                    root = ET.fromstring(raw)
-                    for item in root.findall(".//item")[:10]:
-                        title = item.findtext("title", default="").strip()
-                        dt = _parse_rss_date(item.findtext("pubDate", default=""))
+                    for item in _parse_rss_items_tolerant(raw, limit=10):
+                        title = item.get("title", "").strip()
+                        dt = _parse_rss_date(item.get("pubDate", ""))
                         tag = _news_age_tag_bj(dt)
                         if title and tag:
                             ts = dt.strftime("%m-%d %H:%M") if dt else "时间未知"
@@ -1273,9 +1296,19 @@ def get_key_economic_data():
     for key, p_list in patterns.items():
         value = None
         for p in p_list:
-            m = re.search(p, nbs_text, flags=re.I | re.S)
-            if m:
-                value = _parse_num(m.group(1))
+            for m in re.finditer(p, nbs_text, flags=re.I | re.S):
+                v = _parse_num(m.group(1))
+                if v is None:
+                    continue
+                if key == "CN_PMI" and not (30 <= v <= 70):
+                    continue
+                if key in {"CN_CPI", "CN_PPI", "CN_UNRATE"} and not (-20 <= v <= 30):
+                    continue
+                if key == "CN_消费" and not (-30 <= v <= 50):
+                    continue
+                value = v
+                break
+            if value is not None:
                 break
         if value is not None:
             metrics[key] = {"value": value, "prev": None, "date": "近期官方发布", "unit": "%", "source": "国家统计局/官方网页"}
@@ -1617,7 +1650,23 @@ def get_stock_news(ticker_code: str, ticker_name: str, max_items: int = 5) -> li
     except Exception:
         pass
 
-    news_entries.sort(key=lambda x: x[0], reverse=True)
+    if not news_entries:
+        try:
+            q = urllib.parse.quote(f"{ticker_name} {code} A股")
+            raw = _http_get_text(
+                f"https://news.google.com/rss/search?q={q}&hl=zh-CN&gl=CN&ceid=CN:zh-Hans",
+                timeout=8, retries=1
+            )
+            for item in _parse_rss_items_tolerant(raw, limit=max_items * 2):
+                title = item.get("title", "").strip()
+                dt = _parse_rss_date(item.get("pubDate", ""))
+                tag = _news_age_tag_bj(dt)
+                if title and tag:
+                    stamp = dt.strftime("%m-%d %H:%M") if dt else "时间未知"
+                    news_entries.append((dt, f"{tag}[Google News] {stamp} - {title}"))
+        except Exception:
+            pass
+    news_entries.sort(key=lambda x: x[0] if x[0] is not None else datetime.datetime.min.replace(tzinfo=BEIJING_TZ), reverse=True)
     return [entry[1] for entry in news_entries[:max_items]]
 
 def _get_stock_news_time_tag(dt_obj):
@@ -1834,96 +1883,6 @@ def calc_tech_indicators(full_pool, codes, trade_date):
     final_pool = sorted(list(full_pool.values()), key=lambda x: x.get("Amount", 0), reverse=True)
     return final_pool
 
-
-# ==========================================
-# 6.5 基本面/估值增强（功能合并自美股 Scan）
-# ==========================================
-def _safe_fundamental_number(value):
-    try:
-        if value is None or pd.isna(value):
-            return None
-        x = float(value)
-        return x if pd.notna(x) else None
-    except Exception:
-        return None
-
-def enrich_pool_with_fundamentals(pool_data, codes, trade_date, limit=80):
-    """对技术候选补充 PE/EPS/PB/ROE/盈利增长，并形成行业相对估值评分。"""
-    if not pool_data:
-        return pool_data
-    ranked=sorted(pool_data,key=lambda x:x.get('技术评分',0),reverse=True)
-    targets=ranked[:max(20,min(limit,len(ranked)))]
-    target_codes=[str(x.get('Ticker','')).strip() for x in targets if x.get('Ticker')]
-    valuation={}; finance={}
-    batch_size=40
-    for i in range(0,len(target_codes),batch_size):
-        batch=target_codes[i:i+batch_size]
-        try:
-            db=pro.daily_basic(ts_code=','.join(batch),trade_date=trade_date,fields='ts_code,pe,pe_ttm,pb')
-            if db is not None and not db.empty:
-                for _,r in db.iterrows():
-                    code=str(r.get('ts_code','')).strip()
-                    valuation[code]={
-                        'PE_TTM': _safe_fundamental_number(r.get('pe_ttm') if r.get('pe_ttm') is not None else r.get('pe')),
-                        'PB': _safe_fundamental_number(r.get('pb')),
-                    }
-        except Exception as e:
-            print(f'⚠️ daily_basic 估值批次失败：{e}')
-    # 只对最高技术候选补充财务质量，避免把 Scan 速度拖慢
-    for code in target_codes[:30]:
-        try:
-            fi=pro.fina_indicator(ts_code=code)
-            if fi is None or fi.empty:
-                continue
-            fi=fi.copy()
-            if 'end_date' in fi.columns:
-                fi['end_date_num']=pd.to_numeric(fi['end_date'],errors='coerce')
-                td=int(str(trade_date)) if str(trade_date).isdigit() else 99999999
-                fi=fi[fi['end_date_num']<=td]
-                fi=fi.sort_values('end_date_num')
-            r=fi.iloc[-1] if not fi.empty else None
-            if r is not None:
-                finance[code]={
-                    'EPS_TTM': _safe_fundamental_number(r.get('eps')),
-                    'ROE': _safe_fundamental_number(r.get('roe')),
-                    'Earnings_Growth': _safe_fundamental_number(r.get('netprofit_yoy')),
-                }
-        except Exception:
-            continue
-    # 行业内相对估值
-    by_industry={}
-    for item in pool_data:
-        code=str(item.get('Ticker','')).strip()
-        vals={}; vals.update(valuation.get(code,{})); vals.update(finance.get(code,{}))
-        for k in ('PE_TTM','EPS_TTM','PB','ROE','Earnings_Growth'):
-            item[k]=vals.get(k)
-        by_industry.setdefault(str(item.get('Industry') or '其他').strip(),[]).append(item)
-    for items in by_industry.values():
-        pe_vals=[x['PE_TTM'] for x in items if isinstance(x.get('PE_TTM'),(int,float)) and x['PE_TTM']>0]
-        pb_vals=[x['PB'] for x in items if isinstance(x.get('PB'),(int,float)) and x['PB']>0]
-        pe_med=float(pd.Series(pe_vals).median()) if pe_vals else None
-        pb_med=float(pd.Series(pb_vals).median()) if pb_vals else None
-        for item in items:
-            score=0; labels=[]
-            pe=item.get('PE_TTM'); pb=item.get('PB'); eps=item.get('EPS_TTM'); roe=item.get('ROE'); growth=item.get('Earnings_Growth')
-            if isinstance(eps,(int,float)):
-                if eps>0: score+=5; labels.append('EPS盈利')
-                elif eps<0: score-=4; labels.append('EPS为负')
-            if isinstance(pe,(int,float)) and pe>0:
-                if pe_med is not None and pe<=pe_med*1.15: score+=5; labels.append('PE低于行业中枢')
-                elif pe<=25: score+=3; labels.append('PE尚可')
-                elif pe>45: score-=3; labels.append('PE偏高')
-            if isinstance(pb,(int,float)) and pb>0:
-                if pb_med is not None and pb<=pb_med*1.15: score+=4; labels.append('PB低于行业中枢')
-                elif pb>12: score-=2; labels.append('PB偏高')
-            if isinstance(roe,(int,float)) and roe>10: score+=2; labels.append('ROE>10%')
-            if isinstance(growth,(int,float)) and growth>10: score+=2; labels.append('盈利增长>10%')
-            item['估值评分']=int(max(0,min(20,score)))
-            item['估值结论']='、'.join(labels) if labels else '估值数据不足/需核实'
-            item['综合基础评分']=int(item.get('技术评分',0))+item['估值评分']
-    print('✅ A股 Scan 已加入 PE/EPS/PB/ROE/盈利增长估值层')
-    return pool_data
-
 # ==========================================
 # 7. AI 事件推演选股（含联动警告）
 # ==========================================
@@ -2062,6 +2021,41 @@ def load_evolved_rules() -> str:
     except Exception as e:
         return ""
 
+def enrich_pool_with_public_valuation(pool_data, limit=80):
+    """免费公开行情估值层：只请求PE/PB；拿不到就保留N/A，不依赖Tushare财务权限。"""
+    if not pool_data:
+        return pool_data
+    targets=sorted(pool_data,key=lambda x:x.get("技术评分",0),reverse=True)[:min(limit,len(pool_data))]
+    for item in targets:
+        code=str(item.get("Ticker","")).strip().upper()
+        bare=code.split(".")[0]
+        market="1" if code.endswith(".SH") else "0"
+        try:
+            url=(f"https://push2.eastmoney.com/api/qt/stock/get?secid={market}.{bare}"
+                 "&fields=f57,f58,f162,f167")
+            raw=_http_get_text(url,timeout=7,retries=1,headers={"Referer":"https://quote.eastmoney.com/","User-Agent":"Mozilla/5.0"})
+            data=json.loads(raw).get("data") or {}
+            pe=data.get("f162"); pb=data.get("f167")
+            item["PE_TTM"]=(float(pe) if isinstance(pe,(int,float)) and pe>=0 else None)
+            item["PB"]=(float(pb) if isinstance(pb,(int,float)) and pb>=0 else None)
+        except Exception:
+            item["PE_TTM"]=item.get("PE_TTM"); item["PB"]=item.get("PB")
+    for item in pool_data:
+        pe=item.get("PE_TTM"); pb=item.get("PB"); score=0; labels=[]
+        if isinstance(pe,(int,float)) and pe>0:
+            if pe<=20: score+=6; labels.append("PE较低")
+            elif pe<=35: score+=3; labels.append("PE尚可")
+            elif pe>60: score-=3; labels.append("PE偏高")
+        if isinstance(pb,(int,float)) and pb>0:
+            if pb<=2: score+=6; labels.append("PB较低")
+            elif pb<=5: score+=3; labels.append("PB尚可")
+            elif pb>10: score-=3; labels.append("PB偏高")
+        item["估值评分"]=max(0,min(20,int(score)))
+        item["估值结论"]="、".join(labels) if labels else "估值数据不足/需核实"
+        item["综合基础评分"]=int(item.get("技术评分",0))+item["估值评分"]
+    print("✅ A股公开估值层完成：PE/PB（无需Tushare财务权限）")
+    return pool_data
+
 def generate_ai_report(pool_data, macro_news_text, macro_data_text, us_sector_text, removed_tickers, embargo_text="", sector_tech_data=None, key_person_text="", economic_data_text="", macro_regime=None):
     print("🧠 [阶段4] 召唤 AI 大脑...")
     client = anthropic.Anthropic(
@@ -2079,9 +2073,7 @@ def generate_ai_report(pool_data, macro_news_text, macro_data_text, us_sector_te
             "MACD": d.get("MACD趋势", "N/A"),
             "技术评分(满分40)": d.get("技术评分", 0),
             "估值评分(满分20)": d.get("估值评分", 0),
-            "PE_TTM": d.get("PE_TTM", "N/A"), "EPS_TTM": d.get("EPS_TTM", "N/A"),
-            "PB": d.get("PB", "N/A"), "ROE": d.get("ROE", "N/A"),
-            "Earnings_Growth": d.get("Earnings_Growth", "N/A"),
+            "PE_TTM": d.get("PE_TTM", "N/A"), "PB": d.get("PB", "N/A"),
             "估值结论": d.get("估值结论", "数据不足"),
             "技术信号": d.get("技术信号", []),
             "周线共振": "🟢是" if d.get("周线共振") else "🔴否",
@@ -2197,11 +2189,7 @@ def generate_ai_report(pool_data, macro_news_text, macro_data_text, us_sector_te
     第八步（最终选股交叉验证）：
     每只Top1-5必须回答“当前宏观状态 + 重要人物讲话 + 经济数据 + 大宗/美股 + A股行业 + 个股新闻 + 技术面”是否形成同向共振；如果存在明显冲突，必须降低评分并在报告中写明。
 
-    【基本面/估值硬规则】：
-    1. 最终排序必须同时考虑技术评分与估值评分。
-    2. PE/EPS/PB/ROE/盈利增长缺失时必须写“数据不足”，禁止虚构。
-    3. PE/PB明显高于行业中枢且盈利增长无法匹配时降权；低PE但EPS为负/盈利恶化时不得仅凭便宜加分。
-    4. 估值评分最高20分，与技术评分共同形成基础评分，再结合宏观、产业链和新闻作最终排序。
+    【估值规则】：PE/PB为免费公开数据，缺失必须标记“数据不足”；估值评分最高20分，与技术评分共同进入排序；不得凭低PE/PB自动买入，需结合盈利与产业逻辑。
 
     【输出格式要求】（严格按以下HTML骨架输出，不要输出任何其他文字）：
 
@@ -2425,7 +2413,7 @@ if __name__ == "__main__":
 
     final_pool = calc_tech_indicators(full_pool, codes, trade_date)
     sector_tech_summary = screen_technical_setups(final_pool)
-    final_pool = enrich_pool_with_fundamentals(final_pool, codes, trade_date, limit=80)
+    final_pool = enrich_pool_with_public_valuation(final_pool, limit=80)
 
     pool_with_news = enrich_pool_with_news(final_pool)
 
@@ -2475,7 +2463,7 @@ if __name__ == "__main__":
             pending_file = f"ashare_stocks_pending_{get_bj_time().strftime('%Y%m%d')}.csv"
 
             # 准备待确认数据
-            pending_cols = ['Ticker', 'Name', 'Industry', 'Tag', 'Amount', 'Daily_Pct', 'Hold_Period', 'Stop_Loss', 'Score', 'ATR_Pct', '周期共振', 'PE_TTM', 'EPS_TTM', 'PB', 'ROE', 'Earnings_Growth', '估值评分', '估值结论']
+            pending_cols = ['Ticker', 'Name', 'Industry', 'Tag', 'Amount', 'Daily_Pct', 'Hold_Period', 'Stop_Loss', 'Score', 'ATR_Pct', '周期共振']
             df_pending = pd.DataFrame(chosen)
 
             # 确保列存在
