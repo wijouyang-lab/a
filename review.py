@@ -1781,6 +1781,70 @@ other_winner_avg = (
 losers = [p for p in all_pnl_list if p < 0.0]
 loser_avg = sum(losers) / len(losers) if losers else 0.0
 
+# ============================================================
+# 【补充KPI】当前版本之外，再提供“近30日/全历史已结算胜率”。
+# 这样 Scan 代码刚更新、当前版本样本还为0时，Review 仍能评价真实策略表现。
+# 不改变“当前版本严格隔离”的主KPI口径。
+# ============================================================
+def load_closed_history_all():
+    result = []
+    if not os.path.exists(review_log):
+        return result
+    try:
+        hist = pd.read_csv(review_log, keep_default_na=False, on_bad_lines='skip')
+        required = {'Status', 'Rec_Date', 'Ticker', 'PnL_Pct'}
+        if not required.issubset(hist.columns):
+            return result
+        hist['Status'] = hist['Status'].astype(str).str.strip()
+        hist['Rec_Date_DT'] = pd.to_datetime(hist['Rec_Date'], errors='coerce')
+        hist = hist[hist['Status'].isin(ALL_CLOSED_STATUSES) & hist['Rec_Date_DT'].notna()].copy()
+        seen = set()
+        for _, r in hist.sort_values(['Rec_Date_DT', 'Review_Date'] if 'Review_Date' in hist.columns else ['Rec_Date_DT']).iterrows():
+            ticker = clean_text(r.get('Ticker'))
+            rec_date = clean_text(r.get('Rec_Date'))
+            status = clean_text(r.get('Status'))
+            key = (ticker, rec_date, status)
+            if key in seen:
+                continue
+            pnl = safe_float(r.get('PnL_Pct'))
+            if pnl is None:
+                pnl = safe_float(r.get('Maturity_PnL'))
+            if pnl is None:
+                continue
+            seen.add(key)
+            result.append({'ticker': ticker, 'rec_date': rec_date, 'status': status, 'pnl': pnl,
+                           'rec_date_dt': pd.Timestamp(r['Rec_Date_DT']).normalize()})
+    except Exception as e:
+        print(f"⚠️ 全历史胜率读取失败：{e}")
+    return result
+
+
+_all_closed_history = load_closed_history_all()
+# 把本次运行尚未落入review_history的当日结算也并入，但不重复。
+_hist_keys = {(x['ticker'], x['rec_date'], x['status']) for x in _all_closed_history}
+for x in expired_list:
+    _ticker = clean_text(x.get('代码'))
+    _rec_date = clean_text(x.get('首次推荐日'))
+    _status = clean_text(x.get('结算类型'), '周期到期清仓')
+    _pnl = safe_float(x.get('期满日盈亏(%)'))
+    _key = (_ticker, _rec_date, _status)
+    if _pnl is not None and _key not in _hist_keys:
+        _hist_keys.add(_key)
+        _all_closed_history.append({
+            'ticker': _ticker, 'rec_date': _rec_date, 'status': _status, 'pnl': _pnl,
+            'rec_date_dt': pd.to_datetime(_rec_date, errors='coerce'),
+        })
+
+_hist_valid = [x for x in _all_closed_history if pd.notna(x.get('rec_date_dt'))]
+_cutoff_30d = pd.Timestamp(today_str).normalize() - pd.Timedelta(days=30)
+_recent30_closed = [x for x in _hist_valid if x['rec_date_dt'].normalize() >= _cutoff_30d]
+_all_closed_count = len(_hist_valid)
+_all_closed_wins = sum(1 for x in _hist_valid if x['pnl'] > 0)
+_recent30_count = len(_recent30_closed)
+_recent30_wins = sum(1 for x in _recent30_closed if x['pnl'] > 0)
+_all_closed_win_rate = _all_closed_wins / _all_closed_count * 100 if _all_closed_count else 0.0
+_recent30_win_rate = _recent30_wins / _recent30_count * 100 if _recent30_count else 0.0
+
 
 # 当前版本 KPI HTML：只使用当前 Scan 版本的数据。
 _current_sample = active_count + closed_count
@@ -1815,6 +1879,13 @@ kpi_html = f"""
   <p style='margin:0 0 8px 0;'><b>当前版本大赢家贡献（≥15%）：</b>{super_winner_contribution:.2f}%</p>
   <p style='margin:0 0 8px 0;'><b>其他盈利平均：</b>{other_winner_avg:.2f}%</p>
   <p style='margin:0;'><b>亏损平均：</b>{loser_avg:.2f}%</p>
+</div>
+
+<div style='background:#fff8e1;border:1px solid #ffe082;padding:16px;margin-bottom:20px;border-radius:8px;'>
+  <p style='margin:0 0 8px 0;'><b>📊 实际策略已结算胜率（不受版本重置影响）</b></p>
+  <p style='margin:4px 0;'><b>近30日已结算胜率：</b>{_recent30_wins}/{_recent30_count} = {_recent30_win_rate:.1f}%</p>
+  <p style='margin:4px 0;'><b>全历史已结算胜率：</b>{_all_closed_wins}/{_all_closed_count} = {_all_closed_win_rate:.1f}%</p>
+  <p style='margin:8px 0 0 0;color:#795548;'><b>说明：</b>以上两项仅统计已结算交易；当前版本主KPI仍严格按 Rec_Date ≥ {SCAN_VERSION_START.strftime('%Y-%m-%d')} 隔离，避免旧版污染新策略评价。</p>
 </div>
 """
 
