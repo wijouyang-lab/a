@@ -1,0 +1,4 @@
+Ticker,Name,Industry,Tag,Amount,Daily_Pct,Hold_Period,Stop_Loss,Score,ATR_Pct,周期共振,Scan_Ref_Price
+002155.SZ,湖南黄金,黄金,Core_Dragon,2927500.03332,5.0744,5-7天,26.16元,86,5.18,False,0
+601872.SH,招商轮船,水运,Core_Dragon,2792044.786,8.3661,3-5天,17.37元,95,5.15,False,0
+000807.SZ,云铝股份,铝,Core_Dragon,2782867.07342,3.0486,5-7天,24.64元,82,3.46,False,0
