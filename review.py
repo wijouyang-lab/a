@@ -726,18 +726,106 @@ def parse_hold_days(hold_period_str):
     nums = re.findall(r'\d+', str(hold_period_str))
     return int(nums[-1]) if nums else None
 
-def get_price_on_date(ticker, target_date_str, field='close'):
+def get_price_on_date(ticker, target_date_str, field='close', exact=False):
+    """获取指定日期价格。
+
+    exact=True 时必须存在目标交易日，禁止静默回退到更早交易日。
+    这对“今日开盘→今日收盘”收益计算是硬规则。
+    """
     if df_hist_all.empty:
         return None
-    ticker_data = df_hist_all[df_hist_all['ts_code'] == ticker].copy()
+    ticker_data = df_hist_all[df_hist_all['ts_code'].astype(str).str.strip() == str(ticker).strip()].copy()
     if ticker_data.empty:
         return None
-    ticker_data['trade_date'] = pd.to_datetime(ticker_data['trade_date'])
-    target = pd.to_datetime(target_date_str)
-    valid = ticker_data[ticker_data['trade_date'] <= target]
+    ticker_data['trade_date'] = pd.to_datetime(ticker_data['trade_date'], errors='coerce')
+    target = pd.to_datetime(target_date_str, errors='coerce')
+    if pd.isna(target):
+        return None
+    if exact:
+        valid = ticker_data[ticker_data['trade_date'].dt.normalize() == target.normalize()]
+    else:
+        valid = ticker_data[ticker_data['trade_date'] <= target]
     if valid.empty:
         return None
-    return float(valid.iloc[-1][field])
+    value = safe_float(valid.sort_values('trade_date').iloc[-1].get(field))
+    return value
+
+
+def _get_yahoo_exact_daily_ohlc(ticker, target_date_str):
+    """Yahoo Finance 当日精确 OHLC 备用源；找不到目标日期绝不回退。"""
+    try:
+        import urllib.request, urllib.parse, json as _json
+        code = str(ticker).strip().upper()
+        bare = code.split('.')[0]
+        suffix = code.split('.')[-1] if '.' in code else 'SZ'
+        symbol = bare + '.SS' if suffix == 'SH' else bare + '.SZ'
+        target = pd.Timestamp(target_date_str)
+        start = int((target - pd.Timedelta(days=3)).tz_localize('UTC').timestamp())
+        end = int((target + pd.Timedelta(days=2)).tz_localize('UTC').timestamp())
+        url = (f"https://query1.finance.yahoo.com/v8/finance/chart/{urllib.parse.quote(symbol, safe='')}?"
+               f"period1={start}&period2={end}&interval=1d&events=history&includeAdjustedClose=true")
+        req = urllib.request.Request(url, headers={'User-Agent':'Mozilla/5.0','Accept':'application/json'})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            obj = _json.loads(resp.read().decode('utf-8', errors='ignore'))
+        result = ((obj.get('chart') or {}).get('result') or [])
+        if not result:
+            return None
+        r = result[0]
+        ts = r.get('timestamp') or []
+        q = ((r.get('indicators') or {}).get('quote') or [{}])[0]
+        for i, t in enumerate(ts):
+            dt = pd.to_datetime(t, unit='s', utc=True)
+            if dt.tz_convert('Asia/Shanghai').date() != target.date():
+                continue
+            try:
+                return {
+                    'open': float(q.get('open', [])[i]),
+                    'high': float(q.get('high', [])[i]),
+                    'low': float(q.get('low', [])[i]),
+                    'close': float(q.get('close', [])[i]),
+                    'source': 'Yahoo'
+                }
+            except (IndexError, TypeError, ValueError):
+                return None
+    except Exception:
+        return None
+    return None
+
+
+def get_exact_today_ohlc(ticker, today_str):
+    """今日盘后结算专用：Tushare 精确日期 → Yahoo 精确日期 → 实时兜底。"""
+    out = {'open': None, 'low': None, 'close': None, 'source': None}
+    # 1) 已加载的 Tushare 历史K线，必须 exact。
+    for fld in ('open', 'low', 'close'):
+        out[fld] = get_price_on_date(ticker, today_str, field=fld, exact=True)
+    if all(out[k] is not None for k in ('open','low','close')):
+        out['source'] = 'Tushare'
+        return out
+
+    # 2) Yahoo 精确日线。
+    yh = _get_yahoo_exact_daily_ohlc(ticker, today_str)
+    if yh:
+        for fld in ('open','low','close'):
+            if out[fld] is None:
+                out[fld] = yh.get(fld)
+        if all(out[k] is not None for k in ('open','low','close')):
+            out['source'] = 'Yahoo'
+            return out
+
+    # 3) 最后一层只用于 open/last，不允许把昨日 close 当今日 close。
+    try:
+        live_open, live_last = get_live_quote(ticker)
+        if out['open'] is None:
+            out['open'] = live_open
+        if out['close'] is None:
+            out['close'] = live_last
+        if out['low'] is None and out['open'] is not None and out['close'] is not None:
+            out['low'] = min(out['open'], out['close'])
+        if out['open'] is not None or out['close'] is not None:
+            out['source'] = 'Tushare实时兜底'
+    except Exception:
+        pass
+    return out
 
 
 def _indicator_frame_ashare(ticker, before_date_str):
@@ -890,10 +978,28 @@ def build_attribution_html(active_list, expired_list):
             reason_body = '暂无。'
         stop_method = clean_text(item.get('Stop_Method')) or attr['止损方法']
         stop_price = clean_text(item.get('止损价')) or clean_text(item.get('Trail_Stop')) or 'N/A'
+
+        # 明确展示当日真实行情：开盘→收盘。
+        # 这是“今日盘中表现”，与“首次推荐价→当前盈亏”严格区分，避免再次混淆收益口径。
+        day_open = safe_float(item.get('今日开盘价'))
+        day_close = safe_float(item.get('现价'))
+        if day_open is not None and day_open > 0 and day_close is not None and day_close > 0:
+            day_pnl = (day_close - day_open) / day_open * 100.0
+            day_pnl_text = f"{day_pnl:+.2f}%"
+            day_color = '#d32f2f' if day_pnl > 0 else ('#388e3c' if day_pnl < 0 else '#546e7a')
+            market_line = (
+                f"<div><b>今日实际行情：</b>开盘 ¥{day_open:.2f} → 收盘 ¥{day_close:.2f} | "
+                f"<b>今日开盘→收盘：</b><span style='font-weight:bold;color:{day_color};'>{day_pnl_text}</span>"
+                f" | 数据源：{clean_text(item.get('今日行情来源')) or '未知'}</div>"
+            )
+        else:
+            market_line = "<div><b>今日实际行情：</b>今日开盘/收盘数据不足，未计算开盘→收盘收益。</div>"
+
         blocks.append(f"""
 <div style='background:#fafafa;border:1px solid #e0e0e0;padding:16px;margin:0 0 12px 0;border-radius:8px;'>
   <div style='font-weight:bold;color:#263238;margin-bottom:8px;'>{'🟢' if state == '持仓中' else '📁'} {state}：{clean_text(item.get('名称'))} ({clean_text(item.get('代码'))})</div>
   <div><b>实际盈亏：</b><span style='font-weight:bold;color:{pnl_color};'>{pnl_text}</span></div>
+  {market_line}
   <div><b>{reason_title}：</b>{reason_body}</div>
   <div><b>当前移动止损：</b>{stop_price}　<b>止损方法：</b>{stop_method}</div>
   <div><b>风控动作：</b>{attr['风控动作指令']}</div>
@@ -1207,24 +1313,18 @@ for ticker, group in recent_picks.groupby('Ticker'):
         except Exception:
             rec_price = 0.0
 
-    # 今日实际 OHLC：不要再错误地把建仓日 Low_Price 当作今日最低价。
-    today_open = get_price_on_date(ticker, today_str, field='open')
-    today_low = get_price_on_date(ticker, today_str, field='low')
-    today_close = get_price_on_date(ticker, today_str, field='close')
-    if today_open is None or today_close is None:
-        try:
-            live_open, live_last = get_live_quote(ticker)
-            today_open = today_open or live_open
-            today_close = today_close or live_last or live_open
-        except Exception:
-            pass
-    if today_low is None and today_open is not None and today_close is not None:
-        today_low = min(today_open, today_close)
+    # 今日实际 OHLC：今日结算必须精确匹配 today_str，禁止回退到前一交易日。
+    today_ohlc = get_exact_today_ohlc(ticker, today_str)
+    today_open = today_ohlc.get('open')
+    today_low = today_ohlc.get('low')
+    today_close = today_ohlc.get('close')
     if today_close is None:
-        today_close = price_map_today.get(ticker)
-    if today_close is None:
+        print(f"⚠️ {ticker} 无法取得 {today_str} 精确收盘价，禁止使用前一交易日价格计算今日盈亏。")
         continue
-    if is_new_today and today_open is not None and today_open > 0:
+    if is_new_today:
+        if today_open is None or float(today_open) <= 0:
+            print(f"⚠️ {ticker} 今日新仓缺少 {today_str} 精确开盘价，禁止生成今日开盘→收盘收益。")
+            continue
         rec_price = float(today_open)
 
     existing_stop = None
@@ -1345,7 +1445,7 @@ for ticker, group in recent_picks.groupby('Ticker'):
         '持股周期建议': hold_period_str, '止损价': exec_stop if exec_stop is not None else 'N/A',
         '首次推荐日': rec_date_str, '首次推荐价': rec_price,
         '今日开盘价': round(float(today_open), 2) if today_open is not None else 'N/A',
-        '现价': float(today_close), '持仓天数': days_held, '剩余天数': '—',
+        '现价': float(today_close), '今日行情来源': today_ohlc.get('source','未知'), '持仓天数': days_held, '剩余天数': '—',
         '当前盈亏(%)': cur_pnl, '今日新增': '是' if is_new_today else '否',
         'T+1锁定': '是' if t1_locked else '否',
         '风控状态': 'T+1止损待执行' if t1_stop_triggered_today else ('T+1锁定' if t1_locked else '正常监控'),
