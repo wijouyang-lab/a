@@ -1,0 +1,6 @@
+Ticker,Name,Industry,Tag,Amount,Daily_Pct,Hold_Period,Stop_Loss,Score,ATR_Pct,周期共振,Scan_Ref_Price
+300058.SZ,蓝色光标,广告包装,Core_Dragon,8653559.60654,5.9136,3-5天,13.00元,62,6.5,False,0
+601138.SH,工业富联,通信设备,Core_Dragon,8337057.613,0.7753,5-12天,58.22元,0,4.4,False,0
+002714.SZ,牧原股份,农业综合,Core_Dragon,3351156.40246,4.4914,3-5天,40.50元,58,2.7,False,0
+000858.SZ,五粮液,白酒,Core_Dragon,3240922.72571,1.8393,5-7天,66.50元,68,1.76,True,0
+300803.SZ,指南针,软件服务,Core_Dragon,3141924.70695,2.8368,3-5天,82.00元,65,4.22,False,0
