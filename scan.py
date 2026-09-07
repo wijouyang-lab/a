@@ -752,7 +752,7 @@ def _classify_person_event(title, source_text=""):
     }
 
 
-def _http_get_text(url, timeout=15, retries=3, headers=None):
+def _http_get_text(url, timeout=15, retries=3, headers=None, log_failures=True):
     base_headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/150.0 Safari/537.36",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
@@ -768,7 +768,8 @@ def _http_get_text(url, timeout=15, retries=3, headers=None):
                 raw = resp.read()
             return raw.decode("utf-8", errors="ignore")
         except Exception as e:
-            print(f"   ⚠️ 网络请求失败 {attempt}/{retries}: {str(e)[:160]}")
+            if log_failures:
+                print(f"   ⚠️ 网络请求失败 {attempt}/{retries}: {str(e)[:160]}")
             if attempt < retries:
                 time.sleep(min(2 * attempt, 5))
 
@@ -1500,6 +1501,84 @@ def _economic_regime_from_metrics(metrics):
     }
 
 
+def _fetch_google_cn_macro_context():
+    """中国宏观结构化数字的网络容错层：优先抓取Google News RSS标题。
+
+    目的不是把新闻标题当官方数字，而是在国家统计局网页结构变化/尚未发布当月数据时，
+    帮AI定位“最近一个已经公布的官方口径”和数据期。对尚未公布的数据不强行填当前月。
+    """
+    queries = [
+        "中国 社会消费品零售总额 同比 国家统计局",
+        "中国 CPI 同比 国家统计局",
+        "中国 PPI 同比 国家统计局",
+        "中国 采购经理指数 PMI 国家统计局",
+        "中国 城镇调查失业率 国家统计局",
+        "中国 M2 社会融资规模 人民银行",
+    ]
+    out=[]
+    seen=set()
+    for q in queries:
+        try:
+            url=("https://news.google.com/rss/search?q=" + urllib.parse.quote(q)
+                 + "&hl=zh-CN&gl=CN&ceid=CN:zh-Hans")
+            raw=_http_get_text(url, timeout=8, retries=1, log_failures=False)
+            for item in _parse_rss_items_tolerant(raw, limit=8):
+                title=str(item.get("title","")).strip()
+                dt=_parse_rss_date(item.get("pubDate", ""))
+                if not title:
+                    continue
+                # 只保留与中国宏观指标直接相关的标题
+                if not any(k in title for k in ("社零","社会消费品零售","CPI","居民消费价格","PPI","工业生产者",
+                                                  "PMI","采购经理指数","失业率","M2","社会融资规模")):
+                    continue
+                key=re.sub(r"\\s+","",title)
+                if key in seen:
+                    continue
+                seen.add(key)
+                stamp=dt.strftime("%Y-%m-%d %H:%M") if dt else "时间未知"
+                out.append(f"[Google News宏观线索] {stamp} - {title}")
+        except Exception:
+            continue
+    return out[:30]
+
+
+def _extract_cn_metric_from_text(text, key):
+    """从官方文本+Google News标题中尽量提取最近已公布数值；失败返回None。"""
+    if not text:
+        return None
+    patterns={
+        "CN_消费":[
+            r"社会消费品零售总额.{0,80}?(?:同比)?(?:增长|下降)([+-]?\\d+(?:\\.\\d+)?)%",
+            r"社零.{0,60}?([+-]?\\d+(?:\\.\\d+)?)%",
+        ],
+        "CN_CPI":[
+            r"(?:居民消费价格|CPI).{0,60}?(?:同比)?(?:上涨|下降|增长)([+-]?\\d+(?:\\.\\d+)?)%",
+            r"CPI.{0,40}?([+-]?\\d+(?:\\.\\d+)?)%",
+        ],
+        "CN_PPI":[
+            r"(?:工业生产者出厂价格|PPI).{0,80}?(?:同比)?(?:上涨|下降|增长)([+-]?\\d+(?:\\.\\d+)?)%",
+            r"PPI.{0,40}?([+-]?\\d+(?:\\.\\d+)?)%",
+        ],
+        "CN_PMI":[
+            r"(?:制造业)?采购经理指数.{0,40}?([+-]?\\d+(?:\\.\\d+)?)",
+            r"PMI.{0,20}?([+-]?\\d+(?:\\.\\d+)?)",
+        ],
+        "CN_UNRATE":[
+            r"城镇调查失业率.{0,60}?([+-]?\\d+(?:\\.\\d+)?)%",
+            r"失业率.{0,30}?([+-]?\\d+(?:\\.\\d+)?)%",
+        ],
+    }
+    bounds={"CN_消费":(-30,50),"CN_CPI":(-20,30),"CN_PPI":(-30,30),"CN_PMI":(30,70),"CN_UNRATE":(0,30)}
+    for pat in patterns.get(key,[]):
+        for m in re.finditer(pat,text,flags=re.I|re.S):
+            try:v=float(m.group(1))
+            except Exception:continue
+            lo,hi=bounds[key]
+            if lo<=v<=hi:
+                return v
+    return None
+
+
 def get_key_economic_data():
     print("📊 [阶段2.7] 正在抓取中美关键经济数据...")
     metrics = {}
@@ -1507,9 +1586,13 @@ def get_key_economic_data():
     # 中国：官方网页语境。页面无法稳定解析结构化数字时，不伪造数字；将官方文本交给AI。
     nbs_context = _fetch_nbs_context()
     pbc_context = _fetch_pbc_context()
+    google_cn_context = _fetch_google_cn_macro_context()
 
-    # 尝试从近期官方文本中提取明确百分比，匹配到时再结构化。
+    # 官方网页抓取成功但解析不到结构化数字时，使用Google News标题作为“定位层”；
+    # AI负责解释和交叉验证，程序不把未经核实的标题数字强行视为官方最终值。
     nbs_text = " ".join(nbs_context)
+    google_cn_text = " ".join(google_cn_context)
+    combined_cn_text = (nbs_text + " " + google_cn_text).strip()
     patterns = {
         "CN_消费": [r"社会消费品零售总额.*?(?:增长|同比).*?([+-]?\d+(?:\.\d+)?)%", r"社零.*?([+-]?\d+(?:\.\d+)?)%"],
         "CN_CPI": [r"居民消费价格.*?(?:同比|上涨|下降).*?([+-]?\d+(?:\.\d+)?)%", r"CPI.*?([+-]?\d+(?:\.\d+)?)%"],
@@ -1521,6 +1604,7 @@ def get_key_economic_data():
 
     for key, p_list in patterns.items():
         value = None
+        # 第一优先级：国家统计局官方文本
         for p in p_list:
             for m in re.finditer(p, nbs_text, flags=re.I | re.S):
                 v = _parse_num(m.group(1))
@@ -1536,9 +1620,14 @@ def get_key_economic_data():
                 break
             if value is not None:
                 break
+        # 第二优先级：Google News仅用于恢复“最近已公布数据”的定位，不足时留给AI解释。
+        if value is None:
+            value = _extract_cn_metric_from_text(google_cn_text, key)
         if value is not None:
-            metrics[key] = {"value": value, "prev": None, "date": "近期官方发布", "unit": "%", "source": "国家统计局/官方网页"}
-            print(f"   ✅ {labels[key]}: {value}")
+            derived_from_google = (value is not None and not any(_extract_cn_metric_from_text(" ".join(nbs_context), key) == value for _ in [0]))
+            src = "国家统计局/官方网页" if nbs_text and _extract_cn_metric_from_text(nbs_text, key) is not None else "Google News定位层（待AI交叉验证）"
+            metrics[key] = {"value": value, "prev": None, "date": "最近已公布口径", "unit": "%", "source": src}
+            print(f"   ✅ {labels[key]}: {value} | 来源={src}")
         else:
             print(f"   ℹ️ {labels[key]}: 当前未解析到可靠结构化数值，保留官方文本给AI")
 
@@ -1588,6 +1677,11 @@ def get_key_economic_data():
         lines.append("")
         lines.append("【🏦 中国人民银行近期官方文本】")
         lines.extend([f"• {x}" for x in pbc_context[:8]])
+
+    if google_cn_context:
+        lines.append("")
+        lines.append("【🔎 中国宏观Google News恢复层（仅作定位，AI必须交叉验证）】")
+        lines.extend([f"• {x}" for x in google_cn_context[:18]])
 
     lines.extend([
         "", "【🇺🇸 美国宏观解释规则】",
@@ -1893,24 +1987,6 @@ def get_us_sector_performance():
         return "\n".join(results)
 
     return "暂无美股板块数据，请基于宏观新闻推演A股跟随效应。"
-
-
-# 美股板块 → A股联动封禁映射
-# 说明：只用于“美股上一完整交易日明显下跌”时的盘前联动回避，不参与正常评分。
-US_SECTOR_TO_ASHARE = {
-    "SOXX": ["半导体", "芯片", "封测", "晶圆", "半导体材料", "半导体设备"],
-    "XLK":  ["科技", "AI算力", "光模块", "CPO", "云计算", "数据中心"],
-    "XLE":  ["石油", "煤炭", "天然气", "能源"],
-    "XLF":  ["银行", "保险", "券商", "金融"],
-    "XLV":  ["医药", "创新药", "医疗器械", "CXO"],
-    "XLY":  ["消费", "汽车", "零售", "白酒"],
-    "XLI":  ["军工", "航空", "制造", "机器人"],
-    "XLB":  ["有色金属", "化工", "矿业"],
-    "ARKK": ["AI", "基因", "新能源汽车", "自动驾驶"],
-}
-
-# 跌幅达到 -1.5% 才进入“联动封禁”解析层；小于该阈值仅作为普通市场信息。
-EMBARGO_THRESHOLD_PCT = -1.5
 
 
 def parse_sector_embargo(us_sector_text):
@@ -2624,11 +2700,16 @@ def load_evolved_rules() -> str:
     except Exception as e:
         return ""
 
-def enrich_pool_with_public_valuation(pool_data, limit=80):
-    """免费公开行情估值层：只请求PE/PB；拿不到就保留N/A，不依赖Tushare财务权限。"""
+def enrich_pool_with_public_valuation(pool_data, limit=50):
+    """免费公开行情估值层：只请求PE/PB；拿不到就保留N/A，不依赖Tushare财务权限。
+
+    估值是辅助项，不值得为80~100次逐只网络访问牺牲整个扫描稳定性；默认只检查
+    技术最强的前50只，并静默记录失败，最后一次性汇总。
+    """
     if not pool_data:
         return pool_data
     targets=sorted(pool_data,key=lambda x:x.get("技术评分",0),reverse=True)[:min(limit,len(pool_data))]
+    valuation_failures = 0
     for item in targets:
         code=str(item.get("Ticker","")).strip().upper()
         bare=code.split(".")[0]
@@ -2636,12 +2717,13 @@ def enrich_pool_with_public_valuation(pool_data, limit=80):
         try:
             url=(f"https://push2.eastmoney.com/api/qt/stock/get?secid={market}.{bare}"
                  "&fields=f57,f58,f162,f167")
-            raw=_http_get_text(url,timeout=7,retries=1,headers={"Referer":"https://quote.eastmoney.com/","User-Agent":"Mozilla/5.0"})
-            data=json.loads(raw).get("data") or {}
+            raw=_http_get_text(url,timeout=6,retries=1,headers={"Referer":"https://quote.eastmoney.com/","User-Agent":"Mozilla/5.0"},log_failures=False)
+            data=json.loads(raw or "{}").get("data") or {}
             pe=data.get("f162"); pb=data.get("f167")
             item["PE_TTM"]=(float(pe) if isinstance(pe,(int,float)) and pe>=0 else None)
             item["PB"]=(float(pb) if isinstance(pb,(int,float)) and pb>=0 else None)
         except Exception:
+            valuation_failures += 1
             item["PE_TTM"]=item.get("PE_TTM"); item["PB"]=item.get("PB")
     for item in pool_data:
         pe=item.get("PE_TTM"); pb=item.get("PB"); score=0; labels=[]
@@ -2656,7 +2738,7 @@ def enrich_pool_with_public_valuation(pool_data, limit=80):
         item["估值评分"]=max(0,min(20,int(score)))
         item["估值结论"]="、".join(labels) if labels else "估值数据不足/需核实"
         item["综合基础评分"]=int(item.get("技术评分",0))+item["估值评分"]
-    print("✅ A股公开估值层完成：PE/PB（无需Tushare财务权限）")
+    print(f"✅ A股公开估值层完成：PE/PB | 检查{len(targets)}只 | 失败/无数据{valuation_failures}只（已静默汇总，避免大量502刷屏）")
     return pool_data
 
 def generate_ai_report(pool_data, macro_news_text, macro_data_text, us_sector_text, removed_tickers, embargo_text="", sector_tech_data=None, key_person_text="", economic_data_text="", macro_regime=None):
@@ -3032,7 +3114,7 @@ if __name__ == "__main__":
         import sys; sys.exit(1)
 
     sector_tech_summary = screen_technical_setups(final_pool)
-    final_pool = enrich_pool_with_public_valuation(final_pool, limit=80)
+    final_pool = enrich_pool_with_public_valuation(final_pool, limit=50)
 
     pool_with_news = enrich_pool_with_news(final_pool)
 
