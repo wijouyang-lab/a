@@ -93,10 +93,164 @@ ATR_STOP_CEIL_PCT = 12.0
 ts.set_token(os.environ.get("TUSHARE_TOKEN"))
 pro = ts.pro_api()
 
+
+# ==========================================
+# Yahoo Finance 统一备用行情层
+# ==========================================
+def _to_yahoo_symbol(ticker):
+    """把 A股 Ticker 转成 Yahoo Finance 标的代码；美股/指数/期货原样返回。"""
+    s = str(ticker).strip().upper()
+    if re.fullmatch(r"\d{6}\.(SH|SZ|BJ)", s):
+        code, market = s.split(".")
+        if market == "SH":
+            return f"{code}.SS"
+        if market == "SZ":
+            return f"{code}.SZ"
+        # Yahoo 对北交所覆盖不稳定，保留原代码并由调用方决定是否可用。
+        return s
+    return s
+
+
+def _yahoo_chart_request(symbol, interval="1d", period_days=10, timeout=12):
+    """直接调用 Yahoo chart API，避免完全依赖 yfinance 的缓存/封装。"""
+    now_utc = datetime.datetime.now(datetime.timezone.utc)
+    period2 = int(now_utc.timestamp()) + 300
+    period1 = int((now_utc - datetime.timedelta(days=period_days)).timestamp())
+    params = urllib.parse.urlencode({
+        "period1": period1,
+        "period2": period2,
+        "interval": interval,
+        "events": "history",
+        "includeAdjustedClose": "true",
+    })
+    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{urllib.parse.quote(symbol, safe='')}?{params}"
+    req = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                          "(KHTML, like Gecko) Chrome/150.0 Safari/537.36",
+            "Accept": "application/json,text/plain,*/*",
+            "Connection": "close",
+        },
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        raw = resp.read().decode("utf-8", errors="ignore")
+    obj = json.loads(raw)
+    result = (obj.get("chart") or {}).get("result") or []
+    if not result:
+        return None
+    return result[0]
+
+
+def _yahoo_chart_to_df(symbol, interval="1d", period_days=120):
+    """Yahoo chart JSON -> 标准 OHLCV DataFrame。"""
+    result = _yahoo_chart_request(symbol, interval=interval, period_days=period_days)
+    if not result:
+        return pd.DataFrame()
+
+    timestamps = result.get("timestamp") or []
+    quote_list = ((result.get("indicators") or {}).get("quote") or [])
+    if not timestamps or not quote_list:
+        return pd.DataFrame()
+
+    q = quote_list[0]
+    n = min(
+        len(timestamps),
+        len(q.get("open") or []),
+        len(q.get("high") or []),
+        len(q.get("low") or []),
+        len(q.get("close") or []),
+    )
+    if n <= 0:
+        return pd.DataFrame()
+
+    # Yahoo 时间戳通常带 timezone 信息；统一为美东/本地日期后再落盘。
+    tz_name = ((result.get("meta") or {}).get("exchangeTimezoneName") or "UTC")
+    try:
+        idx = pd.to_datetime(timestamps[:n], unit="s", utc=True).tz_convert(tz_name)
+    except Exception:
+        idx = pd.to_datetime(timestamps[:n], unit="s", utc=True)
+
+    data = {
+        "datetime": idx,
+        "open": pd.to_numeric((q.get("open") or [])[:n], errors="coerce"),
+        "high": pd.to_numeric((q.get("high") or [])[:n], errors="coerce"),
+        "low": pd.to_numeric((q.get("low") or [])[:n], errors="coerce"),
+        "close": pd.to_numeric((q.get("close") or [])[:n], errors="coerce"),
+        "volume": pd.Series(pd.to_numeric((q.get("volume") or [0] * n)[:n], errors="coerce")).fillna(0).to_numpy(),
+    }
+    df = pd.DataFrame(data).dropna(subset=["open", "high", "low", "close"]).copy()
+    return df
+
+
+def _yahoo_intraday_snapshot(ticker, interval="5m", period_days=3):
+    """
+    返回 Yahoo 最近一个可用盘中 bar。
+    关键原则：不能把周五日线收盘当成周一“当前价格”。
+    """
+    symbol = _to_yahoo_symbol(ticker)
+    df = _yahoo_chart_to_df(symbol, interval=interval, period_days=period_days)
+    if df.empty:
+        return None
+
+    row = df.iloc[-1]
+    return {
+        "symbol": symbol,
+        "timestamp": row["datetime"],
+        "open": float(row["open"]),
+        "high": float(row["high"]),
+        "low": float(row["low"]),
+        "close": float(row["close"]),
+        "volume": float(row["volume"]),
+    }
+
+
+def _yahoo_previous_daily_close(ticker, session_local_date=None):
+    """
+    获取当前交易/期货 session 之前的最近一个完整日线收盘价。
+    session_local_date 传入后，严格排除同一日期的日线，避免把当前未收盘日线
+    当成“前收”。
+    """
+    symbol = _to_yahoo_symbol(ticker)
+    df = _yahoo_chart_to_df(symbol, interval="1d", period_days=15)
+    if df.empty:
+        return None
+
+    work = df.copy()
+    if session_local_date is not None:
+        local_dates = pd.to_datetime(work["datetime"], errors="coerce").dt.date
+        work = work[local_dates < session_local_date]
+
+    if work.empty:
+        return None
+
+    row = work.iloc[-1]
+    return float(row["close"]), row["datetime"]
+
+
+def _yahoo_current_or_prev_close(ticker):
+    """A股/普通股票备用：优先最近盘中价，否则最近完整收盘。"""
+    snap = None
+    try:
+        snap = _yahoo_intraday_snapshot(ticker, interval="5m", period_days=3)
+    except Exception:
+        snap = None
+    if snap and snap.get("close", 0) > 0:
+        return float(snap["close"])
+
+    prev = _yahoo_previous_daily_close(ticker)
+    return float(prev[0]) if prev else None
+
 # ==========================================
 # 0. 扫描前：统一获取最新可用收盘价表
 # ==========================================
 def get_latest_price_map():
+    """
+    持仓现价获取顺序：
+    1) Tushare 实时（主）
+    2) Yahoo Finance 盘中/最近完整收盘（备用）
+    3) 不再用“北京时间昨天”的盲目日期兜底，避免周一误取周日/周五逻辑。
+    """
     holding_tickers = []
     try:
         log_file = "trade_history.csv"
@@ -112,10 +266,10 @@ def get_latest_price_map():
 
     if holding_tickers:
         try:
-            bare_codes = [t.split('.')[0] for t in holding_tickers]
+            bare_codes = [str(t).split('.')[0] for t in holding_tickers]
             df_rt = ts.get_realtime_quotes(bare_codes)
             if df_rt is not None and not df_rt.empty and 'price' in df_rt.columns:
-                exchange_map = {t.split('.')[0]: t for t in holding_tickers}
+                exchange_map = {str(t).split('.')[0]: t for t in holding_tickers}
                 for _, row in df_rt.iterrows():
                     code = str(row.get('code', ''))
                     ts_code = exchange_map.get(code)
@@ -125,38 +279,33 @@ def get_latest_price_map():
                             price_map[ts_code] = price
                     except (ValueError, TypeError):
                         pass
-                if price_map:
-                    print(f"✅ 实时行情拉取成功，覆盖 {len(price_map)} 只持仓现价（盘中实时口径）")
-                    return price_map
         except Exception as e:
-            print(f"⚠️ 实时行情接口失败，回退收盘价: {e}")
+            print(f"⚠️ 实时行情接口失败，将切换 Yahoo 备用: {str(e)[:120]}")
 
-    try:
-        trade_date_latest = get_bj_time().strftime('%Y%m%d')
-        df_prices = pro.daily(trade_date=trade_date_latest)
-        if df_prices is not None and not df_prices.empty:
-            price_map = dict(zip(df_prices['ts_code'], df_prices['close']))
-            print(f"✅ 今日收盘价拉取成功，共 {len(price_map)} 只（盘后口径）")
-            return price_map
-    except Exception as e:
-        print(f"⚠️ 今日 daily 失败: {e}")
+    missing = [t for t in holding_tickers if t not in price_map]
+    if missing:
+        yahoo_ok = 0
+        for ticker in missing:
+            try:
+                px = _yahoo_current_or_prev_close(ticker)
+                if px is not None and px > 0:
+                    price_map[ticker] = px
+                    yahoo_ok += 1
+            except Exception as e:
+                print(f"   ⚠️ Yahoo 备用行情 {ticker} 失败: {str(e)[:120]}")
+            time.sleep(0.08)
+        if yahoo_ok:
+            print(f"✅ Yahoo Finance 备用行情补齐 {yahoo_ok}/{len(missing)} 只持仓")
 
-    try:
-        yesterday_str = (get_bj_time() - datetime.timedelta(days=1)).strftime('%Y%m%d')
-        df_prices = pro.daily(trade_date=yesterday_str)
-        if df_prices is not None and not df_prices.empty:
-            price_map = dict(zip(df_prices['ts_code'], df_prices['close']))
-            print(f"⚠️ 使用昨日收盘价兜底，共 {len(price_map)} 只（止损判断可能轻微滞后一日）")
-            return price_map
-    except Exception as e:
-        print(f"⚠️ 昨日 daily 也失败: {e}")
+    if price_map:
+        source_note = "Tushare实时 + Yahoo备用"
+        print(f"✅ 持仓价格获取完成，覆盖 {len(price_map)}/{len(holding_tickers)} 只（{source_note}）")
+        return price_map
 
-    print("🚨 价格拉取全部失败，price_map 为空，止损判断将使用买入价（盈亏=0），请检查 tushare token 与网络。")
+    print("🚨 Tushare 与 Yahoo 均未取得持仓价格，price_map 为空；禁止伪造当前价格。")
     return {}
 
-# ==========================================
-# 0a. 扫描前：读取持仓 + 消息面与宏观大宗数据 → AI 判断哪些应该强清与暂停追踪
-# ==========================================
+
 def pre_scan_portfolio_review(macro_news_text, macro_data_text, price_map):
     log_file = "trade_history.csv"
     review_log = "review_history.csv"
@@ -1462,62 +1611,188 @@ def get_key_economic_data():
 # 3. 获取国际宏观大宗数据
 # ==========================================
 def get_global_macro_data():
+    """
+    国际宏观/大宗统一采用“当前 session 盘中价 vs 上一完整交易日收盘”的口径。
+    尤其是北京时间周一早盘（纽约时间周日夜盘），绝不能用周五日线收盘涨跌
+    冒充“今日黄金/白银涨跌”。
+    """
     print("🌐 [阶段2.6] 正在抓取国际宏观与大宗商品核心指标数据...")
+
     macro_tickers = {
-        "10Y_US_Bond": ("^TNX", "美国10年期国债收益率"),
-        "VIX": ("^VIX", "美股恐慌指数VIX"),
-        "Gold": ("GC=F", "COMEX黄金期货"),
-        "Silver": ("SI=F", "COMEX白银期货"),
-        "Copper": ("HG=F", "COMEX铜期货"),
-        "WTI_Oil": ("CL=F", "WTI原油期货"),
-        "Brent_Oil": ("BZ=F", "布伦特原油期货"),
+        "10Y_US_Bond": ("^TNX", "美国10年期国债收益率", "rate"),
+        "VIX": ("^VIX", "美股恐慌指数VIX", "index"),
+        "Gold": ("GC=F", "COMEX黄金期货", "commodity"),
+        "Silver": ("SI=F", "COMEX白银期货", "commodity"),
+        "Copper": ("HG=F", "COMEX铜期货", "commodity"),
+        "WTI_Oil": ("CL=F", "WTI原油期货", "commodity"),
+        "Brent_Oil": ("BZ=F", "布伦特原油期货", "commodity"),
     }
+
     results = []
     vix_value = None
 
-    for key, (ticker, desc) in macro_tickers.items():
+    # 系统运行时间可能是北京时间周一早盘，对应纽约周日夜盘。
+    try:
+        from zoneinfo import ZoneInfo
+        ny_tz = ZoneInfo("America/New_York")
+        now_ny = datetime.datetime.now(datetime.timezone.utc).astimezone(ny_tz)
+    except Exception:
+        now_ny = datetime.datetime.now(datetime.timezone.utc)
+
+    session_date = now_ny.date()
+
+    for key, (ticker, desc, kind) in macro_tickers.items():
+        current = None
+        previous_close = None
+        prev_dt = None
+
+        # 第一层：Yahoo 5分钟盘中数据
         try:
-            df = yf.download(ticker, period="5d", progress=False, threads=False)
-            if df is None or df.empty:
-                results.append(f"❓ {desc} ({ticker}): 指标抓取受限")
-                continue
-            if isinstance(df.columns, pd.MultiIndex):
-                df.columns = df.columns.get_level_values(0)
-            close_val = float(df['Close'].iloc[-1])
-            prev_close = float(df['Close'].iloc[-2])
-            pct_chg = round((close_val - prev_close) / prev_close * 100, 2)
-            sign = "📈" if pct_chg > 0 else "📉"
-            if key == "VIX":
-                vix_value = close_val
-                results.append(f"{sign} {desc} ({ticker}): {round(close_val, 2)} (当日变动: {pct_chg:+.2f}%)")
-            elif key == "10Y_US_Bond":
-                results.append(f"{sign} {desc} ({ticker}): {round(close_val, 3)}% (当日变动: {pct_chg:+.2f}%)")
-            else:
-                results.append(f"{sign} {desc} ({ticker}): ${round(close_val, 2)} (当日变动: {pct_chg:+.2f}%)")
+            current = _yahoo_intraday_snapshot(ticker, interval="5m", period_days=3)
         except Exception:
-            results.append(f"❓ {desc} ({ticker}): 指标抓取受限")
+            current = None
+
+        # 第二层：Yahoo 日线，严格只找“当前 session 日期之前”的完整收盘
+        try:
+            prev = _yahoo_previous_daily_close(ticker, session_local_date=session_date)
+            if prev:
+                previous_close, prev_dt = prev
+        except Exception:
+            previous_close = None
+
+        # 第三层：yfinance 作为 Yahoo 封装备用
+        if current is None:
+            try:
+                df = yf.download(
+                    ticker,
+                    period="3d",
+                    interval="5m",
+                    progress=False,
+                    threads=False,
+                    auto_adjust=False,
+                    prepost=True,
+                )
+                if df is not None and not df.empty:
+                    if isinstance(df.columns, pd.MultiIndex):
+                        df.columns = df.columns.get_level_values(0)
+                    df = df.dropna(subset=["Close"])
+                    if not df.empty:
+                        row = df.iloc[-1]
+                        idx = pd.to_datetime(df.index[-1])
+                        if getattr(idx, "tzinfo", None) is None:
+                            idx = idx.tz_localize("UTC")
+                        current = {
+                            "symbol": ticker,
+                            "timestamp": idx,
+                            "open": float(row.get("Open", row["Close"])),
+                            "high": float(row.get("High", row["Close"])),
+                            "low": float(row.get("Low", row["Close"])),
+                            "close": float(row["Close"]),
+                            "volume": float(row.get("Volume", 0) or 0),
+                        }
+            except Exception:
+                current = None
+
+        if previous_close is None:
+            try:
+                df = yf.download(
+                    ticker,
+                    period="15d",
+                    interval="1d",
+                    progress=False,
+                    threads=False,
+                    auto_adjust=False,
+                )
+                if df is not None and not df.empty:
+                    if isinstance(df.columns, pd.MultiIndex):
+                        df.columns = df.columns.get_level_values(0)
+                    close_series = pd.to_numeric(df["Close"], errors="coerce").dropna()
+                    idx = pd.to_datetime(close_series.index)
+                    # 排除当前纽约日期，防止当前未收盘日线成为“昨日收盘”
+                    valid = close_series[pd.Index(idx.date) < session_date]
+                    if not valid.empty:
+                        previous_close = float(valid.iloc[-1])
+                        prev_dt = valid.index[-1]
+            except Exception:
+                previous_close = None
+
+        if current is not None and current.get("close", 0) > 0 and previous_close and previous_close > 0:
+            current_price = float(current["close"])
+            pct_chg = round((current_price - previous_close) / previous_close * 100, 2)
+            sign = "📈" if pct_chg > 0 else ("📉" if pct_chg < 0 else "➖")
+
+            ts = current["timestamp"]
+            try:
+                if getattr(ts, "tzinfo", None) is None:
+                    ts = ts.tz_localize("UTC")
+                ts_ny = ts.tz_convert("America/New_York")
+                time_text = ts_ny.strftime("%Y-%m-%d %H:%M ET")
+            except Exception:
+                time_text = str(ts)
+
+            if key == "VIX":
+                vix_value = current_price
+                results.append(
+                    f"{sign} {desc} ({ticker}): {current_price:.2f} "
+                    f"(相对上一完整收盘 {pct_chg:+.2f}%，数据时间 {time_text})"
+                )
+            elif key == "10Y_US_Bond":
+                bps = (current_price - previous_close) * 100.0
+                results.append(
+                    f"{sign} {desc} ({ticker}): {current_price:.3f}% "
+                    f"(相对上一完整收盘 {bps:+.1f}bp / {pct_chg:+.2f}%，数据时间 {time_text})"
+                )
+            else:
+                results.append(
+                    f"{sign} {desc} ({ticker}): ${current_price:.2f} "
+                    f"(相对上一完整收盘 {pct_chg:+.2f}%，数据时间 {time_text})"
+                )
+        elif previous_close is not None:
+            # 数据源可用但当前盘中不可用时，明确告诉 AI“这是上一完整收盘”，不能称为今日变化。
+            prev_label = str(prev_dt)[:19] if prev_dt is not None else "最近完整收盘"
+            if key == "VIX":
+                results.append(f"➖ {desc} ({ticker}): 最近完整收盘 {previous_close:.2f}（{prev_label}；当前盘中数据暂不可用）")
+            elif key == "10Y_US_Bond":
+                results.append(f"➖ {desc} ({ticker}): 最近完整收盘 {previous_close:.3f}%（{prev_label}；当前盘中数据暂不可用）")
+            else:
+                results.append(f"➖ {desc} ({ticker}): 最近完整收盘 ${previous_close:.2f}（{prev_label}；当前盘中数据暂不可用）")
+        else:
+            results.append(f"❓ {desc} ({ticker}): Yahoo/其他行情源均未取得可靠数据")
+
+        time.sleep(0.12)
 
     if not results:
         return "暂无外部宏观大宗商品监控数据。"
 
-    guidance = ("\n【使用提示】以上大宗商品数据对不同行业的相关性差异很大：原油/WTI/布伦特"
-                "主要影响石油化工、煤炭开采、航空运输、水路运输等上下游行业，对其他行业"
-                "（如软件、消费、医药等）相关性很低，请结合每支标的自己的所属行业判断，"
-                "不要不分行业地把油价波动同等代入所有个股的评分。")
+    guidance = (
+        "\n【行情口径硬规则】当前/盘中数据优先于日线收盘。"
+        "北京时间周一早盘对应纽约周日夜盘，黄金/白银/铜/原油等期货必须使用当前期货 session 的盘中价格；"
+        "如果当前盘中数据不可用，只能显示最近完整收盘并明确标注，禁止把周五涨跌写成“今日涨跌”。"
+        "\n【使用提示】以上大宗商品数据对不同行业的相关性差异很大：原油/WTI/布伦特"
+        "主要影响石油化工、煤炭开采、航空运输、水路运输等上下游行业，对其他行业"
+        "（如软件、消费、医药等）相关性很低，请结合每支标的自己的所属行业判断，"
+        "不要不分行业地把油价波动同等代入所有个股的评分。"
+    )
     if vix_value is not None:
         if vix_value >= 30:
-            guidance += (f"\n【VIX风控提示】当前VIX={round(vix_value,1)}，处于极度恐慌区间（>=30），"
-                         f"全球风险偏好明显转弱。请提高评分门槛，对纯逻辑推演、缺乏新闻验证的"
-                         f"高位追涨标的更加谨慎。")
+            guidance += (
+                f"\n【VIX风控提示】当前VIX={round(vix_value,1)}，处于极度恐慌区间（>=30），"
+                f"全球风险偏好明显转弱。请提高评分门槛，对纯逻辑推演、缺乏新闻验证的"
+                f"高位追涨标的更加谨慎。"
+            )
         elif vix_value >= 25:
             guidance += f"\n【VIX风控提示】当前VIX={round(vix_value,1)}，处于偏高波动区间（>=25），请相应提高评分门槛。"
+
     return "\n".join(results) + guidance
 
-# ==========================================
-# 4. 昨日美股板块表现 → A股联动封禁
-# ==========================================
+
 def get_us_sector_performance():
-    print("🇺🇸 [阶段2.5] 正在抓取昨日美股板块表现...")
+    """
+    获取最近一个已完成的美股交易日板块涨跌。
+    周一北京时间早盘不能把“周五”误命名成“昨日”，而是明确写最近美股交易日及日期。
+    数据源：Stooq → Yahoo Finance。
+    """
+    print("🇺🇸 [阶段2.5] 正在抓取最近一个美股完整交易日板块表现...")
     sector_map = {
         "XLK": "科技板块（半导体/软件/硬件）→ A股科技/半导体/AI板块",
         "SOXX": "费城半导体指数 → A股半导体/芯片设计/封测板块",
@@ -1532,56 +1807,93 @@ def get_us_sector_performance():
 
     results = []
     try:
-        import urllib.request
-        yesterday = (get_bj_time() - datetime.timedelta(days=1)).strftime('%Y-%m-%d')
-        two_days_ago = (get_bj_time() - datetime.timedelta(days=3)).strftime('%Y-%m-%d')
+        from zoneinfo import ZoneInfo
+        ny_tz = ZoneInfo("America/New_York")
+    except Exception:
+        ny_tz = datetime.timezone.utc
 
-        for ticker, description in sector_map.items():
+    now_ny = datetime.datetime.now(datetime.timezone.utc).astimezone(ny_tz)
+    # 最近一个已经结束的纽约自然日：当日美股若尚未收盘，不纳入“最近完整交易日”。
+    # 周一早盘时自然得到周五。
+    latest_allowed_date = now_ny.date()
+    if (now_ny.hour, now_ny.minute) < (16, 15):
+        latest_allowed_date -= datetime.timedelta(days=1)
+
+    def _stooq_two_days(ticker):
+        start_date = (latest_allowed_date - datetime.timedelta(days=10)).strftime("%Y%m%d")
+        end_date = latest_allowed_date.strftime("%Y%m%d")
+        url = (
+            f"https://stooq.com/q/d/l/?s={ticker.lower()}.us"
+            f"&d1={start_date}&d2={end_date}&i=d"
+        )
+        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            content = resp.read().decode('utf-8', errors='ignore')
+        rows = [r.strip().split(',') for r in content.strip().split('\n') if r.strip()]
+        if len(rows) < 3:
+            return None
+        header = rows[0]
+        data = rows[1:]
+        # 取最后两根完整日线
+        parsed = []
+        for row in data:
+            if len(row) >= 5:
+                try:
+                    d = datetime.datetime.strptime(row[0], "%Y-%m-%d").date()
+                    c = float(row[4])
+                    if d <= latest_allowed_date and c > 0:
+                        parsed.append((d, c))
+                except Exception:
+                    continue
+        return parsed[-2:] if len(parsed) >= 2 else None
+
+    for ticker, description in sector_map.items():
+        data_pair = None
+        source = None
+
+        try:
+            data_pair = _stooq_two_days(ticker)
+            if data_pair:
+                source = "Stooq"
+        except Exception as e:
+            print(f"   ⚠️ {ticker} Stooq失败，切换Yahoo: {str(e)[:100]}")
+
+        if not data_pair:
             try:
-                url = f"https://stooq.com/q/d/l/?s={ticker.lower()}.us&d1={two_days_ago.replace('-','')}&d2={yesterday.replace('-','')}&i=d"
-                req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-                with urllib.request.urlopen(req, timeout=8) as resp:
-                    content = resp.read().decode('utf-8')
+                df_y = _yahoo_chart_to_df(ticker, interval="1d", period_days=15)
+                if not df_y.empty:
+                    dates = pd.to_datetime(df_y["datetime"], errors="coerce")
+                    valid = df_y.loc[dates.dt.date <= latest_allowed_date].copy()
+                    if len(valid) >= 2:
+                        a, b = valid.iloc[-2], valid.iloc[-1]
+                        data_pair = [
+                            (pd.to_datetime(a["datetime"]).date(), float(a["close"])),
+                            (pd.to_datetime(b["datetime"]).date(), float(b["close"])),
+                        ]
+                        source = "Yahoo"
+            except Exception as e:
+                print(f"   ⚠️ {ticker} Yahoo备用也失败: {str(e)[:100]}")
 
-                lines = [l.strip() for l in content.strip().split('\n') if l.strip()]
-                if len(lines) >= 2:
-                    last_line = lines[-1].split(',')
-                    prev_line = lines[-2].split(',') if len(lines) >= 3 else None
+        if data_pair and len(data_pair) >= 2:
+            prev_date, prev_close = data_pair[-2]
+            last_date, close_price = data_pair[-1]
+            pct_chg = round((close_price - prev_close) / prev_close * 100, 2)
+            sign = "📈" if pct_chg > 0 else ("📉" if pct_chg < 0 else "➖")
+            results.append(
+                f"{sign} {ticker}: {pct_chg:+.2f}% — {description} "
+                f"| 最近美股交易日={last_date} | 来源={source}"
+            )
+        else:
+            results.append(f"❓ {ticker}: 最近完整交易日数据抓取失败 — {description}")
 
-                    if len(last_line) >= 5:
-                        close_price = float(last_line[4])
-                        if prev_line and len(prev_line) >= 5:
-                            prev_close = float(prev_line[4])
-                            pct_chg = round((close_price - prev_close) / prev_close * 100, 2)
-                            sign = "📈" if pct_chg > 0 else "📉"
-                            results.append(f"{sign} {ticker}: {pct_chg:+.2f}% — {description}")
-                        else:
-                            results.append(f"➖ {ticker}: 数据不足 — {description}")
-                time.sleep(0.3)
-            except Exception:
-                results.append(f"❓ {ticker}: 抓取失败 — {description}")
+        time.sleep(0.12)
 
-        if results:
-            print(f"✅ 美股板块数据获取完毕，共 {len(results)} 个板块。")
-            return "\n".join(results)
-
-    except Exception as e:
-        print(f"⚠️ 美股板块数据抓取失败: {e}")
+    if results:
+        print(f"✅ 美股板块数据获取完成，共 {len(results)} 个板块。")
+        return "\n".join(results)
 
     return "暂无美股板块数据，请基于宏观新闻推演A股跟随效应。"
 
-US_SECTOR_TO_ASHARE = {
-    "SOXX": ["半导体", "芯片", "封测", "晶圆", "半导体材料", "半导体设备"],
-    "XLK":  ["科技", "AI算力", "光模块", "CPO", "云计算", "数据中心"],
-    "XLE":  ["石油", "煤炭", "天然气", "能源"],
-    "XLF":  ["银行", "保险", "券商", "金融"],
-    "XLV":  ["医药", "创新药", "医疗器械", "CXO"],
-    "XLY":  ["消费", "汽车", "零售", "白酒"],
-    "XLI":  ["军工", "航空", "制造", "机器人"],
-    "XLB":  ["有色金属", "化工", "矿业"],
-    "ARKK": ["AI", "基因", "新能源汽车", "自动驾驶"],
-}
-EMBARGO_THRESHOLD_PCT = -1.5
 
 def parse_sector_embargo(us_sector_text):
     if not us_sector_text or "暂无" in us_sector_text:
@@ -1879,8 +2191,42 @@ def _sina_fetch_daily(code, limit=320):
     return pd.DataFrame(rows)
 
 
+def _fetch_yahoo_daily(code, start_date, end_date):
+    """Yahoo Finance 最终历史日K备用源。"""
+    ticker = str(code).strip().upper()
+    symbol = _to_yahoo_symbol(ticker)
+    df = _yahoo_chart_to_df(symbol, interval="1d", period_days=420)
+    if df.empty:
+        return pd.DataFrame()
+
+    lo = pd.to_datetime(start_date, format="%Y%m%d", errors="coerce")
+    hi = pd.to_datetime(end_date, format="%Y%m%d", errors="coerce")
+    local_dates = pd.to_datetime(df["datetime"], errors="coerce").dt.tz_localize(None).dt.normalize()
+    mask = local_dates.between(lo.normalize(), hi.normalize())
+    df = df.loc[mask].copy()
+    if df.empty:
+        return pd.DataFrame()
+
+    df["trade_date"] = local_dates.loc[df.index].dt.strftime("%Y%m%d")
+    df = df.sort_values("trade_date")
+    return pd.DataFrame({
+        "ts_code": ticker,
+        "trade_date": df["trade_date"].values,
+        "open": df["open"].astype(float).values,
+        "close": df["close"].astype(float).values,
+        "high": df["high"].astype(float).values,
+        "low": df["low"].astype(float).values,
+        "pre_close": None,
+        "change": None,
+        "pct_chg": None,
+        "vol": df["volume"].fillna(0).astype(float).values,
+        "amount": np.nan,
+    })
+
+
 def _fetch_one_fallback(code,start_date,end_date):
     east_err='未执行'
+    sina_err='未执行'
     try:
         df=_eastmoney_fetch_daily(code,start_date,end_date)
         if df is not None and len(df)>=30:
@@ -1888,23 +2234,33 @@ def _fetch_one_fallback(code,start_date,end_date):
         east_err=f"Eastmoney返回{len(df) if df is not None else 0}行"
     except Exception as e:
         east_err=str(e)[:120]
+
     try:
         df=_sina_fetch_daily(code,320)
         if df is not None and not df.empty:
             dates=pd.to_datetime(df['trade_date'],format='%Y%m%d',errors='coerce')
-            lo=pd.to_datetime(start_date,format='%Y%m%d',errors='coerce'); hi=pd.to_datetime(end_date,format='%Y%m%d',errors='coerce')
+            lo=pd.to_datetime(start_date,format='%Y%m%d',errors='coerce')
+            hi=pd.to_datetime(end_date,format='%Y%m%d',errors='coerce')
             df=df[dates.between(lo,hi)].copy()
         if df is not None and len(df)>=30:
             return code,df,'Sina'
-        return code,df if df is not None else pd.DataFrame(),f'Eastmoney={east_err}; Sina不足30行'
+        sina_err=f"Sina返回{len(df) if df is not None else 0}行"
     except Exception as e:
-        return code,pd.DataFrame(),f'Eastmoney={east_err}; Sina={str(e)[:120]}'
+        sina_err=str(e)[:120]
+
+    try:
+        df=_fetch_yahoo_daily(code,start_date,end_date)
+        if df is not None and len(df)>=30:
+            return code,df,'Yahoo'
+        return code,df if df is not None else pd.DataFrame(),f'Eastmoney={east_err}; Sina={sina_err}; Yahoo不足30行'
+    except Exception as e:
+        return code,pd.DataFrame(),f'Eastmoney={east_err}; Sina={sina_err}; Yahoo={str(e)[:120]}'
 
 
 def _fallback_daily_multi_source(codes,start_date,end_date,max_workers=8):
     if not codes: return pd.DataFrame()
-    print(f"   🔁 启动多源K线备用：{len(codes)}只（Eastmoney→新浪）")
-    frames=[]; em=si=fail=0
+    print(f"   🔁 启动多源K线备用：{len(codes)}只（Eastmoney→新浪→Yahoo）")
+    frames=[]; em=si=yh=fail=0
     with ThreadPoolExecutor(max_workers=max_workers) as ex:
         futures={ex.submit(_fetch_one_fallback,c,start_date,end_date):c for c in codes}
         for fut in as_completed(futures):
@@ -1913,10 +2269,13 @@ def _fallback_daily_multi_source(codes,start_date,end_date,max_workers=8):
             except Exception as e:
                 fail+=1; print(f"   ⚠️ 备用K线 {c} 异常: {str(e)[:120]}"); continue
             if df is not None and not df.empty:
-                frames.append(df); em += (src=='Eastmoney'); si += (src=='Sina')
+                frames.append(df)
+                em += (src=='Eastmoney')
+                si += (src=='Sina')
+                yh += (src=='Yahoo')
             else:
                 fail+=1; print(f"   ⚠️ 备用K线 {c} 最终失败: {src}")
-    print(f"   ✅ 备用K线完成：Eastmoney {em}只；新浪 {si}只；失败 {fail}只")
+    print(f"   ✅ 备用K线完成：Eastmoney {em}只；新浪 {si}只；Yahoo {yh}只；失败 {fail}只")
     return pd.concat(frames,ignore_index=True) if frames else pd.DataFrame()
 
 
@@ -2362,6 +2721,12 @@ def generate_ai_report(pool_data, macro_news_text, macro_data_text, us_sector_te
 
     【今日核心国际宏观与金银铜油大宗数据监测】：
     {macro_data_text}
+
+    【⚠️ 宏观行情日期/时间硬规则】：
+    1. 以上大宗与美债/VIX行情必须以数据自身“数据时间”和“当前 session”判断，不得把最近完整日线收盘误写为今日涨跌。
+    2. 北京时间周一早盘对应纽约周日夜盘；若黄金/白银已经有周日夜盘盘中数据，必须优先使用该盘中数据。
+    3. 若盘中数据不可用，只能明确写“最近完整收盘/当前盘中数据暂不可用”，禁止用周五数据冒充周一。
+    4. “今日开盘下跌/上涨”与“上一完整交易日收盘涨跌”必须严格区分。
 
     【昨日美股各板块涨跌】：
     {us_sector_text}
