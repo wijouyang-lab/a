@@ -20,6 +20,20 @@ import time
 import random
 import email.utils
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import xueqiu_client as xq
+
+
+def safe_float(value, default=None):
+    try:
+        if value is None or (isinstance(value, str) and not value.strip()):
+            return default
+        v = str(value).replace(",", "").replace("%", "").strip()
+        if v.lower() in {"nan", "none", "null", "n/a", "na", "-"}:
+            return default
+        x = float(v)
+        return x if pd.notna(x) else default
+    except (TypeError, ValueError):
+        return default
 
 # ==========================================
 # 启动前置校验：AI 凭证
@@ -265,9 +279,10 @@ def _yahoo_current_or_prev_close(ticker):
 def get_latest_price_map():
     """
     持仓现价获取顺序：
-    1) Tushare 实时（主）
-    2) Yahoo Finance 盘中/最近完整收盘（备用）
-    3) 不再用“北京时间昨天”的盲目日期兜底，避免周一误取周日/周五逻辑。
+    1) 雪球（主）
+    2) Tushare 实时
+    3) Yahoo Finance
+    雪球行情作为 Scan/Review 的第一股票行情来源。
     """
     holding_tickers = []
     try:
@@ -276,29 +291,42 @@ def get_latest_price_map():
             df_h = pd.read_csv(log_file)
             active_tags = {'Core_Double_Dragon', 'Sub_Pioneer', 'Core_Dragon'}
             active = df_h[df_h['Tag'].isin(active_tags)]
-            holding_tickers = active['Ticker'].dropna().unique().tolist()
+            holding_tickers = active['Ticker'].dropna().astype(str).str.strip().unique().tolist()
     except Exception:
         pass
 
     price_map = {}
-
+    xq_ok = 0
     if holding_tickers:
         try:
-            bare_codes = [str(t).split('.')[0] for t in holding_tickers]
+            qmap = xq.get_quotes(holding_tickers)
+            for ticker in holding_tickers:
+                sym = xq.normalize_symbol(ticker)
+                q = qmap.get(sym, {})
+                px = safe_float(q.get('current'))
+                if px is not None and px > 0:
+                    price_map[ticker] = px
+                    xq_ok += 1
+            if xq_ok:
+                print(f"✅ 雪球主行情覆盖 {xq_ok}/{len(holding_tickers)} 只持仓")
+        except Exception as e:
+            print(f"⚠️ 雪球主行情失败，将切换 Tushare/Yahoo 备用: {str(e)[:160]}")
+
+    missing = [t for t in holding_tickers if t not in price_map]
+    if missing:
+        try:
+            bare_codes = [str(t).split('.')[0] for t in missing]
             df_rt = ts.get_realtime_quotes(bare_codes)
             if df_rt is not None and not df_rt.empty and 'price' in df_rt.columns:
-                exchange_map = {str(t).split('.')[0]: t for t in holding_tickers}
+                exchange_map = {str(t).split('.')[0]: t for t in missing}
                 for _, row in df_rt.iterrows():
                     code = str(row.get('code', ''))
                     ts_code = exchange_map.get(code)
-                    try:
-                        price = float(row['price'])
-                        if ts_code and price > 0:
-                            price_map[ts_code] = price
-                    except (ValueError, TypeError):
-                        pass
+                    px = safe_float(row.get('price'))
+                    if ts_code and px and px > 0:
+                        price_map[ts_code] = px
         except Exception as e:
-            print(f"⚠️ 实时行情接口失败，将切换 Yahoo 备用: {str(e)[:120]}")
+            print(f"⚠️ Tushare 实时备用失败: {str(e)[:120]}")
 
     missing = [t for t in holding_tickers if t not in price_map]
     if missing:
@@ -313,16 +341,14 @@ def get_latest_price_map():
                 print(f"   ⚠️ Yahoo 备用行情 {ticker} 失败: {str(e)[:120]}")
             time.sleep(0.08)
         if yahoo_ok:
-            print(f"✅ Yahoo Finance 备用行情补齐 {yahoo_ok}/{len(missing)} 只持仓")
+            print(f"✅ Yahoo Finance 最终备用行情补齐 {yahoo_ok}/{len(missing)} 只持仓")
 
     if price_map:
-        source_note = "Tushare实时 + Yahoo备用"
-        print(f"✅ 持仓价格获取完成，覆盖 {len(price_map)}/{len(holding_tickers)} 只（{source_note}）")
+        print(f"✅ 持仓价格获取完成，覆盖 {len(price_map)}/{len(holding_tickers)} 只（雪球主）")
         return price_map
 
-    print("🚨 Tushare 与 Yahoo 均未取得持仓价格，price_map 为空；禁止伪造当前价格。")
+    print("🚨 雪球、Tushare 与 Yahoo 均未取得持仓价格，price_map 为空；禁止伪造当前价格。")
     return {}
-
 
 def pre_scan_portfolio_review(macro_news_text, macro_data_text, price_map):
     log_file = "trade_history.csv"
@@ -604,51 +630,105 @@ def get_stop_loss_hit_warning():
     return '\n\n'.join(parts)+'\n'
 
 def get_top_300_pool():
-    print(f"🔍 [阶段1] 正在拉取最近交易日的A股全市场数据，圈定 Top 300 主力资金池...")
-    df_daily = None
-    trade_date = None
+    """
+    主力资金池：
+    1) 雪球 screener 按成交额 DESC 获取 Top 300（主）
+    2) Tushare daily 作为完整性兜底
+    行业信息仍优先使用 Tushare stock_basic，因为雪球榜单接口未稳定提供统一行业字段。
+    """
+    print("🔍 [阶段1] 正在拉取最近交易日A股 Top 300 主力资金池（雪球主数据源）...")
+    full_pool, codes, trade_date = {}, [], None
 
-    for i in range(1, 8):
-        try_date = (get_bj_time() - datetime.timedelta(days=i)).strftime('%Y%m%d')
-        df_try = pro.daily(trade_date=try_date)
-        if df_try is not None and not df_try.empty:
-            df_daily = df_try
-            trade_date = try_date
-            print(f"   ✅ 找到最近交易日数据: {try_date}")
-            break
+    try:
+        items = xq.get_top_by_amount(300)
+        if items:
+            for item in items:
+                q = item.get("quote") if isinstance(item, dict) and isinstance(item.get("quote"), dict) else item
+                sym = str(q.get("symbol") or q.get("code") or "").upper().strip()
+                if not sym:
+                    continue
+                ts_code = (
+                    f"{sym[2:]}.{sym[:2]}"
+                    if len(sym) >= 8 and sym[:2] in ("SH","SZ","BJ") else sym
+                )
+                name = q.get("name") or ts_code
+                close = safe_float(q.get("current"))
+                if close is None or close <= 0:
+                    continue
+                open_p = safe_float(q.get("open"))
+                if open_p is None:
+                    open_p = close
+                amount = safe_float(q.get("amount"), 0.0)
+                pct = safe_float(q.get("percent"), 0.0)
+                full_pool[ts_code] = {
+                    "Ticker": ts_code,
+                    "Name": str(name),
+                    "Industry": "未知",
+                    "Open": open_p,
+                    "Close": close,
+                    "Amount": amount if amount is not None else 0.0,
+                    "pct_chg": pct if pct is not None else 0.0,
+                }
+            if full_pool:
+                codes = list(full_pool.keys())[:300]
+                # 雪球没有稳定提供统一行业字段，因此只补充名称/行业元数据，不覆盖雪球价格。
+                try:
+                    basic = pro.stock_basic(exchange='', list_status='L', fields='ts_code,name,industry')
+                    if basic is not None and not basic.empty:
+                        name_map = dict(zip(basic['ts_code'], basic['name']))
+                        industry_map = dict(zip(basic['ts_code'], basic['industry']))
+                        for code in codes:
+                            full_pool[code]['Name'] = name_map.get(code, full_pool[code]['Name'])
+                            full_pool[code]['Industry'] = industry_map.get(code, "未知") or "未知"
+                except Exception as e:
+                    print(f"⚠️ 行业元数据补充失败：{str(e)[:120]}")
+                trade_date = get_bj_time().strftime('%Y%m%d')
+                print(f"✅ 雪球成功圈定 {len(full_pool)} 只核心活跃标的。")
         else:
-            print(f"   {try_date} 无数据（非交易日），继续往前找...")
+            print("⚠️ 雪球 Top 300 返回空数据，启动 Tushare 主力池备用。")
+    except Exception as e:
+        print(f"⚠️ 雪球 Top 300 获取失败：{str(e)[:160]}")
 
-    if df_daily is None:
-        print("🚨 连续7天都没有拉取到数据，返回空池。")
-        return {}, [], None
+    if not full_pool:
+        df_daily = None
+        for i in range(1, 8):
+            try_date = (get_bj_time() - datetime.timedelta(days=i)).strftime('%Y%m%d')
+            try:
+                df_try = pro.daily(trade_date=try_date)
+                if df_try is not None and not df_try.empty:
+                    df_daily = df_try
+                    trade_date = try_date
+                    print(f"   ✅ Tushare 备用找到最近交易日数据: {try_date}")
+                    break
+            except Exception:
+                pass
+        if df_daily is None:
+            print("🚨 雪球与 Tushare 均无法获取主力池。")
+            return {}, [], None
 
-    basic = pro.stock_basic(exchange='', list_status='L', fields='ts_code,name,industry')
-    name_map = dict(zip(basic['ts_code'], basic['name']))
-    industry_map = dict(zip(basic['ts_code'], basic.get('industry', ['未知'] * len(basic))))
+        basic = pro.stock_basic(exchange='', list_status='L', fields='ts_code,name,industry')
+        name_map = dict(zip(basic['ts_code'], basic['name']))
+        industry_map = dict(zip(basic['ts_code'], basic['industry']))
+        df_sorted = df_daily.sort_values(by='amount', ascending=False).head(300)
+        for _, row in df_sorted.iterrows():
+            ts_code = row['ts_code']
+            full_pool[ts_code] = {
+                "Ticker": ts_code,
+                "Name": name_map.get(ts_code, ts_code),
+                "Industry": industry_map.get(ts_code, "未知"),
+                "Open": row.get('open', row['close']),
+                "Close": row['close'],
+                "Amount": row.get('amount', 0),
+                "pct_chg": row.get('pct_chg', 0),
+            }
+        codes = [x for x in full_pool.keys()]
+        print(f"✅ Tushare 备用圈定 {len(full_pool)} 只核心活跃标的。")
 
-    df_sorted = df_daily.sort_values(by='amount', ascending=False).head(300)
-    codes = [row['ts_code'] for _, row in df_sorted.iterrows()]
-
-    full_pool = {}
-    for _, row in df_sorted.iterrows():
-        ts_code = row['ts_code']
-        full_pool[ts_code] = {
-            "Ticker": ts_code,
-            "Name": name_map.get(ts_code, ts_code),
-            "Industry": industry_map.get(ts_code, "未知"),
-            "Open": row.get('open', row['close']),
-            "Close": row['close'],
-            "Amount": row['amount'],
-            "pct_chg": row.get('pct_chg', 0),
-        }
-
-    print(f"✅ 成功圈定 {len(full_pool)} 只核心活跃标的（数据日期: {trade_date}）。")
-
+    # 资金流仍由 Tushare 补充；它是策略因子而非雪球实时行情主来源。
     try:
         df_mf = pro.moneyflow(trade_date=trade_date)
         if df_mf is not None and not df_mf.empty:
-            df_mf['main_net'] = df_mf.get('lg_amount', 0) + df_mf.get('net_mf_amount', 0)
+            df_mf['main_net'] = pd.to_numeric(df_mf.get('lg_amount', 0), errors='coerce').fillna(0) + pd.to_numeric(df_mf.get('net_mf_amount', 0), errors='coerce').fillna(0)
             mf_map = dict(zip(df_mf['ts_code'], df_mf['main_net']))
             for ts_code in full_pool:
                 full_pool[ts_code]['主力净流入(万元)'] = mf_map.get(ts_code, 0)
@@ -664,14 +744,15 @@ def get_top_300_pool():
     except Exception as e:
         print(f"⚠️ 板块资金流向获取失败: {e}")
 
-    return full_pool, codes, trade_date
+    return full_pool, codes[:300], trade_date
 
 
 # ==========================================
 # 2. 【新版】重要人物讲话 + 关键经济数据 + 宏观状态机
 # ==========================================
 # 数据职责：
-# - Tushare：A股行情/K线/资金流/基本信息
+# - 雪球：A股实时行情/主力活跃榜/K线/个股动态/估值（第一股票数据源）
+# - Tushare：资金流/行业元数据与雪球失败时的行情兜底
 # - 中国宏观：国家统计局/人民银行官方网页
 # - 美国宏观：BLS + BEA，FRED作为PCE兜底
 # - 重要人物：新闻RSS + Federal Reserve官方讲话页
@@ -2067,6 +2148,31 @@ def get_stock_news(ticker_code: str, ticker_name: str, max_items: int = 5) -> li
     news_entries = []
     code = ticker_code.split('.')[0]
 
+    # 雪球新闻/动态第一来源：按股票代码+名称搜索；失败后再走原有公告/新闻源。
+    try:
+        q_text = f"{code} {ticker_name}".strip()
+        statuses = xq.search_statuses(q_text, count=max_items * 3)
+        for st in statuses:
+            title = str(
+                st.get('title') or st.get('description') or st.get('text') or st.get('content') or ''
+            ).strip()
+            created = st.get('created_at') or st.get('createdAt') or st.get('timestamp')
+            dt = None
+            try:
+                if created is not None:
+                    num = float(created)
+                    if num > 10**12:
+                        num /= 1000
+                    dt = datetime.datetime.fromtimestamp(num, tz=BEIJING_TZ)
+            except Exception:
+                dt = None
+            tag = _get_stock_news_time_tag(dt)
+            if title and tag:
+                stamp = dt.strftime('%m-%d %H:%M') if dt else '时间未知'
+                news_entries.append((dt, f"{tag}[雪球] [{stamp}] {re.sub(r'<[^>]+>', ' ', title)}"))
+    except Exception as e:
+        print(f"⚠️ 雪球个股动态失败 [{ticker_code}]: {str(e)[:100]}")
+
     _HEADERS = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
                 'Referer': 'https://www.eastmoney.com/'}
 
@@ -2227,6 +2333,38 @@ def enrich_pool_with_news(pool_data: list) -> list:
 # ==========================================
 # 6. 定向计算技术指标
 # ==========================================
+def _xq_history_one(code, count=260):
+    """雪球主日线。返回标准字段，失败则空表交给 Tushare/Eastmoney/... 兜底。"""
+    try:
+        df = xq.get_kline(code, count=count, period="day")
+        if df is not None and not df.empty:
+            return code, df, None
+        return code, pd.DataFrame(), "雪球返回空K线"
+    except Exception as e:
+        return code, pd.DataFrame(), str(e)[:140]
+
+
+def _xq_history_multi(codes, count=260, max_workers=5):
+    """雪球日线批量抓取。控制并发以降低 403/限频风险。"""
+    if not codes:
+        return pd.DataFrame(), []
+    print(f"   ☁️ 启动雪球主日线：{len(codes)}只")
+    frames, failed = [], []
+    with ThreadPoolExecutor(max_workers=max_workers) as ex:
+        futures = {ex.submit(_xq_history_one, c, count): c for c in codes}
+        for i, fut in enumerate(as_completed(futures), 1):
+            code, df, err = fut.result()
+            if df is not None and not df.empty:
+                frames.append(df)
+            else:
+                failed.append(code)
+                print(f"   ⚠️ 雪球K线失败 {code}: {err}")
+            if i % 50 == 0 or i == len(futures):
+                print(f"   ☁️ 雪球K线进度 {i}/{len(futures)}")
+    out = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+    return out, failed
+
+
 def _tushare_daily_batch(batch, start_date, end_date, attempts=3):
     """Tushare daily 批量请求：3次重试+指数退避。"""
     last_err=None
@@ -2410,9 +2548,20 @@ def _daily_to_weekly(df_daily):
 def calc_tech_indicators(full_pool, codes, trade_date):
     print("⚙️ [阶段3] 正在拉取日线K线并由真实日线计算周线/技术指标...")
     start_hist=(get_bj_time()-datetime.timedelta(days=220)).strftime('%Y%m%d')
-    df_hist,daily_failed_codes=_tushare_history_batches(codes,trade_date,start_hist,batch_size=12)
-    if daily_failed_codes:
-        df_fallback=_fallback_daily_multi_source(daily_failed_codes,start_hist,trade_date,max_workers=8)
+    # 雪球主K线 → Tushare → Eastmoney → 新浪 → Yahoo
+    df_hist_xq, xq_failed_codes = _xq_history_multi(codes, count=260, max_workers=5)
+    if not df_hist_xq.empty:
+        df_hist_xq['ts_code'] = df_hist_xq['ts_code'].astype(str).str.strip()
+        df_hist_xq['trade_date'] = df_hist_xq['trade_date'].astype(str).str.replace('-','',regex=False)
+    df_hist_ts, ts_failed_codes = _tushare_history_batches(xq_failed_codes or [],trade_date,start_hist,batch_size=12)
+    if not df_hist_xq.empty and not df_hist_ts.empty:
+        df_hist=pd.concat([df_hist_xq,df_hist_ts],ignore_index=True)
+    elif not df_hist_xq.empty:
+        df_hist=df_hist_xq.copy()
+    else:
+        df_hist=df_hist_ts.copy()
+    if ts_failed_codes:
+        df_fallback=_fallback_daily_multi_source(ts_failed_codes,start_hist,trade_date,max_workers=8)
         if not df_fallback.empty:
             df_hist=pd.concat([df_hist,df_fallback],ignore_index=True) if not df_hist.empty else df_fallback
     if not df_hist.empty:
@@ -2733,16 +2882,30 @@ def enrich_pool_with_public_valuation(pool_data, limit=50):
         bare=code.split(".")[0]
         market="1" if code.endswith(".SH") else "0"
         try:
-            url=(f"https://push2.eastmoney.com/api/qt/stock/get?secid={market}.{bare}"
-                 "&fields=f57,f58,f162,f167")
-            raw=_http_get_text(url,timeout=6,retries=1,headers={"Referer":"https://quote.eastmoney.com/","User-Agent":"Mozilla/5.0"},log_failures=False)
-            data=json.loads(raw or "{}").get("data") or {}
-            pe=data.get("f162"); pb=data.get("f167")
-            item["PE_TTM"]=(float(pe) if isinstance(pe,(int,float)) and pe>=0 else None)
-            item["PB"]=(float(pb) if isinstance(pb,(int,float)) and pb>=0 else None)
+            # 雪球详情接口：主估值来源。批量报价接口没有稳定的 PE/PB 字段，
+            # 因此这里使用 detail quote，而不是 batch quote。
+            qx = xq.get_quote(code, detail=True)
+            pe = qx.get("pe_ttm") if qx else None
+            pb = qx.get("pb") if qx else None
+            pe_f = float(pe) if pe is not None else None
+            pb_f = float(pb) if pb is not None else None
+            if pe_f is not None or pb_f is not None:
+                item["PE_TTM"] = pe_f if pe_f is not None and pe_f >= 0 else None
+                item["PB"] = pb_f if pb_f is not None and pb_f >= 0 else None
+            else:
+                raise RuntimeError("雪球估值字段为空")
         except Exception:
-            valuation_failures += 1
-            item["PE_TTM"]=item.get("PE_TTM"); item["PB"]=item.get("PB")
+            try:
+                url=(f"https://push2.eastmoney.com/api/qt/stock/get?secid={market}.{bare}"
+                     "&fields=f57,f58,f162,f167")
+                raw=_http_get_text(url,timeout=6,retries=1,headers={"Referer":"https://quote.eastmoney.com/","User-Agent":"Mozilla/5.0"},log_failures=False)
+                data=json.loads(raw or "{}").get("data") or {}
+                pe=data.get("f162"); pb=data.get("f167")
+                item["PE_TTM"]=(float(pe) if isinstance(pe,(int,float)) and pe>=0 else None)
+                item["PB"]=(float(pb) if isinstance(pb,(int,float)) and pb>=0 else None)
+            except Exception:
+                valuation_failures += 1
+                item["PE_TTM"]=item.get("PE_TTM"); item["PB"]=item.get("PB")
     for item in pool_data:
         pe=item.get("PE_TTM"); pb=item.get("PB"); score=0; labels=[]
         if isinstance(pe,(int,float)) and pe>0:
