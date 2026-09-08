@@ -255,12 +255,54 @@ def get_kline(symbol, count=260, period="day"):
         return pd.DataFrame()
 
 
-def get_daily_ohlc_on_date(symbol, target_date):
-    df = get_kline(symbol, count=30, period="day")
-    if df.empty:
+def _beijing_today_date():
+    return datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=8))).date()
+
+
+def _get_today_ohlc_from_quote(symbol):
+    """今日盘后优先从雪球详情报价读取完整 OHLC。
+
+    详情接口里的 open/high/low/current 属于当前交易日；当日盘后它比历史日K更可靠，
+    可避免日K接口在收盘后短暂返回上一交易日数据的情况。
+    """
+    try:
+        q = get_quote(symbol, detail=True) or {}
+        vals = {
+            "open": q.get("open"),
+            "high": q.get("high"),
+            "low": q.get("low"),
+            "close": q.get("current"),
+        }
+        def _positive(v):
+            try:
+                return v is not None and float(v) > 0
+            except Exception:
+                return False
+        if not all(_positive(v) for v in vals.values()):
+            return {}
+        return {
+            **{k: float(v) for k, v in vals.items()},
+            "amount": q.get("amount"),
+            "vol": q.get("volume") or q.get("vol"),
+            "pct_chg": q.get("percent") if q.get("percent") is not None else q.get("pct_chg"),
+        }
+    except Exception:
         return {}
+
+
+def get_daily_ohlc_on_date(symbol, target_date):
     target = pd.to_datetime(target_date, errors="coerce")
     if pd.isna(target):
+        return {}
+
+    # 今天的数据优先走详情报价；不要先命中可能尚未刷新/错位的历史日K。
+    if target.date() == _beijing_today_date():
+        today = _get_today_ohlc_from_quote(symbol)
+        if today:
+            return today
+
+    df = get_kline(symbol, count=30, period="day")
+    if df.empty:
         return {}
     row = df[pd.to_datetime(df["trade_date"], format="%Y%m%d", errors="coerce") == target.normalize()]
     if row.empty:

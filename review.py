@@ -888,27 +888,90 @@ def _get_yahoo_exact_daily_ohlc(ticker, target_date_str):
     return None
 
 
+def _is_today_quote_timestamp(value, today_str):
+    """尽可能验证雪球实时报价所属交易日；字段缺失时由盘后调用方负责日期约束。"""
+    if value in (None, '', 'nan', 'NaN'):
+        return None
+    try:
+        if isinstance(value, (int, float)):
+            v = float(value)
+            unit = 'ms' if abs(v) > 10**11 else 's'
+            dt = pd.to_datetime(v, unit=unit, utc=True).tz_convert('Asia/Shanghai')
+        else:
+            dt = pd.to_datetime(str(value), errors='coerce')
+            if pd.isna(dt):
+                return None
+            if getattr(dt, 'tzinfo', None) is None:
+                dt = dt.tz_localize('Asia/Shanghai')
+            else:
+                dt = dt.tz_convert('Asia/Shanghai')
+        return dt.strftime('%Y-%m-%d') == str(today_str)[:10]
+    except Exception:
+        return None
+
+
+def _get_xueqiu_today_quote_ohlc(ticker, today_str):
+    """盘后优先使用雪球实时/详情报价中的当日 OHLC。
+
+    这是解决“日K接口偶发返回上一交易日、但详情页已经有当日收盘”的关键层。
+    只接受 open/high/low/current 均为正数；若接口提供时间字段则必须匹配 today_str。
+    """
+    try:
+        q = xq.get_quote(ticker, detail=True) or {}
+        open_px = safe_float(q.get('open'))
+        high_px = safe_float(q.get('high'))
+        low_px = safe_float(q.get('low'))
+        close_px = safe_float(q.get('current'))
+        if not all(v is not None and v > 0 for v in (open_px, high_px, low_px, close_px)):
+            return None
+
+        # 雪球不同版本字段名不完全固定，兼容多个时间字段。
+        date_fields = [q.get(k) for k in ('timestamp', 'time', 'date', 'trade_date')]
+        date_checks = [_is_today_quote_timestamp(v, today_str) for v in date_fields]
+        known_checks = [v for v in date_checks if v is not None]
+        if known_checks and not any(known_checks):
+            return None
+
+        return {
+            'open': open_px, 'high': high_px, 'low': low_px, 'close': close_px,
+            'source': 'Xueqiu/quote-detail'
+        }
+    except Exception as e:
+        print(f"⚠️ 雪球当日详情报价失败 [{ticker}]：{str(e)[:120]}")
+        return None
+
+
 def get_exact_today_ohlc(ticker, today_str):
-    """今日盘后结算专用：雪球精确日期 → Yahoo 精确日期 → 实时兜底。"""
+    """今日盘后结算专用：雪球当日详情报价 → 雪球精确日K → Yahoo精确日K。
+
+    核心规则：对于 today_str，绝不优先相信可能缺少最新一根的历史日K；
+    雪球详情页的当日 open/high/low/current 才是盘后“今日实际行情”的首选。
+    """
+    # 1) 先取雪球详情报价，避免日K偶发静默返回上一交易日。
+    quote_ohlc = _get_xueqiu_today_quote_ohlc(ticker, today_str)
+    if quote_ohlc:
+        return quote_ohlc
+
     out = {'open': None, 'low': None, 'close': None, 'source': None}
-    # 1) 已加载的雪球/备用历史K线，必须 exact。
+
+    # 2) 已加载的雪球/备用历史K线，必须 exact。
     for fld in ('open', 'low', 'close'):
         out[fld] = get_price_on_date(ticker, today_str, field=fld, exact=True)
     if all(out[k] is not None for k in ('open','low','close')):
         out['source'] = 'Xueqiu/market-kline'
         return out
 
-    # 2) Yahoo 精确日线。
+    # 3) Yahoo 精确日线。
     yh = _get_yahoo_exact_daily_ohlc(ticker, today_str)
     if yh:
-        for fld in ('open','low','close'):
+        for fld in ('open', 'low', 'close'):
             if out[fld] is None:
                 out[fld] = yh.get(fld)
         if all(out[k] is not None for k in ('open','low','close')):
             out['source'] = 'Yahoo'
             return out
 
-    # 3) 最后一层只用于 open/last，不允许把昨日 close 当今日 close。
+    # 4) 最后一层实时兜底：仍然禁止使用前一交易日 close 冒充今日 close。
     try:
         live_open, live_last = get_live_quote(ticker)
         if out['open'] is None:
@@ -918,7 +981,7 @@ def get_exact_today_ohlc(ticker, today_str):
         if out['low'] is None and out['open'] is not None and out['close'] is not None:
             out['low'] = min(out['open'], out['close'])
         if out['open'] is not None or out['close'] is not None:
-            out['source'] = 'Yahoo实时兜底'
+            out['source'] = '实时详情兜底'
     except Exception:
         pass
     return out
@@ -979,6 +1042,40 @@ def _previous_stop_method_from_group(group):
     except Exception:
         pass
     return ''
+
+
+def build_recommendation_history(group):
+    """构造当前持仓生命周期内每次 Scan 推荐的日期与推荐/建仓价格。"""
+    records = []
+    try:
+        seen_dates = set()
+        for _, r in group.sort_values('Date').iterrows():
+            dt = pd.to_datetime(r.get('Date'), errors='coerce')
+            if pd.isna(dt):
+                continue
+            date_str = dt.strftime('%Y-%m-%d')
+            if date_str in seen_dates:
+                continue
+            tag = clean_text(r.get('Tag'))
+            if tag not in {'Core_Double_Dragon', 'Core_Dragon', 'Sub_Pioneer'}:
+                continue
+            price = safe_float(r.get('Open_Price'))
+            if price is not None and price > 0:
+                price_label = f'¥{price:.2f}'
+            else:
+                price = safe_float(r.get('Close_Price'))
+                price_label = f'¥{price:.2f}（收盘价兜底）' if price is not None and price > 0 else '价格数据不足'
+            records.append((date_str, price_label))
+            seen_dates.add(date_str)
+    except Exception:
+        return []
+    return records
+
+
+def format_recommendation_history(records):
+    if not records:
+        return '暂无可确认的推荐记录'
+    return '；'.join(f'{i+1}. {d} @ {p}' for i, (d, p) in enumerate(records))
 
 
 def build_attribution(active_item):
@@ -1123,6 +1220,7 @@ def build_attribution_html(active_list, expired_list):
   <div style='font-weight:bold;color:#263238;margin-bottom:8px;'>{'🟢' if state == '持仓中' else '📁'} {state}：{clean_text(item.get('名称'))} ({clean_text(item.get('代码'))})</div>
   <div><b>实际盈亏：</b><span style='font-weight:bold;color:{pnl_color};'>{pnl_text}</span></div>
   {market_line}
+  <div><b>推荐记录：</b>共 {int(item.get('推荐次数', item.get('系统连续推荐次数', 0)) or 0)} 次 | {clean_text(item.get('推荐历史')) or '暂无可确认的推荐记录'}</div>
   <div><b>{reason_title}：</b>{reason_body}</div>
   <div><b>当前移动止损：</b>{stop_price}　<b>止损方法：</b>{stop_method}</div>
   <div><b>风控动作：</b>{attr['风控动作指令']}</div>
@@ -1415,6 +1513,8 @@ for ticker, group in recent_picks.groupby('Ticker'):
     latest_row = group.iloc[-1]
     rec_date_str = first_row['Date'].strftime('%Y-%m-%d')
     latest_date_str = latest_row['Date'].strftime('%Y-%m-%d')
+    recommendation_history = build_recommendation_history(group)
+    recommendation_count = len(recommendation_history)
     is_new_today = latest_date_str == today_str
     t1_locked = is_new_today
     days_held = max(0, (get_bj_time().replace(tzinfo=None) - first_row['Date']).days)
@@ -1567,6 +1667,7 @@ for ticker, group in recent_picks.groupby('Ticker'):
         '代码': ticker, '名称': first_row.get('Name', ticker), '标签': latest_tag, '推荐评分': score_str,
         '持股周期建议': hold_period_str, '止损价': exec_stop if exec_stop is not None else 'N/A',
         '首次推荐日': rec_date_str, '首次推荐价': rec_price,
+        '推荐次数': recommendation_count, '推荐历史': format_recommendation_history(recommendation_history),
         '今日开盘价': round(float(today_open), 2) if today_open is not None else 'N/A',
         '现价': float(today_close), '今日行情来源': today_ohlc.get('source','未知'), '持仓天数': days_held, '剩余天数': '—',
         '当前盈亏(%)': cur_pnl, '今日新增': '是' if is_new_today else '否',
@@ -1636,6 +1737,7 @@ if _missing_today:
             '止损价': _sl,
             '首次推荐日': today_str,
             '首次推荐价': _open,
+            '推荐次数': 1, '推荐历史': f'1. {today_str} @ ¥{_open:.2f}',
             '今日开盘价': _open,
             '现价': _cur,
             '持仓天数': 0,
@@ -1703,7 +1805,8 @@ prompt = f'''
 【逐笔归因与止损方法——程序已经直接生成到唯一的持仓卡片中】
 1. 每一只股票必须写盈利原因或亏损原因，并引用已有数据事实。
 2. 每一只股票必须明确止损方法 Stop_Method，并优先写明 MA20/MA50/ATR/MACD/KDJ 的实际组合。
-3. 每一只股票必须给出具体风控动作指令。
+3. 每一只股票必须保留并引用程序提供的“推荐记录”，明确首次推荐日期/价格，以及本轮一共推荐几次、每次推荐日期和当时价格；不要自行推测缺失记录。
+4. 每一只股票必须给出具体风控动作指令。
 4. 不要再输出单独的“逐笔盈亏归因与止损方法”区块。也不要重复输出“持仓中 - 风控纪律核对单”；持仓卡片已经由程序直接生成。你只负责总体评价、策略洞察和已关闭交易的文字补充。
 
 【A股T+1交易规则——必须严格遵守】
@@ -1754,7 +1857,7 @@ review_log = "review_history.csv"
 archive_cols = [
     "Review_Date","Ticker","Name","Tag","Rec_Date","Rec_Price","Cur_Price","Days_Held",
     "PnL_Pct","Maturity_PnL","Hold_Period","Stop_Loss","Stop_Method","Trail_Stop",
-    "MA20","MA50","ATR_Pct","Rec_Count","Status","Score","PE_TTM","EPS_TTM","PB",
+    "MA20","MA50","ATR_Pct","Rec_Count","Rec_History","Status","Score","PE_TTM","EPS_TTM","PB",
     "Earnings_Growth","ROE","估值评分","估值结论",
     "盈利原因","亏损原因","风控动作指令",
     "Scan_Version","Scan_Version_Start",
@@ -1788,7 +1891,7 @@ try:
             "Cur_Price": item.get('现价',''), "Days_Held": item.get('持仓天数',0), "PnL_Pct": item.get('当前盈亏(%)',''),
             "Maturity_PnL": '', "Hold_Period": '动态持有', "Stop_Loss": item.get('止损价',''),
             "Stop_Method": item.get('Stop_Method',''), "Trail_Stop": item.get('Trail_Stop',''), "MA20": item.get('MA20',''),
-            "MA50": item.get('MA50',''), "ATR_Pct": item.get('ATR_Pct',''), "Rec_Count": item.get('系统连续推荐次数',''),
+            "MA50": item.get('MA50',''), "ATR_Pct": item.get('ATR_Pct',''), "Rec_Count": item.get('推荐次数', item.get('系统连续推荐次数','')), "Rec_History": item.get('推荐历史',''),
             "Status": 'T+1止损待执行' if _status == 'T+1止损待执行' else '持仓中', "Score": item.get('推荐评分',''),
             "PE_TTM": item.get('PE_TTM',''), "EPS_TTM": item.get('EPS_TTM',''), "PB": item.get('PB',''),
             "Earnings_Growth": item.get('Earnings_Growth',''), "ROE": item.get('ROE',''),
@@ -1807,7 +1910,7 @@ try:
             "Cur_Price": item.get('期满日价格',''), "Days_Held": item.get('持仓天数',0),
             "PnL_Pct": item.get('期满日盈亏(%)',''), "Maturity_PnL": '', "Hold_Period": '动态持有',
             "Stop_Loss": item.get('止损价',''), "Stop_Method": item.get('Stop_Method',''), "Trail_Stop": item.get('止损价',''),
-            "MA20": '', "MA50": '', "ATR_Pct": item.get('ATR_Pct',''), "Rec_Count": item.get('系统连续推荐次数',''),
+            "MA20": '', "MA50": '', "ATR_Pct": item.get('ATR_Pct',''), "Rec_Count": item.get('推荐次数', item.get('系统连续推荐次数','')), "Rec_History": item.get('推荐历史',''),
             "Status": item.get('结算类型','止损触发清仓'), "Score": item.get('推荐评分',''), "PE_TTM": '', "EPS_TTM": '',
             "PB": '', "Earnings_Growth": '', "ROE": '', "估值评分": '', "估值结论": '',
             "盈利原因": item.get('盈利原因',''), "亏损原因": item.get('亏损原因',''), "风控动作指令": item.get('风控动作指令',''),
