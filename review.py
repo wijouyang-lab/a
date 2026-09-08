@@ -17,7 +17,6 @@ import csv
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 import anthropic
-import tushare as ts
 import sys
 import xueqiu_client as xq
 
@@ -68,7 +67,7 @@ def safe_int(value, default=None):
 # ==========================================
 # 环境变量校验
 # ==========================================
-_missing_env = [k for k in ("CLAWSOCKET_API_KEY", "CLAWSOCKET_BASE_URL", "TUSHARE_TOKEN") if not os.environ.get(k)]
+_missing_env = [k for k in ("CLAWSOCKET_API_KEY", "CLAWSOCKET_BASE_URL") if not os.environ.get(k)]
 if _missing_env:
     print(f"致命错误：未检测到环境变量 {', '.join(_missing_env)}！")
     sys.exit(1)
@@ -89,34 +88,26 @@ if bj_hour < 15:
 TARGET_MODEL = 'claude-opus-4-8'
 print("启动 A 股盘后复盘引擎（终极可靠版）...")
 
-ts.set_token(os.environ.get("TUSHARE_TOKEN"))
-pro = ts.pro_api()
 
 # ==========================================
 # 1. 辅助函数
 # ==========================================
 
 def get_live_quote(ticker):
-    """
-    Review 当前价格第一来源：雪球 detail quote。
-    失败后才使用 Tushare realtime。
-    """
+    """Review 当前价格：雪球第一；失败后只允许 Yahoo 备用，不使用 Tushare。"""
     try:
         q = xq.get_quote(ticker, detail=True)
         if q:
             return safe_float(q.get('open')), safe_float(q.get('current'))
     except Exception as e:
-        print(f"⚠️ 雪球实时行情失败 [{ticker}]，切换 Tushare: {str(e)[:120]}")
+        print(f"⚠️ 雪球实时行情失败 [{ticker}]：{str(e)[:120]}")
     try:
-        bare_code = ticker.split('.')[0] if '.' in ticker else ticker
-        df_rt = ts.get_realtime_quotes(bare_code)
-        if df_rt is None or df_rt.empty:
-            return None, None
-        row = df_rt.iloc[0]
-        return safe_float(row.get('open')), safe_float(row.get('price'))
+        y = _yahoo_intraday_snapshot(ticker)
+        if y:
+            return safe_float(y.get('open')), safe_float(y.get('close'))
     except Exception as e:
-        print(f"⚠️ Tushare 实时行情失败 [{ticker}]: {str(e)[:120]}")
-        return None, None
+        print(f"⚠️ Yahoo 实时行情备用失败 [{ticker}]：{str(e)[:120]}")
+    return None, None
 
 def _ensure_table_columns(log_file):
     """
@@ -265,7 +256,7 @@ def supplement_ashare_stocks_from_pending():
                 continue
             df_pending['Ticker'] = df_pending['Ticker'].astype(str).str.strip()
 
-            # 获取目标交易日 OHLC：雪球第一，Tushare 第二。
+            # 获取目标交易日 OHLC：雪球第一；失败后使用 Yahoo 精确日期备用。
             open_map, low_map, close_map = {}, {}, {}
             for ticker_seed in df_pending['Ticker'].astype(str).str.strip().tolist():
                 if not ticker_seed:
@@ -284,33 +275,17 @@ def supplement_ashare_stocks_from_pending():
 
             missing_pending_codes = [
                 t for t in df_pending['Ticker'].astype(str).str.strip().tolist()
-                if t and (t not in open_map or t not in close_map)
+                if t and (t not in open_map or t not in close_map or t not in low_map)
             ]
-            if missing_pending_codes:
-                for offset in range(0, 5):
-                    try_date = (
-                        datetime.datetime.strptime(file_date_str, "%Y%m%d")
-                        - datetime.timedelta(days=offset)
-                    ).strftime('%Y%m%d')
-                    try:
-                        df_try = pro.daily(
-                            ts_code=",".join(sorted(set(missing_pending_codes))),
-                            start_date=try_date,
-                            end_date=try_date,
-                            fields='ts_code,open,high,low,close'
-                        )
-                        if df_try is not None and not df_try.empty:
-                            if is_today and try_date != file_date_str:
-                                continue
-                            for _, rr in df_try.iterrows():
-                                code = str(rr.get('ts_code', '')).strip()
-                                if code:
-                                    if code not in open_map: open_map[code] = rr.get('open')
-                                    if code not in low_map: low_map[code] = rr.get('low')
-                                    if code not in close_map: close_map[code] = rr.get('close')
-                            break
-                    except Exception:
-                        pass
+            for _ticker in missing_pending_codes:
+                try:
+                    y = _get_yahoo_exact_daily_ohlc(_ticker, datetime.datetime.strptime(file_date_str, "%Y%m%d").strftime("%Y-%m-%d"))
+                    if y:
+                        if _ticker not in open_map: open_map[_ticker] = y.get('open')
+                        if _ticker not in low_map: low_map[_ticker] = y.get('low')
+                        if _ticker not in close_map: close_map[_ticker] = y.get('close')
+                except Exception as e:
+                    print(f"   ⚠️ Yahoo目标日OHLC备用失败 {_ticker}: {str(e)[:100]}")
 
             # 每个 pending 文件处理前重新读取账本，避免同一批次重复写入
             df_existing = pd.DataFrame()
@@ -372,25 +347,6 @@ def supplement_ashare_stocks_from_pending():
                 open_price = open_map.get(ticker)
                 low_price = low_map.get(ticker)
                 close_price = close_map.get(ticker)
-
-                # 单独查询目标交易日
-                if open_price is None or low_price is None or close_price is None:
-                    try:
-                        df_single = pro.daily(
-                            ts_code=ticker,
-                            start_date=file_date_str,
-                            end_date=file_date_str,
-                            fields='ts_code,open,high,low,close'
-                        )
-                        if df_single is not None and not df_single.empty:
-                            if open_price is None:
-                                open_price = float(df_single.iloc[0]['open'])
-                            if low_price is None:
-                                low_price = float(df_single.iloc[0]['low'])
-                            if close_price is None:
-                                close_price = float(df_single.iloc[0]['close'])
-                    except Exception:
-                        pass
 
                 # 今天：只有拿不到今日 daily 时才允许实时行情兜底
                 if (open_price is None or close_price is None or low_price is None) and is_today:
@@ -734,25 +690,27 @@ for _ticker in all_tickers:
         xq_failed.append(_ticker)
 
 df_hist_all = pd.concat(df_hist_parts, ignore_index=True) if df_hist_parts else pd.DataFrame()
+
+# 雪球失败的历史K线：使用Yahoo作为备用，绝不使用Tushare。
 if xq_failed:
-    try:
-        _df_ts = pro.daily(
-            ts_code=",".join(xq_failed),
-            start_date=start_hist,
-            end_date=end_hist,
-            fields='ts_code,trade_date,open,high,low,close'
-        )
-        if _df_ts is not None and not _df_ts.empty:
-            df_hist_all = pd.concat([df_hist_all, _df_ts], ignore_index=True) if not df_hist_all.empty else _df_ts
-    except Exception as _e:
-        print(f"⚠️ Tushare 历史行情备用失败：{str(_e)[:120]}")
+    for _ticker in xq_failed:
+        try:
+            _symbol = _to_yahoo_symbol(_ticker)
+            _df_y = _yahoo_chart_to_df(_symbol, interval="1d", period_days=90)
+            if _df_y is not None and not _df_y.empty:
+                _df_y = _df_y.copy()
+                _df_y['ts_code'] = _ticker
+                _df_y['trade_date'] = pd.to_datetime(_df_y['datetime']).dt.strftime('%Y%m%d')
+                df_hist_all = pd.concat([df_hist_all, _df_y[['ts_code','trade_date','open','high','low','close']]], ignore_index=True) if not df_hist_all.empty else _df_y[['ts_code','trade_date','open','high','low','close']]
+        except Exception as _e:
+            print(f"⚠️ Yahoo历史K线备用失败 {_ticker}: {str(_e)[:120]}")
 
 if not df_hist_all.empty:
     df_hist_all['ts_code'] = df_hist_all['ts_code'].astype(str).str.strip()
     df_hist_all['trade_date'] = df_hist_all['trade_date'].astype(str).str.replace('-', '', regex=False)
     df_hist_all = df_hist_all.drop_duplicates(['ts_code','trade_date'], keep='last').sort_values(['ts_code','trade_date'])
 
-# 今日价格：雪球 batch 第一；缺失再用 Tushare。
+# 今日价格：雪球 batch 第一；缺失后使用逐股 Yahoo 快照。
 trade_date = get_bj_time().strftime('%Y%m%d')
 price_map_today = {}
 try:
@@ -766,20 +724,13 @@ except Exception as _e:
     print(f"⚠️ 雪球今日价格批量失败：{str(_e)[:120]}")
 
 _missing_today = [t for t in all_tickers if t not in price_map_today]
-if _missing_today:
+for _ticker in _missing_today:
     try:
-        df_today = pro.daily(trade_date=trade_date, fields='ts_code,close')
-        if df_today is None or df_today.empty:
-            prev_date = (get_bj_time() - datetime.timedelta(days=1)).strftime('%Y%m%d')
-            df_today = pro.daily(trade_date=prev_date, fields='ts_code,close')
-        if df_today is not None and not df_today.empty:
-            for _, rr in df_today.iterrows():
-                code = str(rr.get('ts_code','')).strip()
-                px = safe_float(rr.get('close'))
-                if code in _missing_today and px is not None:
-                    price_map_today[code] = px
+        y = _yahoo_intraday_snapshot(_ticker)
+        if y and safe_float(y.get('close')) is not None:
+            price_map_today[_ticker] = safe_float(y.get('close'))
     except Exception as _e:
-        print(f"⚠️ Tushare 今日价格备用失败：{str(_e)[:120]}")
+        print(f"⚠️ Yahoo今日价格备用失败 {_ticker}：{str(_e)[:100]}")
 
 # ==========================================
 # 5. 辅助函数
@@ -857,13 +808,13 @@ def _get_yahoo_exact_daily_ohlc(ticker, target_date_str):
 
 
 def get_exact_today_ohlc(ticker, today_str):
-    """今日盘后结算专用：Tushare 精确日期 → Yahoo 精确日期 → 实时兜底。"""
+    """今日盘后结算专用：雪球精确日期 → Yahoo 精确日期 → 实时兜底。"""
     out = {'open': None, 'low': None, 'close': None, 'source': None}
-    # 1) 已加载的 Tushare 历史K线，必须 exact。
+    # 1) 已加载的雪球/备用历史K线，必须 exact。
     for fld in ('open', 'low', 'close'):
         out[fld] = get_price_on_date(ticker, today_str, field=fld, exact=True)
     if all(out[k] is not None for k in ('open','low','close')):
-        out['source'] = 'Tushare'
+        out['source'] = 'Xueqiu/market-kline'
         return out
 
     # 2) Yahoo 精确日线。
