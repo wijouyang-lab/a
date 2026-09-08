@@ -40,6 +40,7 @@ jobs:
       - name: 运行A股盘前扫描
         env:
           TUSHARE_TOKEN: ${{ secrets.TUSHARE_TOKEN }}
+          XUEQIU_COOKIE: ${{ secrets.XUEQIU_COOKIE }}
           TARGET_EMAILS: ${{ secrets.TARGET_EMAILS }}
           EMAIL_ACCOUNT: ${{ secrets.EMAIL_ACCOUNT }}
           EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
