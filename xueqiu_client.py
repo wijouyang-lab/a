@@ -5,7 +5,7 @@
 - K线：雪球 chart/kline
 - 活跃榜：雪球 screener，按成交额排序
 - Cookie：优先使用 XUEQIU_COOKIE；否则自动访问雪球首页/股票页预热匿名 Cookie
-- 设计目标：雪球失败时返回空值，由调用方继续走原有 Tushare/Eastmoney/Sina/Yahoo 兜底链路
+- 设计目标：雪球作为第一数据源；调用方仅允许使用 Eastmoney/Sina/Yahoo 行情备用，不再回退到 Tushare
 """
 import os
 import time
