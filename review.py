@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 A股盘后复盘与风控审查引擎（雪球优先数据版）
-- 股票行情/K线/当日成交口径优先使用雪球，失败再走 Tushare 等备用源
+- 股票行情/K线/当日成交口径优先使用雪球；失败仅允许使用 Yahoo 等非 Tushare 行情备用源
 - 完全重构 supplement，确保可靠追加
 - 只检查最近30天活跃持仓，避免历史误判
 - 强制列对齐，确保写入正确
@@ -92,6 +92,87 @@ print("启动 A 股盘后复盘引擎（终极可靠版）...")
 # ==========================================
 # 1. 辅助函数
 # ==========================================
+
+
+
+# ==========================================
+# Yahoo Finance 统一备用行情层（仅作为雪球失败时的价格/K线兜底）
+# ==========================================
+def _to_yahoo_symbol(ticker):
+    s = str(ticker).strip().upper()
+    if re.fullmatch(r"\d{6}\.(SH|SZ|BJ)", s):
+        code, market = s.split(".")
+        if market == "SH":
+            return f"{code}.SS"
+        if market == "SZ":
+            return f"{code}.SZ"
+        return s
+    return s
+
+
+def _yahoo_chart_request(symbol, interval="1d", period_days=10, timeout=12):
+    import urllib.request, urllib.parse, json as _json
+    now_utc = datetime.datetime.now(datetime.timezone.utc)
+    period2 = int(now_utc.timestamp()) + 300
+    period1 = int((now_utc - datetime.timedelta(days=period_days)).timestamp())
+    params = urllib.parse.urlencode({
+        "period1": period1, "period2": period2, "interval": interval,
+        "events": "history", "includeAdjustedClose": "true"
+    })
+    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{urllib.parse.quote(symbol, safe='')}?{params}"
+    req = urllib.request.Request(url, headers={
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/150.0 Safari/537.36",
+        "Accept": "application/json,text/plain,*/*", "Connection": "close"
+    })
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        obj = _json.loads(resp.read().decode("utf-8", errors="ignore"))
+    result = (obj.get("chart") or {}).get("result") or []
+    return result[0] if result else None
+
+
+def _yahoo_chart_to_df(symbol, interval="1d", period_days=120):
+    try:
+        result = _yahoo_chart_request(symbol, interval=interval, period_days=period_days)
+        if not result:
+            return pd.DataFrame()
+        timestamps = result.get("timestamp") or []
+        quote_list = ((result.get("indicators") or {}).get("quote") or [])
+        if not timestamps or not quote_list:
+            return pd.DataFrame()
+        q = quote_list[0]
+        n = min(len(timestamps), len(q.get("open") or []), len(q.get("high") or []),
+                len(q.get("low") or []), len(q.get("close") or []))
+        if n <= 0:
+            return pd.DataFrame()
+        tz_name = ((result.get("meta") or {}).get("exchangeTimezoneName") or "UTC")
+        try:
+            idx = pd.to_datetime(timestamps[:n], unit="s", utc=True).tz_convert(tz_name)
+        except Exception:
+            idx = pd.to_datetime(timestamps[:n], unit="s", utc=True)
+        df = pd.DataFrame({
+            "datetime": idx,
+            "open": pd.to_numeric((q.get("open") or [])[:n], errors="coerce"),
+            "high": pd.to_numeric((q.get("high") or [])[:n], errors="coerce"),
+            "low": pd.to_numeric((q.get("low") or [])[:n], errors="coerce"),
+            "close": pd.to_numeric((q.get("close") or [])[:n], errors="coerce"),
+        })
+        return df.dropna(subset=["open", "high", "low", "close"]).copy()
+    except Exception:
+        return pd.DataFrame()
+
+
+def _yahoo_intraday_snapshot(ticker, interval="5m", period_days=3):
+    symbol = _to_yahoo_symbol(ticker)
+    df = _yahoo_chart_to_df(symbol, interval=interval, period_days=period_days)
+    if df.empty:
+        return None
+    row = df.iloc[-1]
+    return {
+        "symbol": symbol, "timestamp": row["datetime"],
+        "open": float(row["open"]), "high": float(row["high"]),
+        "low": float(row["low"]), "close": float(row["close"])
+    }
+
 
 def get_live_quote(ticker):
     """Review 当前价格：雪球第一；失败后只允许 Yahoo 备用，不使用 Tushare。"""
@@ -747,7 +828,7 @@ def get_price_on_date(ticker, target_date_str, field='close', exact=False):
     exact=True 时必须存在目标交易日，禁止静默回退到更早交易日。
     这对“今日开盘→今日收盘”收益计算是硬规则。
     """
-    if df_hist_all.empty:
+    if df_hist_all.empty or not {'ts_code','trade_date',field}.issubset(df_hist_all.columns):
         return None
     ticker_data = df_hist_all[df_hist_all['ts_code'].astype(str).str.strip() == str(ticker).strip()].copy()
     if ticker_data.empty:
@@ -837,19 +918,46 @@ def get_exact_today_ohlc(ticker, today_str):
         if out['low'] is None and out['open'] is not None and out['close'] is not None:
             out['low'] = min(out['open'], out['close'])
         if out['open'] is not None or out['close'] is not None:
-            out['source'] = 'Tushare实时兜底'
+            out['source'] = 'Yahoo实时兜底'
     except Exception:
         pass
     return out
 
 
 def _indicator_frame_ashare(ticker, before_date_str):
-    """返回指定股票截至 before_date 前一交易日的 OHLC 技术指标数据。"""
-    if df_hist_all.empty:
-        return pd.DataFrame()
-    sub = df_hist_all[df_hist_all['ts_code'].astype(str).str.strip() == str(ticker).strip()].copy()
+    """返回指定股票截至 before_date 前一交易日的 OHLC 技术指标数据。
+
+    优先使用本次 Review 已加载的雪球历史K线；若单只股票缺失，则现场再次请求雪球，
+    再以 Yahoo 作为备用。任何数据源均不可用时返回空表，由上层沿用已有止损，绝不抛异常。
+    """
+    sub = pd.DataFrame()
+    if not df_hist_all.empty:
+        sub = df_hist_all[df_hist_all['ts_code'].astype(str).str.strip() == str(ticker).strip()].copy()
+
     if sub.empty:
-        return sub
+        try:
+            qx = xq.get_kline(ticker, count=120, period="day")
+            if qx is not None and not qx.empty:
+                qx = qx.copy()
+                qx['ts_code'] = ticker
+                qx['trade_date'] = qx['trade_date'].astype(str).str.replace('-', '', regex=False)
+                sub = qx[['ts_code', 'trade_date', 'open', 'high', 'low', 'close']].copy()
+        except Exception as e:
+            print(f"⚠️ 雪球单股历史K线补取失败 {ticker}: {str(e)[:120]}")
+
+    if sub.empty:
+        try:
+            symbol = _to_yahoo_symbol(ticker)
+            yh = _yahoo_chart_to_df(symbol, interval="1d", period_days=180)
+            if yh is not None and not yh.empty:
+                sub = yh.copy()
+                sub['ts_code'] = ticker
+                sub['trade_date'] = pd.to_datetime(sub['datetime'], errors='coerce').dt.strftime('%Y%m%d')
+        except Exception as e:
+            print(f"⚠️ Yahoo单股历史K线备用失败 {ticker}: {str(e)[:120]}")
+
+    if sub.empty:
+        return pd.DataFrame()
     sub['trade_date'] = pd.to_datetime(sub['trade_date'], errors='coerce')
     target = pd.to_datetime(before_date_str, errors='coerce')
     if pd.isna(target):
