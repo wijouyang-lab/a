@@ -536,10 +536,45 @@ def check_rule_based_sell_signals(price_map, exclude_tickers=None):
     return [], []
 
 # ==========================================
-# 0c. 统一渲染"今日卖出信号"卡片（由 review.py 生成，此处仅保留空壳）
+# 0c. 统一渲染“昨日 Review 风控提醒”卡片
 # ==========================================
 def build_sell_signal_card(macro_removed_tickers, rule_sell_signals):
-    return ""
+    state = get_review_risk_state()
+    risk_date = state.get("date")
+    hard = state.get("hard", {})
+    near = state.get("near", {})
+    if not risk_date or (not hard and not near):
+        return ""
+
+    def esc(v):
+        import html
+        return html.escape(str(v if v is not None else "").strip())
+
+    blocks = [
+        f'<div class="risk-alert" style="border:1px solid #e0a800;padding:16px;margin:0 0 18px 0;border-radius:10px;background:#fffaf0;">'
+        f'<h2 style="margin:0 0 10px 0;">🚨 昨日 Review 风控提醒（{esc(risk_date)}）</h2>'
+    ]
+    if hard:
+        blocks.append('<h3 style="margin:8px 0;">⛔ 已触发 / T+1待执行：今日禁止重新推荐</h3><ul>')
+        for ticker, r in hard.items():
+            status = str(r.get("Review_Risk_Status", "")).upper()
+            label = "T+1待执行止损" if status == "T1_STOP_PENDING" else "已触发移动止损"
+            name = esc(r.get("Name", ticker))
+            stop = esc(r.get("Stop_Loss", "N/A"))
+            note = esc(r.get("Review_Risk_Note", ""))
+            blocks.append(f'<li><b>{name}（{esc(ticker)}）</b>：{label}，止损位 {stop}' + (f'；{note}' if note else '') + '</li>')
+        blocks.append('</ul>')
+    if near:
+        blocks.append('<h3 style="margin:8px 0;">⚠️ 接近止损：今日不得进入 Top 1-5 核心推荐</h3><ul>')
+        for ticker, r in near.items():
+            name = esc(r.get("Name", ticker))
+            distance = esc(r.get("Review_Stop_Distance_Pct", "N/A"))
+            stop = esc(r.get("Stop_Loss", "N/A"))
+            note = esc(r.get("Review_Risk_Note", ""))
+            blocks.append(f'<li><b>{name}（{esc(ticker)}）</b>：距止损 {distance}% ，止损位 {stop}' + (f'；{note}' if note else '') + '</li>')
+        blocks.append('</ul>')
+    blocks.append('<div style="font-size:13px;color:#666;margin-top:10px;">该提醒由 Review → Scan 自动联动生成；风控过滤在最终候选名单上再次强制执行。</div></div>')
+    return ''.join(blocks)
 
 def build_current_holdings_card(latest_price_map):
     return ""
@@ -561,14 +596,23 @@ def get_review_risk_state():
         df['Review_Risk_Status'] = df['Review_Risk_Status'].astype(str).str.strip().str.upper()
         df['Review_Risk_Date_DT'] = pd.to_datetime(df['Review_Risk_Date'], errors='coerce')
         today_dt = pd.Timestamp(get_bj_time().date())
-        valid = df[df['Review_Risk_Date_DT'].notna() &
-                   (df['Review_Risk_Date_DT'].dt.normalize() < today_dt) &
-                   df['Review_Risk_Status'].isin({'STOP_TRIGGERED','T1_STOP_PENDING','STOP_NEAR'})].copy()
-        if valid.empty:
+        # 关键：先找“最近一个 Review 交易日”，再读取该日的风险状态。
+        # 不能只从风险行里找 latest_day，否则“昨天全部 CLEAR”时会错误地重复显示更早日期的止损提醒。
+        prior_dates = df.loc[
+            df['Review_Risk_Date_DT'].notna() &
+            (df['Review_Risk_Date_DT'].dt.normalize() < today_dt),
+            'Review_Risk_Date_DT'
+        ]
+        if prior_dates.empty:
             return {"date": None, "hard": {}, "near": {}}
-        valid['_risk_day'] = valid['Review_Risk_Date_DT'].dt.normalize()
-        latest_day = valid['_risk_day'].max()
-        valid = valid[valid['_risk_day'] == latest_day].sort_values('Review_Risk_Date_DT')
+        latest_day = prior_dates.dt.normalize().max()
+        valid = df[
+            df['Review_Risk_Date_DT'].notna() &
+            (df['Review_Risk_Date_DT'].dt.normalize() == latest_day) &
+            df['Review_Risk_Status'].isin({'STOP_TRIGGERED','T1_STOP_PENDING','STOP_NEAR'})
+        ].copy().sort_values('Review_Risk_Date_DT')
+        if valid.empty:
+            return {"date": latest_day.strftime('%Y-%m-%d'), "hard": {}, "near": {}}
         valid = valid.drop_duplicates('Ticker', keep='last')
         hard, near = {}, {}
         for _, row in valid.iterrows():
@@ -3267,7 +3311,7 @@ if __name__ == "__main__":
         macro_regime
     )
 
-    # 注入卡片（已废弃，但保留空壳）
+    # 注入昨日 Review 风控提醒卡片（确定性渲染，不依赖 AI 是否主动展示）
     sell_signal_card_html = build_sell_signal_card(removed_tickers_macro, rule_sell_signals)
     current_holdings_card_html = build_current_holdings_card(latest_price_map)
     insertion_point = ai_report_html.find('<div class="market-section">')
@@ -3276,24 +3320,13 @@ if __name__ == "__main__":
     else:
         ai_report_html = sell_signal_card_html + current_holdings_card_html + ai_report_html
 
-    chosen = match_pool_to_report(pool_with_news, ai_report_html, DEFAULT_STOP_LOSS_PCT)
-
-    # Review→Scan 硬性风控：AI即使再次选中，也不能重新新增止损/临界止损标的。
-    review_risk_state = get_review_risk_state()
-    hard_blocked = set(review_risk_state.get('hard', {}).keys())
-    near_blocked = set(review_risk_state.get('near', {}).keys())
-    if hard_blocked or near_blocked:
-        before_risk=len(chosen)
-        chosen=[x for x in chosen if str(x.get('Ticker','')).strip() not in hard_blocked and str(x.get('Ticker','')).strip() not in near_blocked]
-        removed_risk=before_risk-len(chosen)
-        if removed_risk:
-            print(f"🛡️ Review→Scan 风控过滤 {removed_risk} 只：止损/临界止损标的不得重新进入新增推荐")
+    # AI解析出的“原始推荐”先保存；后续被 Review 风控过滤或持仓去重时，推荐事实仍不丢失。
+    chosen_raw = match_pool_to_report(pool_with_news, ai_report_html, DEFAULT_STOP_LOSS_PCT)
 
     # ============================================================
-    # 【新增】永久记录每次 Scan 推荐
-    # 即便标的已在持仓中、后续会被去重，也保留本次“被 Scan 推荐”的事实。
+    # 永久记录每次 Scan 推荐：先记录原始推荐，再做风控/持仓过滤。
     # ============================================================
-    if chosen:
+    if chosen_raw:
         try:
             rec_log = 'scan_recommendation_history.csv'
             rows = [{
@@ -3305,7 +3338,7 @@ if __name__ == "__main__":
                 'Close_Price': item.get('Close', ''),
                 'Score': item.get('Score', ''),
                 'Source': 'scan.py',
-            } for item in chosen]
+            } for item in chosen_raw]
             newdf = pd.DataFrame(rows)
             if os.path.exists(rec_log) and os.path.getsize(rec_log) > 0:
                 olddf = pd.read_csv(rec_log, dtype=str, keep_default_na=False)
@@ -3316,9 +3349,21 @@ if __name__ == "__main__":
             recdf['Ticker'] = recdf['Ticker'].astype(str).str.strip()
             recdf = recdf.drop_duplicates(subset=['Date', 'Ticker'], keep='last')
             recdf.to_csv(rec_log, index=False, encoding='utf-8')
-            print(f'✅ 已记录 {len(rows)} 条 Scan 推荐历史到 {rec_log}')
+            print(f'✅ 已记录 {len(rows)} 条原始 Scan 推荐历史到 {rec_log}')
         except Exception as e:
             print(f'⚠️ Scan 推荐历史写入失败：{e}')
+
+    # Review→Scan 硬性风控：AI即使再次选中，也不能重新新增止损/临界止损标的。
+    chosen = list(chosen_raw)
+    review_risk_state = get_review_risk_state()
+    hard_blocked = set(review_risk_state.get('hard', {}).keys())
+    near_blocked = set(review_risk_state.get('near', {}).keys())
+    if hard_blocked or near_blocked:
+        before_risk = len(chosen)
+        chosen = [x for x in chosen if str(x.get('Ticker','')).strip() not in hard_blocked and str(x.get('Ticker','')).strip() not in near_blocked]
+        removed_risk = before_risk - len(chosen)
+        if removed_risk:
+            print(f"🛡️ Review→Scan 风控过滤 {removed_risk} 只：止损/临界止损标的不得重新进入新增推荐")
 
     # ============================================================
     # 【修复】生成 pending 文件，由 review.py 盘后补充
