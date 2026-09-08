@@ -337,36 +337,26 @@ def supplement_ashare_stocks_from_pending():
                 continue
             df_pending['Ticker'] = df_pending['Ticker'].astype(str).str.strip()
 
-            # 获取目标交易日 OHLC：雪球第一；失败后使用 Yahoo 精确日期备用。
+            # 获取目标交易日 OHLC：仅允许当日实时行情源；禁止 Yahoo/历史K线冒充当天开盘。
             open_map, low_map, close_map = {}, {}, {}
+            target_day = datetime.datetime.strptime(file_date_str, "%Y%m%d").strftime("%Y-%m-%d")
             for ticker_seed in df_pending['Ticker'].astype(str).str.strip().tolist():
                 if not ticker_seed:
                     continue
-                try:
-                    qx = xq.get_daily_ohlc_on_date(
-                        ticker_seed,
-                        datetime.datetime.strptime(file_date_str, "%Y%m%d").strftime("%Y-%m-%d")
-                    )
-                    if qx:
-                        open_map[ticker_seed] = qx.get('open')
-                        low_map[ticker_seed] = qx.get('low')
-                        close_map[ticker_seed] = qx.get('close')
-                except Exception as e:
-                    print(f"   ⚠️ 雪球目标日OHLC失败 {ticker_seed}: {str(e)[:100]}")
-
-            missing_pending_codes = [
-                t for t in df_pending['Ticker'].astype(str).str.strip().tolist()
-                if t and (t not in open_map or t not in close_map or t not in low_map)
-            ]
-            for _ticker in missing_pending_codes:
-                try:
-                    y = _get_yahoo_exact_daily_ohlc(_ticker, datetime.datetime.strptime(file_date_str, "%Y%m%d").strftime("%Y-%m-%d"))
-                    if y:
-                        if _ticker not in open_map: open_map[_ticker] = y.get('open')
-                        if _ticker not in low_map: low_map[_ticker] = y.get('low')
-                        if _ticker not in close_map: close_map[_ticker] = y.get('close')
-                except Exception as e:
-                    print(f"   ⚠️ Yahoo目标日OHLC备用失败 {_ticker}: {str(e)[:100]}")
+                qx = None
+                for getter in (_get_xueqiu_today_quote_ohlc, _get_tencent_today_ohlc, _get_sina_today_ohlc):
+                    try:
+                        qx = getter(ticker_seed, target_day)
+                        if qx and _validate_today_ohlc(qx):
+                            break
+                    except Exception:
+                        qx = None
+                if qx and _validate_today_ohlc(qx):
+                    open_map[ticker_seed] = qx.get('open')
+                    low_map[ticker_seed] = qx.get('low')
+                    close_map[ticker_seed] = qx.get('close')
+                else:
+                    print(f"   ⚠️ {ticker_seed}: {target_day} 当日OHLC无法确认，禁止使用旧K线/历史数据补位")
 
             # 每个 pending 文件处理前重新读取账本，避免同一批次重复写入
             df_existing = pd.DataFrame()
@@ -1001,44 +991,44 @@ def _get_sina_today_ohlc(ticker, today_str):
         return None
 
 
+def _validate_today_ohlc(q):
+    """硬校验 OHLC 内部一致性，防止旧数据/错位字段混入今日行情。"""
+    try:
+        o = safe_float(q.get('open')); h = safe_float(q.get('high'))
+        l = safe_float(q.get('low')); c = safe_float(q.get('close'))
+        if not all(v is not None and v > 0 for v in (o, h, l, c)):
+            return False
+        if h < l:
+            return False
+        if not (l <= o <= h and l <= c <= h):
+            return False
+        return True
+    except Exception:
+        return False
+
+
 def get_exact_today_ohlc(ticker, today_str):
     """获取指定交易日的当日 OHLC。
 
-    今日数据严禁直接来自历史 market-kline：已知某些盘后场景会返回上一交易日，
-    从而出现“9/4 开盘价被显示成 9/8 开盘价”的静默错误。今天优先实时详情/行情，
-    其次精确日线；每个来源都必须能证明或严格限定为目标日。
+    这是“盘后事实数据”，正确性优先于完整性：
+    1) 只允许雪球详情、腾讯、新浪这类实时行情源直接提供“今日开盘/最高/最低/最新”；
+    2) 严禁 Yahoo 日线、df_hist_all、历史 market-kline 作为“今日开盘价”兜底；
+    3) 实时源全部失败时，返回空数据，让邮件明确显示“今日行情无法确认”，绝不拿旧交易日价格冒充今天。
+
+    原因：Yahoo/A股历史日线在部分盘后时段会出现日期错位/旧K线命中，即使 API 本身没有报错，
+    也可能把 9/4 的 11.51 静默带成 9/8 的开盘价。这类静默错误比“数据暂缺”更危险。
     """
-    # 1) 雪球详情报价
-    q = _get_xueqiu_today_quote_ohlc(ticker, today_str)
-    if q:
-        return q
+    for getter in (_get_xueqiu_today_quote_ohlc, _get_tencent_today_ohlc, _get_sina_today_ohlc):
+        try:
+            q = getter(ticker, today_str)
+            if q and _validate_today_ohlc(q):
+                return q
+        except Exception as e:
+            print(f"⚠️ {getter.__name__} [{ticker}] 当日OHLC校验失败：{str(e)[:100]}")
 
-    # 2) 腾讯实时行情
-    q = _get_tencent_today_ohlc(ticker, today_str)
-    if q:
-        return q
-
-    # 3) 新浪实时行情
-    q = _get_sina_today_ohlc(ticker, today_str)
-    if q:
-        return q
-
-    # 4) Yahoo 精确日线；必须精确命中 today_str
-    q = _get_yahoo_exact_daily_ohlc(ticker, today_str)
-    if q:
-        return q
-
-    # 5) 最后兜底只返回实时开盘/最新，不再读取 df_hist_all 的今日旧K线。
-    #    这样即使所有外部日线都失败，也不会把上一交易日的 11.51 当成今天开盘价。
-    try:
-        live_open, live_last = get_live_quote(ticker)
-        live_open = safe_float(live_open); live_last = safe_float(live_last)
-        if live_open is not None and live_last is not None and live_open > 0 and live_last > 0:
-            return {'open': live_open, 'low': min(live_open, live_last), 'close': live_last,
-                    'source': '实时详情兜底（日期未验证）'}
-    except Exception:
-        pass
-    return {'open': None, 'low': None, 'close': None, 'source': None}
+    # 这里故意没有 Yahoo / market-kline / df_hist_all / 未验证实时兜底。
+    # 宁可少显示一条行情，也绝不允许“上一交易日价格冒充今日价格”。
+    return {'open': None, 'high': None, 'low': None, 'close': None, 'source': '今日行情无法确认'}
 
 
 def _indicator_frame_ashare(ticker, before_date_str):
