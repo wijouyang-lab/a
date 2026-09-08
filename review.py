@@ -941,50 +941,104 @@ def _get_xueqiu_today_quote_ohlc(ticker, today_str):
         return None
 
 
+def _get_tencent_today_ohlc(ticker, today_str):
+    """腾讯行情作为盘后当日 OHLC 强制备用源。只接受明确属于目标日期的数据。"""
+    try:
+        code = str(ticker or '').strip().upper()
+        bare, market = code.split('.', 1) if '.' in code else (code, 'SZ')
+        prefix = 'sh' if market == 'SH' else ('sz' if market == 'SZ' else 'bj')
+        url = f'https://qt.gtimg.cn/q={prefix}{bare}'
+        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+        raw = urllib.request.urlopen(req, timeout=8).read().decode('gbk', 'ignore')
+        m = re.search(r'="(.*)";', raw)
+        if not m:
+            return None
+        f = m.group(1).split('~')
+        if len(f) < 6:
+            return None
+        # 腾讯常用布局：1=今开，3=最新，4=最高，5=最低；日期/时间字段存在时再校验。
+        open_px = safe_float(f[1])
+        close_px = safe_float(f[3])
+        high_px = safe_float(f[4])
+        low_px = safe_float(f[5])
+        if not all(v is not None and v > 0 for v in (open_px, close_px, high_px, low_px)):
+            return None
+        # 腾讯不同版本的字段尾部略有差异；发现日期字段就严格校验，没有日期字段则不因字段缺失而误杀。
+        date_candidates = []
+        for idx in (30, 31):
+            if len(f) > idx and re.fullmatch(r'\d{4}-\d{2}-\d{2}', str(f[idx]).strip()):
+                date_candidates.append(str(f[idx]).strip())
+        if date_candidates and str(today_str)[:10] not in date_candidates:
+            return None
+        return {'open': open_px, 'high': high_px, 'low': low_px, 'close': close_px, 'source': 'Tencent/quote'}
+    except Exception:
+        return None
+
+
+def _get_sina_today_ohlc(ticker, today_str):
+    """新浪行情作为盘后当日 OHLC 备用源，严格校验日期。"""
+    try:
+        code = str(ticker or '').strip().upper()
+        bare, market = code.split('.', 1) if '.' in code else (code, 'SZ')
+        prefix = 'sh' if market == 'SH' else ('sz' if market == 'SZ' else 'bj')
+        url = f'https://hq.sinajs.cn/list={prefix}{bare}'
+        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0', 'Referer': 'https://finance.sina.com.cn/'})
+        raw = urllib.request.urlopen(req, timeout=8).read().decode('gb18030', 'ignore')
+        m = re.search(r'="(.*)";', raw)
+        if not m:
+            return None
+        f = m.group(1).split(',')
+        if len(f) < 32:
+            return None
+        open_px = safe_float(f[1]); close_px = safe_float(f[3]); high_px = safe_float(f[4]); low_px = safe_float(f[5])
+        quote_date = str(f[30]).strip()
+        if quote_date and quote_date != str(today_str)[:10]:
+            return None
+        if not all(v is not None and v > 0 for v in (open_px, close_px, high_px, low_px)):
+            return None
+        return {'open': open_px, 'high': high_px, 'low': low_px, 'close': close_px, 'source': 'Sina/quote'}
+    except Exception:
+        return None
+
+
 def get_exact_today_ohlc(ticker, today_str):
-    """今日盘后结算专用：雪球当日详情报价 → 雪球精确日K → Yahoo精确日K。
+    """获取指定交易日的当日 OHLC。
 
-    核心规则：对于 today_str，绝不优先相信可能缺少最新一根的历史日K；
-    雪球详情页的当日 open/high/low/current 才是盘后“今日实际行情”的首选。
+    今日数据严禁直接来自历史 market-kline：已知某些盘后场景会返回上一交易日，
+    从而出现“9/4 开盘价被显示成 9/8 开盘价”的静默错误。今天优先实时详情/行情，
+    其次精确日线；每个来源都必须能证明或严格限定为目标日。
     """
-    # 1) 先取雪球详情报价，避免日K偶发静默返回上一交易日。
-    quote_ohlc = _get_xueqiu_today_quote_ohlc(ticker, today_str)
-    if quote_ohlc:
-        return quote_ohlc
+    # 1) 雪球详情报价
+    q = _get_xueqiu_today_quote_ohlc(ticker, today_str)
+    if q:
+        return q
 
-    out = {'open': None, 'low': None, 'close': None, 'source': None}
+    # 2) 腾讯实时行情
+    q = _get_tencent_today_ohlc(ticker, today_str)
+    if q:
+        return q
 
-    # 2) 已加载的雪球/备用历史K线，必须 exact。
-    for fld in ('open', 'low', 'close'):
-        out[fld] = get_price_on_date(ticker, today_str, field=fld, exact=True)
-    if all(out[k] is not None for k in ('open','low','close')):
-        out['source'] = 'Xueqiu/market-kline'
-        return out
+    # 3) 新浪实时行情
+    q = _get_sina_today_ohlc(ticker, today_str)
+    if q:
+        return q
 
-    # 3) Yahoo 精确日线。
-    yh = _get_yahoo_exact_daily_ohlc(ticker, today_str)
-    if yh:
-        for fld in ('open', 'low', 'close'):
-            if out[fld] is None:
-                out[fld] = yh.get(fld)
-        if all(out[k] is not None for k in ('open','low','close')):
-            out['source'] = 'Yahoo'
-            return out
+    # 4) Yahoo 精确日线；必须精确命中 today_str
+    q = _get_yahoo_exact_daily_ohlc(ticker, today_str)
+    if q:
+        return q
 
-    # 4) 最后一层实时兜底：仍然禁止使用前一交易日 close 冒充今日 close。
+    # 5) 最后兜底只返回实时开盘/最新，不再读取 df_hist_all 的今日旧K线。
+    #    这样即使所有外部日线都失败，也不会把上一交易日的 11.51 当成今天开盘价。
     try:
         live_open, live_last = get_live_quote(ticker)
-        if out['open'] is None:
-            out['open'] = live_open
-        if out['close'] is None:
-            out['close'] = live_last
-        if out['low'] is None and out['open'] is not None and out['close'] is not None:
-            out['low'] = min(out['open'], out['close'])
-        if out['open'] is not None or out['close'] is not None:
-            out['source'] = '实时详情兜底'
+        live_open = safe_float(live_open); live_last = safe_float(live_last)
+        if live_open is not None and live_last is not None and live_open > 0 and live_last > 0:
+            return {'open': live_open, 'low': min(live_open, live_last), 'close': live_last,
+                    'source': '实时详情兜底（日期未验证）'}
     except Exception:
         pass
-    return out
+    return {'open': None, 'low': None, 'close': None, 'source': None}
 
 
 def _indicator_frame_ashare(ticker, before_date_str):
@@ -1044,33 +1098,58 @@ def _previous_stop_method_from_group(group):
     return ''
 
 
-def build_recommendation_history(group):
-    """构造当前持仓生命周期内每次 Scan 推荐的日期与推荐/建仓价格。"""
-    records = []
+def _load_extra_scan_recommendations(ticker, start_date=None):
+    """读取 scan_recommendation_history.csv；不存在时返回空列表。"""
+    path = 'scan_recommendation_history.csv'
+    if not os.path.exists(path):
+        return []
     try:
-        seen_dates = set()
-        for _, r in group.sort_values('Date').iterrows():
-            dt = pd.to_datetime(r.get('Date'), errors='coerce')
+        df = pd.read_csv(path, dtype=str, keep_default_na=False)
+        if df.empty or 'Ticker' not in df.columns:
+            return []
+        sub = df[df['Ticker'].astype(str).str.strip() == str(ticker).strip()].copy()
+        if start_date:
+            cutoff = pd.to_datetime(start_date, errors='coerce')
+            if not pd.isna(cutoff) and 'Date' in sub.columns:
+                dates = pd.to_datetime(sub['Date'], errors='coerce')
+                sub = sub[dates >= cutoff].copy()
+        return sub.to_dict('records')
+    except Exception:
+        return []
+
+
+def build_recommendation_history(group, extra_history=None):
+    """构造当前持仓生命周期内所有可确认的 Scan 推荐日期与推荐价格。"""
+    try:
+        rows = []
+        if group is not None and not group.empty:
+            rows.extend(group.to_dict('records'))
+        rows.extend(extra_history or [])
+        dedup = {}
+        for r in rows:
+            dt = pd.to_datetime(r.get('Date') or r.get('Rec_Date'), errors='coerce')
             if pd.isna(dt):
-                continue
-            date_str = dt.strftime('%Y-%m-%d')
-            if date_str in seen_dates:
                 continue
             tag = clean_text(r.get('Tag'))
             if tag not in {'Core_Double_Dragon', 'Core_Dragon', 'Sub_Pioneer'}:
                 continue
+            date_str = dt.strftime('%Y-%m-%d')
             price = safe_float(r.get('Open_Price'))
-            if price is not None and price > 0:
-                price_label = f'¥{price:.2f}'
-            else:
+            if price is None or price <= 0:
+                price = safe_float(r.get('Rec_Price'))
+            if price is None or price <= 0:
                 price = safe_float(r.get('Close_Price'))
-                price_label = f'¥{price:.2f}（收盘价兜底）' if price is not None and price > 0 else '价格数据不足'
-            records.append((date_str, price_label))
-            seen_dates.add(date_str)
+            # 一天一次推荐记录；若两份日志同时存在，优先保留有价格者。
+            old = dedup.get(date_str)
+            if old is None or (old[1] is None and price is not None):
+                dedup[date_str] = (date_str, price)
+        out = []
+        for date_str in sorted(dedup):
+            price = dedup[date_str][1]
+            out.append((date_str, f'¥{price:.2f}' if price is not None and price > 0 else '价格数据不足'))
+        return out
     except Exception:
         return []
-    return records
-
 
 def format_recommendation_history(records):
     if not records:
@@ -1513,7 +1592,7 @@ for ticker, group in recent_picks.groupby('Ticker'):
     latest_row = group.iloc[-1]
     rec_date_str = first_row['Date'].strftime('%Y-%m-%d')
     latest_date_str = latest_row['Date'].strftime('%Y-%m-%d')
-    recommendation_history = build_recommendation_history(group)
+    recommendation_history = build_recommendation_history(group, _load_extra_scan_recommendations(_ticker_key, rec_date_str))
     recommendation_count = len(recommendation_history)
     is_new_today = latest_date_str == today_str
     t1_locked = is_new_today

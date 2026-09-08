@@ -3290,6 +3290,37 @@ if __name__ == "__main__":
             print(f"🛡️ Review→Scan 风控过滤 {removed_risk} 只：止损/临界止损标的不得重新进入新增推荐")
 
     # ============================================================
+    # 【新增】永久记录每次 Scan 推荐
+    # 即便标的已在持仓中、后续会被去重，也保留本次“被 Scan 推荐”的事实。
+    # ============================================================
+    if chosen:
+        try:
+            rec_log = 'scan_recommendation_history.csv'
+            rows = [{
+                'Date': trade_date,
+                'Ticker': str(item.get('Ticker', '')).strip(),
+                'Name': item.get('Name', ''),
+                'Tag': item.get('Tag', ''),
+                'Open_Price': item.get('Open', item.get('Close', '')),
+                'Close_Price': item.get('Close', ''),
+                'Score': item.get('Score', ''),
+                'Source': 'scan.py',
+            } for item in chosen]
+            newdf = pd.DataFrame(rows)
+            if os.path.exists(rec_log) and os.path.getsize(rec_log) > 0:
+                olddf = pd.read_csv(rec_log, dtype=str, keep_default_na=False)
+                recdf = pd.concat([olddf, newdf], ignore_index=True)
+            else:
+                recdf = newdf
+            recdf['Date'] = recdf['Date'].astype(str).str[:10]
+            recdf['Ticker'] = recdf['Ticker'].astype(str).str.strip()
+            recdf = recdf.drop_duplicates(subset=['Date', 'Ticker'], keep='last')
+            recdf.to_csv(rec_log, index=False, encoding='utf-8')
+            print(f'✅ 已记录 {len(rows)} 条 Scan 推荐历史到 {rec_log}')
+        except Exception as e:
+            print(f'⚠️ Scan 推荐历史写入失败：{e}')
+
+    # ============================================================
     # 【修复】生成 pending 文件，由 review.py 盘后补充
     # ============================================================
     if chosen:
