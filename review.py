@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-A股盘后复盘与风控审查引擎（终极可靠版）
+A股盘后复盘与风控审查引擎（雪球优先数据版）
+- 股票行情/K线/当日成交口径优先使用雪球，失败再走 Tushare 等备用源
 - 完全重构 supplement，确保可靠追加
 - 只检查最近30天活跃持仓，避免历史误判
 - 强制列对齐，确保写入正确
@@ -18,6 +19,7 @@ from email.mime.multipart import MIMEMultipart
 import anthropic
 import tushare as ts
 import sys
+import xueqiu_client as xq
 
 
 # ==========================================
@@ -95,26 +97,25 @@ pro = ts.pro_api()
 # ==========================================
 
 def get_live_quote(ticker):
+    """
+    Review 当前价格第一来源：雪球 detail quote。
+    失败后才使用 Tushare realtime。
+    """
+    try:
+        q = xq.get_quote(ticker, detail=True)
+        if q:
+            return safe_float(q.get('open')), safe_float(q.get('current'))
+    except Exception as e:
+        print(f"⚠️ 雪球实时行情失败 [{ticker}]，切换 Tushare: {str(e)[:120]}")
     try:
         bare_code = ticker.split('.')[0] if '.' in ticker else ticker
         df_rt = ts.get_realtime_quotes(bare_code)
         if df_rt is None or df_rt.empty:
             return None, None
         row = df_rt.iloc[0]
-        open_p, last_p = None, None
-        try:
-            v = float(row.get('open', 0))
-            open_p = v if v > 0 else None
-        except:
-            pass
-        try:
-            v = float(row.get('price', 0))
-            last_p = v if v > 0 else None
-        except:
-            pass
-        return open_p, last_p
+        return safe_float(row.get('open')), safe_float(row.get('price'))
     except Exception as e:
-        print(f"⚠️ 实时行情兜底查询失败 [{ticker}]: {e}")
+        print(f"⚠️ Tushare 实时行情失败 [{ticker}]: {str(e)[:120]}")
         return None, None
 
 def _ensure_table_columns(log_file):
@@ -264,33 +265,52 @@ def supplement_ashare_stocks_from_pending():
                 continue
             df_pending['Ticker'] = df_pending['Ticker'].astype(str).str.strip()
 
-            # 获取目标交易日 OHLC
-            df_prices = None
-            for offset in range(0, 5):
-                try_date = (
-                    datetime.datetime.strptime(file_date_str, "%Y%m%d")
-                    - datetime.timedelta(days=offset)
-                ).strftime('%Y%m%d')
-                try:
-                    df_try = pro.daily(
-                        trade_date=try_date,
-                        fields='ts_code,open,high,low,close'
-                    )
-                    if df_try is not None and not df_try.empty:
-                        # 对“今天”禁止悄悄拿前一交易日价格冒充今天；
-                        # 非今天文件才允许回退最近可用交易日。
-                        if is_today and try_date != file_date_str:
-                            continue
-                        df_prices = df_try
-                        break
-                except Exception:
-                    pass
-
+            # 获取目标交易日 OHLC：雪球第一，Tushare 第二。
             open_map, low_map, close_map = {}, {}, {}
-            if df_prices is not None and not df_prices.empty:
-                open_map = dict(zip(df_prices['ts_code'], df_prices['open']))
-                low_map = dict(zip(df_prices['ts_code'], df_prices['low']))
-                close_map = dict(zip(df_prices['ts_code'], df_prices['close']))
+            for ticker_seed in df_pending['Ticker'].astype(str).str.strip().tolist():
+                if not ticker_seed:
+                    continue
+                try:
+                    qx = xq.get_daily_ohlc_on_date(
+                        ticker_seed,
+                        datetime.datetime.strptime(file_date_str, "%Y%m%d").strftime("%Y-%m-%d")
+                    )
+                    if qx:
+                        open_map[ticker_seed] = qx.get('open')
+                        low_map[ticker_seed] = qx.get('low')
+                        close_map[ticker_seed] = qx.get('close')
+                except Exception as e:
+                    print(f"   ⚠️ 雪球目标日OHLC失败 {ticker_seed}: {str(e)[:100]}")
+
+            missing_pending_codes = [
+                t for t in df_pending['Ticker'].astype(str).str.strip().tolist()
+                if t and (t not in open_map or t not in close_map)
+            ]
+            if missing_pending_codes:
+                for offset in range(0, 5):
+                    try_date = (
+                        datetime.datetime.strptime(file_date_str, "%Y%m%d")
+                        - datetime.timedelta(days=offset)
+                    ).strftime('%Y%m%d')
+                    try:
+                        df_try = pro.daily(
+                            ts_code=",".join(sorted(set(missing_pending_codes))),
+                            start_date=try_date,
+                            end_date=try_date,
+                            fields='ts_code,open,high,low,close'
+                        )
+                        if df_try is not None and not df_try.empty:
+                            if is_today and try_date != file_date_str:
+                                continue
+                            for _, rr in df_try.iterrows():
+                                code = str(rr.get('ts_code', '')).strip()
+                                if code:
+                                    if code not in open_map: open_map[code] = rr.get('open')
+                                    if code not in low_map: low_map[code] = rr.get('low')
+                                    if code not in close_map: close_map[code] = rr.get('close')
+                            break
+                    except Exception:
+                        pass
 
             # 每个 pending 文件处理前重新读取账本，避免同一批次重复写入
             df_existing = pd.DataFrame()
@@ -700,22 +720,66 @@ start_hist = (get_bj_time() - datetime.timedelta(days=60)).strftime('%Y%m%d')
 end_hist = get_bj_time().strftime('%Y%m%d')
 all_tickers = recent_picks['Ticker'].unique().tolist()
 
-try:
-    df_hist_all = pro.daily(
-        ts_code=",".join(all_tickers),
-        start_date=start_hist,
-        end_date=end_hist,
-        fields='ts_code,trade_date,open,high,low,close'
-    ).sort_values(['ts_code', 'trade_date'])
-except:
-    df_hist_all = pd.DataFrame()
+# 雪球主历史K线；Review持仓数量通常较小，逐股取100根日K。
+df_hist_parts, xq_failed = [], []
+for _ticker in all_tickers:
+    try:
+        _dfx = xq.get_kline(_ticker, count=100, period="day")
+        if _dfx is not None and not _dfx.empty:
+            _dfx['trade_date'] = _dfx['trade_date'].astype(str).str.replace('-', '', regex=False)
+            df_hist_parts.append(_dfx[['ts_code','trade_date','open','high','low','close']])
+        else:
+            xq_failed.append(_ticker)
+    except Exception:
+        xq_failed.append(_ticker)
 
+df_hist_all = pd.concat(df_hist_parts, ignore_index=True) if df_hist_parts else pd.DataFrame()
+if xq_failed:
+    try:
+        _df_ts = pro.daily(
+            ts_code=",".join(xq_failed),
+            start_date=start_hist,
+            end_date=end_hist,
+            fields='ts_code,trade_date,open,high,low,close'
+        )
+        if _df_ts is not None and not _df_ts.empty:
+            df_hist_all = pd.concat([df_hist_all, _df_ts], ignore_index=True) if not df_hist_all.empty else _df_ts
+    except Exception as _e:
+        print(f"⚠️ Tushare 历史行情备用失败：{str(_e)[:120]}")
+
+if not df_hist_all.empty:
+    df_hist_all['ts_code'] = df_hist_all['ts_code'].astype(str).str.strip()
+    df_hist_all['trade_date'] = df_hist_all['trade_date'].astype(str).str.replace('-', '', regex=False)
+    df_hist_all = df_hist_all.drop_duplicates(['ts_code','trade_date'], keep='last').sort_values(['ts_code','trade_date'])
+
+# 今日价格：雪球 batch 第一；缺失再用 Tushare。
 trade_date = get_bj_time().strftime('%Y%m%d')
-df_today = pro.daily(trade_date=trade_date, fields='ts_code,close')
-if df_today is None or df_today.empty:
-    trade_date = (get_bj_time() - datetime.timedelta(days=1)).strftime('%Y%m%d')
-    df_today = pro.daily(trade_date=trade_date, fields='ts_code,close')
-price_map_today = dict(zip(df_today['ts_code'], df_today['close'])) if df_today is not None else {}
+price_map_today = {}
+try:
+    _qmap = xq.get_quotes(all_tickers)
+    for _ticker in all_tickers:
+        _sym = xq.normalize_symbol(_ticker)
+        _px = safe_float((_qmap.get(_sym) or {}).get('current'))
+        if _px is not None and _px > 0:
+            price_map_today[_ticker] = _px
+except Exception as _e:
+    print(f"⚠️ 雪球今日价格批量失败：{str(_e)[:120]}")
+
+_missing_today = [t for t in all_tickers if t not in price_map_today]
+if _missing_today:
+    try:
+        df_today = pro.daily(trade_date=trade_date, fields='ts_code,close')
+        if df_today is None or df_today.empty:
+            prev_date = (get_bj_time() - datetime.timedelta(days=1)).strftime('%Y%m%d')
+            df_today = pro.daily(trade_date=prev_date, fields='ts_code,close')
+        if df_today is not None and not df_today.empty:
+            for _, rr in df_today.iterrows():
+                code = str(rr.get('ts_code','')).strip()
+                px = safe_float(rr.get('close'))
+                if code in _missing_today and px is not None:
+                    price_map_today[code] = px
+    except Exception as _e:
+        print(f"⚠️ Tushare 今日价格备用失败：{str(_e)[:120]}")
 
 # ==========================================
 # 5. 辅助函数
