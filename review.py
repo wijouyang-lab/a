@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 A股盘后复盘与风控审查引擎（雪球优先数据版）
-- 股票行情/K线/当日成交口径优先使用雪球；失败仅允许使用 Yahoo 等非 Tushare 行情备用源
+- 股票行情/K线/当日成交口径优先使用雪球；当日 OHLC 使用雪球/腾讯/新浪，并严格校验目标日期
 - 完全重构 supplement，确保可靠追加
 - 只检查最近30天活跃持仓，避免历史误判
 - 强制列对齐，确保写入正确
@@ -14,6 +14,7 @@ import glob
 import re
 import smtplib
 import csv
+import urllib.request
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 import anthropic
@@ -944,21 +945,30 @@ def _get_tencent_today_ohlc(ticker, today_str):
         if not m:
             return None
         f = m.group(1).split('~')
-        if len(f) < 6:
+        if len(f) < 7:
             return None
-        # 腾讯常用布局：1=今开，3=最新，4=最高，5=最低；日期/时间字段存在时再校验。
-        open_px = safe_float(f[1])
-        close_px = safe_float(f[3])
-        high_px = safe_float(f[4])
-        low_px = safe_float(f[5])
+        # 腾讯行情标准布局（qt.gtimg.cn）：
+        # 1=股票代码，2=当前价，3=昨收，4=今开，5=最高，6=最低。
+        # 旧版这里把字段整体左移了一位，导致 low 实际取成 high，
+        # 进而所有当日 OHLC 都在硬校验阶段被判为无效。
+        current_px = safe_float(f[2])
+        prev_close_px = safe_float(f[3])
+        open_px = safe_float(f[4])
+        high_px = safe_float(f[5])
+        low_px = safe_float(f[6])
+        close_px = current_px
         if not all(v is not None and v > 0 for v in (open_px, close_px, high_px, low_px)):
             return None
-        # 腾讯不同版本的字段尾部略有差异；发现日期字段就严格校验，没有日期字段则不因字段缺失而误杀。
+        # 腾讯字段尾部包含日期/时间；盘后必须能确认日期，不能默认为今天。
         date_candidates = []
         for idx in (30, 31):
             if len(f) > idx and re.fullmatch(r'\d{4}-\d{2}-\d{2}', str(f[idx]).strip()):
                 date_candidates.append(str(f[idx]).strip())
+        # 盘后数据必须能确认属于目标日期；腾讯通常在字段 30 提供日期。
+        # 如果日期字段存在但不是今天，坚决拒绝，避免把旧行情当成当天。
         if date_candidates and str(today_str)[:10] not in date_candidates:
+            return None
+        if not date_candidates:
             return None
         return {'open': open_px, 'high': high_px, 'low': low_px, 'close': close_px, 'source': 'Tencent/quote'}
     except Exception:
