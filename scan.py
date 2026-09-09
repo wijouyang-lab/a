@@ -1100,11 +1100,15 @@ def _parse_rss_items_tolerant(raw, limit=30):
         nodes=list(root.findall(".//item")) + list(root.findall(".//{*}item")) + list(root.findall(".//entry")) + list(root.findall(".//{*}entry"))
         seen=set()
         for x in nodes:
-            title_node=x.find("title") or x.find("{*}title")
+            title_node=x.find("title")
+            if title_node is None:
+                title_node=x.find("{*}title")
             title=clean(title_node.text if title_node is not None else "")
             date_text=""
             for tag in ("pubDate","published","updated","date"):
-                node=x.find(tag) or x.find("{*}"+tag)
+                node=x.find(tag)
+                if node is None:
+                    node=x.find("{*}"+tag)
                 if node is not None and node.text:
                     date_text=node.text; break
             if title and title not in seen:
@@ -1585,9 +1589,6 @@ def _fetch_bea_pce():
 def _build_us_metrics():
     metrics = {}
 
-    # 第一层结构化兜底：Tushare公开宏观接口（不取代官方文本，仅用于恢复数值）。
-    tushare_macro = _fetch_tushare_cn_macro_metrics()
-
     unrate = _fetch_bls_series("LNS14000000", "美国失业率", limit=18)
     if unrate:
         latest, prev, row = unrate[-1]["value"], unrate[-2]["value"], unrate[-1]
@@ -1896,6 +1897,8 @@ def _fetch_tushare_cn_macro_metrics():
 def get_key_economic_data():
     print("📊 [阶段2.7] 正在抓取中美关键经济数据...")
     metrics = {}
+    # 中国结构化宏观兜底必须在本函数内获取，避免作用域丢失导致 NameError。
+    tushare_macro = _fetch_tushare_cn_macro_metrics() or {}
 
     # 中国：官方网页语境。页面无法稳定解析结构化数字时，不伪造数字；将官方文本交给AI。
     nbs_context = _fetch_nbs_context()
@@ -1950,7 +1953,7 @@ def get_key_economic_data():
             if source is None:
                 source = "国家统计局/官方网页"
             metrics[key] = {"value": value, "prev": None, "date": date_text, "unit": "%", "source": source}
-            print(f"   ✅ {labels[key]}: {value} | 来源={src}")
+            print(f"   ✅ {labels[key]}: {value} | 来源={source}")
         else:
             print(f"   ℹ️ {labels[key]}: 当前未解析到可靠结构化数值，保留官方文本给AI")
 
