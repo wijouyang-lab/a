@@ -658,15 +658,157 @@ def get_stop_loss_hit_warning():
         parts.append("⚠️ 【接近止损联动】以下标的最近一次 Review 距离移动止损≤3%：今日不得作为 Top 1-5 核心追涨推荐；若进入候选池必须标注高风险。\n"+'\n'.join(details))
     return '\n\n'.join(parts)+'\n'
 
+def _get_latest_completed_ashare_trade_date():
+    """返回最近一个已经完成的A股交易日(YYYYMMDD)。
+
+    盘前运行时绝不能把当天作为已完成交易日；优先使用Tushare交易日历，
+    失败时退回最近一个工作日。
+    """
+    today = get_bj_time().date()
+    try:
+        end = today.strftime('%Y%m%d')
+        start = (today - datetime.timedelta(days=15)).strftime('%Y%m%d')
+        cal = pro.trade_cal(exchange='SSE', start_date=start, end_date=end, is_open='1',
+                            fields='cal_date,is_open')
+        if cal is not None and not cal.empty:
+            dates = sorted(pd.to_datetime(cal['cal_date'].astype(str)).dt.date.tolist())
+            completed = [d for d in dates if d < today]
+            if completed:
+                return completed[-1].strftime('%Y%m%d')
+    except Exception as e:
+        print(f"⚠️ Tushare交易日历获取失败，使用工作日兜底：{str(e)[:120]}")
+    d = today - datetime.timedelta(days=1)
+    while d.weekday() >= 5:
+        d -= datetime.timedelta(days=1)
+    return d.strftime('%Y%m%d')
+
+
+def _build_pool_from_tushare_daily(trade_date):
+    """Tushare daily作为核心资金池最终备用：按最近完整交易日成交额排序Top 300。"""
+    try:
+        df = pro.daily(trade_date=trade_date,
+                       fields='ts_code,trade_date,open,high,low,close,pre_close,change,pct_chg,vol,amount')
+        if df is None or df.empty:
+            return {}, []
+        work = df.copy()
+        work['ts_code'] = work['ts_code'].astype(str).str.upper().str.strip()
+        work = work[work['ts_code'].str.endswith(('.SH', '.SZ', '.BJ'))]
+        work['amount'] = pd.to_numeric(work.get('amount'), errors='coerce').fillna(0.0)
+        work['close'] = pd.to_numeric(work.get('close'), errors='coerce')
+        work['open'] = pd.to_numeric(work.get('open'), errors='coerce')
+        work['high'] = pd.to_numeric(work.get('high'), errors='coerce')
+        work['low'] = pd.to_numeric(work.get('low'), errors='coerce')
+        work['pct_chg'] = pd.to_numeric(work.get('pct_chg'), errors='coerce').fillna(0.0)
+        work = work[(work['close'] > 0) & (work['amount'] > 0)]
+        work = work.sort_values('amount', ascending=False).head(300)
+        if work.empty:
+            return {}, []
+
+        names = {}
+        industries = {}
+        try:
+            basic = pro.stock_basic(exchange='', list_status='L', fields='ts_code,name,industry')
+            if basic is not None and not basic.empty:
+                names = dict(zip(basic['ts_code'].astype(str).str.upper(), basic['name']))
+                industries = dict(zip(basic['ts_code'].astype(str).str.upper(), basic['industry']))
+        except Exception as e:
+            print(f"⚠️ Tushare行业元数据补充失败：{str(e)[:120]}")
+
+        pool = {}
+        for _, row in work.iterrows():
+            code = str(row['ts_code']).strip().upper()
+            pool[code] = {
+                'Ticker': code,
+                'Name': str(names.get(code, code)),
+                'Industry': industries.get(code, '未知') or '未知',
+                'Open': safe_float(row.get('open')),
+                'Close': safe_float(row.get('close')),
+                'Amount': safe_float(row.get('amount'), 0.0) or 0.0,
+                'pct_chg': safe_float(row.get('pct_chg'), 0.0) or 0.0,
+            }
+        return pool, list(pool.keys())
+    except Exception as e:
+        print(f"⚠️ Tushare daily Top300备用失败：{str(e)[:160]}")
+        return {}, []
+
+
+def _build_pool_from_sina_snapshot(trade_date=None):
+    """最后一层公共行情备用。
+
+    股票代码优先来自Tushare stock_basic，再用新浪批量快照取得实时/最近价和成交量，
+    用 price*volume 估算成交额，仅用于防止所有主力池接口同时不可用。
+    """
+    try:
+        basic = pro.stock_basic(exchange='', list_status='L', fields='ts_code,name,industry')
+        if basic is None or basic.empty:
+            return {}, []
+        basic = basic.copy()
+        basic['ts_code'] = basic['ts_code'].astype(str).str.upper().str.strip()
+        basic = basic[basic['ts_code'].str.endswith(('.SH', '.SZ'))]
+        if basic.empty:
+            return {}, []
+
+        all_codes = basic['ts_code'].tolist()
+        name_map = dict(zip(basic['ts_code'], basic['name']))
+        industry_map = dict(zip(basic['ts_code'], basic['industry']))
+        pool = {}
+        # 新浪一次请求过多时容易失败，按100只分批。
+        for i in range(0, len(all_codes), 100):
+            batch = all_codes[i:i+100]
+            sina_symbols = ','.join(('sh' if c.endswith('.SH') else 'sz') + c[:6] for c in batch)
+            url = 'https://hq.sinajs.cn/list=' + sina_symbols
+            req = urllib.request.Request(url, headers={'User-Agent':'Mozilla/5.0','Referer':'https://finance.sina.com.cn/'})
+            with urllib.request.urlopen(req, timeout=12) as resp:
+                text = resp.read().decode('gbk', errors='ignore')
+            for seg in text.split(';'):
+                seg = seg.strip()
+                if '="' not in seg:
+                    continue
+                left, right = seg.split('="', 1)
+                m = re.search(r'list=(sh|sz)(\d{6})', left)
+                if not m:
+                    continue
+                market, code6 = m.group(1).upper(), m.group(2)
+                ts_code = f'{code6}.{"SH" if market == "SH" else "SZ"}'
+                vals = right.rstrip('"').split(',')
+                if len(vals) < 10:
+                    continue
+                try:
+                    name = vals[0] or name_map.get(ts_code, ts_code)
+                    open_p = safe_float(vals[1])
+                    prev_close = safe_float(vals[2])
+                    current = safe_float(vals[3])
+                    high = safe_float(vals[4])
+                    low = safe_float(vals[5])
+                    volume = safe_float(vals[8], 0.0) or 0.0
+                    if current is None or current <= 0:
+                        current = prev_close
+                    if current is None or current <= 0:
+                        continue
+                    est_amount = current * volume
+                    pct = ((current / prev_close) - 1) * 100 if prev_close and prev_close > 0 else 0.0
+                    pool[ts_code] = {
+                        'Ticker': ts_code, 'Name': name, 'Industry': industry_map.get(ts_code, '未知') or '未知',
+                        'Open': open_p if open_p and open_p > 0 else current,
+                        'Close': current, 'Amount': est_amount, 'pct_chg': pct,
+                    }
+                except Exception:
+                    continue
+            time.sleep(0.05)
+        if not pool:
+            return {}, []
+        top = sorted(pool.values(), key=lambda x: x.get('Amount', 0.0), reverse=True)[:300]
+        final_pool = {x['Ticker']: x for x in top}
+        return final_pool, list(final_pool.keys())
+    except Exception as e:
+        print(f"⚠️ 新浪批量行情备用失败：{str(e)[:160]}")
+        return {}, []
+
+
 def get_top_300_pool():
-    """
-    主力资金池：
-    1) 雪球 screener 按成交额 DESC 获取 Top 300（主）
-    2) 东方财富 clist 按成交额作为行情备用
-    行业信息仍优先使用 Tushare stock_basic；Tushare 不参与价格/K线事实链路。
-    """
-    print("🔍 [阶段1] 正在拉取最近交易日A股 Top 300 主力资金池（雪球主数据源）...")
-    full_pool, codes, trade_date = {}, [], None
+    """主力资金池多源容错：雪球→东方财富→Tushare daily→新浪快照。"""
+    print("🔍 [阶段1] 正在拉取最近完整交易日A股 Top 300 主力资金池（多源容错）...")
+    full_pool, codes, trade_date = {}, [], _get_latest_completed_ashare_trade_date()
 
     try:
         items = xq.get_top_by_amount(300)
@@ -676,31 +818,17 @@ def get_top_300_pool():
                 sym = str(q.get("symbol") or q.get("code") or "").upper().strip()
                 if not sym:
                     continue
-                ts_code = (
-                    f"{sym[2:]}.{sym[:2]}"
-                    if len(sym) >= 8 and sym[:2] in ("SH","SZ","BJ") else sym
-                )
+                ts_code = f"{sym[2:]}.{sym[:2]}" if len(sym) >= 8 and sym[:2] in ("SH","SZ","BJ") else sym
                 name = q.get("name") or ts_code
                 close = safe_float(q.get("current"))
                 if close is None or close <= 0:
                     continue
-                open_p = safe_float(q.get("open"))
-                if open_p is None:
-                    open_p = close
-                amount = safe_float(q.get("amount"), 0.0)
-                pct = safe_float(q.get("percent"), 0.0)
-                full_pool[ts_code] = {
-                    "Ticker": ts_code,
-                    "Name": str(name),
-                    "Industry": "未知",
-                    "Open": open_p,
-                    "Close": close,
-                    "Amount": amount if amount is not None else 0.0,
-                    "pct_chg": pct if pct is not None else 0.0,
-                }
+                open_p = safe_float(q.get("open")) or close
+                amount = safe_float(q.get("amount"), 0.0) or 0.0
+                pct = safe_float(q.get("percent"), 0.0) or 0.0
+                full_pool[ts_code] = {'Ticker':ts_code,'Name':str(name),'Industry':'未知','Open':open_p,'Close':close,'Amount':amount,'pct_chg':pct}
             if full_pool:
                 codes = list(full_pool.keys())[:300]
-                # 雪球没有稳定提供统一行业字段，因此只补充名称/行业元数据，不覆盖雪球价格。
                 try:
                     basic = pro.stock_basic(exchange='', list_status='L', fields='ts_code,name,industry')
                     if basic is not None and not basic.empty:
@@ -711,8 +839,7 @@ def get_top_300_pool():
                             full_pool[code]['Industry'] = industry_map.get(code, "未知") or "未知"
                 except Exception as e:
                     print(f"⚠️ 行业元数据补充失败：{str(e)[:120]}")
-                trade_date = get_bj_time().strftime('%Y%m%d')
-                print(f"✅ 雪球成功圈定 {len(full_pool)} 只核心活跃标的。")
+                print(f"✅ 雪球成功圈定 {len(full_pool)} 只核心活跃标的，交易日={trade_date}。")
         else:
             print("⚠️ 雪球 Top 300 返回空数据，启动东方财富行情备用。")
     except Exception as e:
@@ -730,37 +857,32 @@ def get_top_300_pool():
                 obj = json.loads(resp.read().decode('utf-8', errors='ignore'))
             diff = ((obj.get('data') or {}).get('diff') or [])
             for item in diff[:300]:
-                code = str(item.get('f12') or '').strip()
-                market = str(item.get('f13') or '').strip()
-                if not code or market not in {'0','1'}:
-                    continue
+                code = str(item.get('f12') or '').strip(); market = str(item.get('f13') or '').strip()
+                if not code or market not in {'0','1'}: continue
                 ts_code = f"{code}.{'SZ' if market=='0' else 'SH'}"
                 latest = safe_float(item.get('f2'))
-                if latest is None or latest <= 0:
-                    continue
-                full_pool[ts_code] = {
-                    'Ticker': ts_code, 'Name': str(item.get('f14') or ts_code),
-                    'Industry': '未知', 'Open': safe_float(item.get('f17'), latest),
-                    'Close': latest, 'Amount': safe_float(item.get('f6'), 0.0),
-                    'pct_chg': safe_float(item.get('f3'), 0.0),
-                }
+                if latest is None or latest <= 0: continue
+                full_pool[ts_code] = {'Ticker':ts_code,'Name':str(item.get('f14') or ts_code),'Industry':'未知','Open':safe_float(item.get('f17'),latest),'Close':latest,'Amount':safe_float(item.get('f6'),0.0) or 0.0,'pct_chg':safe_float(item.get('f3'),0.0) or 0.0}
             codes=list(full_pool.keys())[:300]
-            trade_date=get_bj_time().strftime('%Y%m%d')
-            print(f"✅ 东方财富备用圈定 {len(full_pool)} 只核心活跃标的。")
-            if full_pool:
-                try:
-                    basic = pro.stock_basic(exchange='', list_status='L', fields='ts_code,name,industry')
-                    if basic is not None and not basic.empty:
-                        industry_map = dict(zip(basic['ts_code'], basic['industry']))
-                        for code in codes:
-                            full_pool[code]['Industry'] = industry_map.get(code, '未知') or '未知'
-                except Exception:
-                    pass
+            print(f"✅ 东方财富备用圈定 {len(full_pool)} 只核心活跃标的，交易日={trade_date}。")
         except Exception as e:
-            print(f"🚨 雪球与东方财富均无法获取主力池：{str(e)[:160]}")
-            return {}, [], None
+            print(f"⚠️ 东方财富 Top 300 获取失败：{str(e)[:160]}，启动 Tushare daily 备用。")
 
-    # 资金流仍由 Tushare 补充；它是策略因子而非雪球实时行情主来源。
+    if not full_pool:
+        full_pool, codes = _build_pool_from_tushare_daily(trade_date)
+        if full_pool:
+            print(f"✅ Tushare daily 备用圈定 {len(full_pool)} 只核心活跃标的，交易日={trade_date}。")
+
+    if not full_pool:
+        full_pool, codes = _build_pool_from_sina_snapshot(trade_date)
+        if full_pool:
+            print(f"✅ 新浪批量行情最终备用圈定 {len(full_pool)} 只核心活跃标的，交易日={trade_date}。")
+
+    if not full_pool:
+        print("🚨 雪球、东方财富、Tushare daily、新浪均无法获取核心资金池；禁止使用空池继续选股。")
+        return {}, [], None
+
+    # Tushare 资金流补充：字段缺失时显式使用同长度Series，避免 int.fillna 错误。
     try:
         df_mf = pro.moneyflow(trade_date=trade_date)
         if df_mf is not None and not df_mf.empty:
@@ -769,20 +891,20 @@ def get_top_300_pool():
             df_mf['main_net'] = lg + net
             mf_map = dict(zip(df_mf['ts_code'], df_mf['main_net']))
             for ts_code in full_pool:
-                full_pool[ts_code]['主力净流入(万元)'] = mf_map.get(ts_code, 0)
+                full_pool[ts_code]['主力净流入(万元)'] = safe_float(mf_map.get(ts_code), 0.0) or 0.0
             sector_flow = {}
             for ts_code, data in full_pool.items():
                 sector = data.get('Industry', '其他')
-                sector_flow[sector] = sector_flow.get(sector, 0) + data.get('主力净流入(万元)', 0)
+                sector_flow[sector] = sector_flow.get(sector, 0) + (data.get('主力净流入(万元)') or 0)
             top5_sectors = sorted(sector_flow.items(), key=lambda x: x[1], reverse=True)[:5]
             hot_sectors = {s[0] for s in top5_sectors if s[1] > 0}
             for ts_code in full_pool:
                 full_pool[ts_code]['热点板块'] = full_pool[ts_code].get('Industry', '其他') in hot_sectors
             print(f"✅ 板块资金流向计算完成，热点板块: {list(hot_sectors)}")
     except Exception as e:
-        print(f"⚠️ 板块资金流向获取失败: {e}")
+        print(f"⚠️ 板块资金流向获取失败：{str(e)[:160]}")
 
-    return full_pool, codes[:300], trade_date
+    return full_pool, list(full_pool.keys())[:300], trade_date
 
 
 # ==========================================
