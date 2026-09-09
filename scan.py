@@ -2586,9 +2586,35 @@ def _daily_to_weekly(df_daily):
     return pd.concat(rows,ignore_index=True) if rows else pd.DataFrame()
 
 
+def _daily_to_monthly(df_daily):
+    """由真实日线聚合月线，用于月级趋势/动量共振。"""
+    if df_daily is None or df_daily.empty:
+        return pd.DataFrame()
+    rows=[]
+    for code,g in df_daily.groupby('ts_code'):
+        g=g.copy().sort_values('trade_date')
+        dt=pd.to_datetime(g['trade_date'].astype(str), format='%Y%m%d', errors='coerce')
+        g=g.assign(_dt=dt).dropna(subset=['_dt'])
+        if g.empty:
+            continue
+        m=g.set_index('_dt').resample('ME').agg({
+            'open':'first','high':'max','low':'min','close':'last','vol':'sum','amount':'sum'
+        }).dropna(subset=['open','close'])
+        if m.empty:
+            continue
+        m=m.reset_index()
+        m['ts_code']=code
+        m['trade_date']=m['_dt'].dt.strftime('%Y%m%d')
+        m['pre_close']=m['close'].shift(1)
+        m['pct_chg']=(m['close']/m['pre_close']-1)*100
+        m['change']=m['close']-m['pre_close']
+        rows.append(m[['ts_code','trade_date','open','high','low','close','pre_close','change','pct_chg','vol','amount']])
+    return pd.concat(rows, ignore_index=True) if rows else pd.DataFrame()
+
+
 def calc_tech_indicators(full_pool, codes, trade_date):
     print("⚙️ [阶段3] 正在使用Tushare主日线并由真实日线计算周线/技术指标...")
-    start_hist=(get_bj_time()-datetime.timedelta(days=220)).strftime('%Y%m%d')
+    start_hist=(get_bj_time()-datetime.timedelta(days=420)).strftime('%Y%m%d')
     # Tushare主K线；历史不足只做提示，不再调用未定义/易触发限频的逐股备用K线。
     df_hist_ts, ts_failed_codes = _tushare_history_bulk_by_trade_date(codes, start_hist, trade_date, pause_seconds=0.22)
     df_hist = df_hist_ts.copy() if not df_hist_ts.empty else pd.DataFrame()
@@ -2615,16 +2641,19 @@ def calc_tech_indicators(full_pool, codes, trade_date):
         print(f"   ℹ️ 历史完整性检查：{len(fallback_needed)}只少于60根日K，保持Tushare结果继续计算。") if fallback_needed else None
 
     df_weekly=_daily_to_weekly(df_hist)
+    df_monthly=_daily_to_monthly(df_hist)
     daily_count=df_hist['ts_code'].nunique() if not df_hist.empty else 0
     weekly_count=df_weekly['ts_code'].nunique() if not df_weekly.empty else 0
-    print(f"   📈 K线数据状态：日线 {daily_count}/{len(codes)}；周线 {weekly_count}/{len(codes)}（周线由真实日线聚合）")
+    monthly_count=df_monthly['ts_code'].nunique() if not df_monthly.empty else 0
+    print(f"   📈 K线数据状态：日线 {daily_count}/{len(codes)}；周线 {weekly_count}/{len(codes)}；月线 {monthly_count}/{len(codes)}（周/月线均由真实日线聚合）")
 
     FALLBACK = [
         ("乖离率(%)", 0.0), ("RSI", 50.0), ("MACD趋势", "N/A"),
         ("MACD_HIST_LAST", 0.0), ("MACD_HIST_PREV", 0.0),
         ("MACD金叉", False), ("MACD绿柱缩短", False),
-        ("MACD_V型反转", False), ("周线MACD_V型反转", False),
-        ("周线共振", False),
+        ("MACD_V型反转", False), ("周线MACD_V型反转", False), ("月线MACD上升", False),
+        ("月线MA5>MA10", False), ("月线趋势共振", False),
+        ("周线共振", False), ("三周期共振", False),
         ("KDJ_J", 50.0), ("KDJ_J回升", False), ("KDJ_J超卖", False),
         ("量能放大", False), ("量比", 1.0), ("看涨形态", []),
         ("ATR", 0.0), ("ATR_Pct", 5.0),
@@ -2634,6 +2663,9 @@ def calc_tech_indicators(full_pool, codes, trade_date):
         weekly_bullish = False
         weekly_macd_rising = False
         weekly_macd_v_reverse = False
+        monthly_macd_rising = False
+        monthly_ma_bullish = False
+        monthly_trend_resonance = False
         if not df_weekly.empty and code in df_weekly['ts_code'].values:
             wk = df_weekly[df_weekly['ts_code'] == code].sort_values('trade_date')
             if len(wk) >= 12:
@@ -2649,9 +2681,25 @@ def calc_tech_indicators(full_pool, codes, trade_date):
                 w_hist_prev2 = float(w_hist.iloc[-3]) if len(w_hist) >= 3 else w_hist_prev
                 weekly_macd_v_reverse = (len(w_hist) >= 3) and (w_hist_prev2 > w_hist_prev) and (w_hist_prev < w_hist_last)
                 weekly_bullish = bool(wma5 > wma10 and weekly_macd_rising)
+        if not df_monthly.empty and code in df_monthly['ts_code'].values:
+            mn = df_monthly[df_monthly['ts_code'] == code].sort_values('trade_date')
+            if len(mn) >= 12:
+                mc = mn['close'].values.astype(float)
+                m5 = pd.Series(mc).rolling(5).mean()
+                m10 = pd.Series(mc).rolling(10).mean()
+                mexp1 = pd.Series(mc).ewm(span=12, adjust=False).mean()
+                mexp2 = pd.Series(mc).ewm(span=26, adjust=False).mean()
+                mhist = (mexp1 - mexp2 - (mexp1 - mexp2).ewm(span=9, adjust=False).mean()) * 2
+                monthly_macd_rising = bool(float(mhist.iloc[-1]) > float(mhist.iloc[-2]))
+                monthly_ma_bullish = bool(float(m5.iloc[-1]) > float(m10.iloc[-1]) and float(mc[-1]) >= float(m5.iloc[-1]))
+                monthly_trend_resonance = bool(monthly_macd_rising and monthly_ma_bullish)
         full_pool[code]["周线共振"] = weekly_bullish
         full_pool[code]["周线MACD上升"] = weekly_macd_rising
         full_pool[code]["周线MACD_V型反转"] = weekly_macd_v_reverse
+        full_pool[code]["月线MACD上升"] = monthly_macd_rising
+        full_pool[code]["月线MA5>MA10"] = monthly_ma_bullish
+        full_pool[code]["月线趋势共振"] = monthly_trend_resonance
+
         if df_hist.empty or code not in df_hist['ts_code'].values:
             for fld, dflt in FALLBACK:
                 full_pool[code].setdefault(fld, dflt)
@@ -2757,24 +2805,31 @@ def calc_tech_indicators(full_pool, codes, trade_date):
 # 7. AI 事件推演选股（含联动警告）
 # ==========================================
 def check_period_resonance(stock):
+    """三周期共振：日线动量 + 周线趋势 + 月线趋势同向；日线需有看涨形态确认。
+    若仅满足日+周，则返回弱共振，便于评分层次化而非一刀切。
+    """
     daily_rising = stock.get("日线MACD上升", False)
     weekly_rising = stock.get("周线MACD上升", False)
-    if not daily_rising or not weekly_rising:
-        return False, []
+    monthly_rising = stock.get("月线MACD上升", False)
+    monthly_trend = stock.get("月线趋势共振", False)
     patterns = stock.get("看涨形态", [])
     valid_patterns = ["看涨吞没", "启明星", "刺穿线", "锤子线"]
     matched = [p for p in patterns if p in valid_patterns]
-    if not matched:
-        return False, []
-    return True, matched
+    daily_weekly = bool(daily_rising and weekly_rising)
+    three_period = bool(daily_weekly and monthly_rising and monthly_trend)
+    # 日+周+日线看涨形态：作为次一级技术共振，不等同三周期共振。
+    two_period = bool(daily_weekly and matched)
+    return three_period, matched, two_period
+
 
 def screen_technical_setups(final_pool):
     sector_groups = {}
     for stock in final_pool[:100]:
         tech_score   = 0
         tech_reasons = []
-        is_resonance, resonance_patterns = check_period_resonance(stock)
+        is_resonance, resonance_patterns, two_period_resonance = check_period_resonance(stock)
         stock["周期共振"] = is_resonance
+        stock["日周共振"] = two_period_resonance
         stock["共振形态"] = resonance_patterns
 
         h_last = stock.get("MACD_HIST_LAST", 0)
@@ -2823,13 +2878,17 @@ def screen_technical_setups(final_pool):
             base = min(max(pm.get(p, 2) for p in patterns) + (2 if len(patterns) > 1 else 0), 5)
             tech_score += base; tech_reasons.append(f"{'&'.join(patterns)}(+{base})")
 
-        weekly = stock.get("周线共振", False)
-        if weekly:
-            tech_score = min(int(tech_score * 1.25), 40)
-            tech_reasons.append("✅周日共振×1.25")
+        three_period = stock.get("周期共振", False)
+        two_period = stock.get("日周共振", False)
+        if three_period:
+            tech_score = min(int(tech_score * 1.40), 40)
+            tech_reasons.append("🔥日周月三周期共振×1.40")
+        elif two_period:
+            tech_score = min(int(tech_score * 1.20), 40)
+            tech_reasons.append("✅日周共振×1.20")
         elif tech_score > 0:
-            tech_score = int(tech_score * 0.6)
-            tech_reasons.append("⚠️仅日线×0.6")
+            tech_score = int(tech_score * 0.55)
+            tech_reasons.append("⚠️未形成日周共振×0.55")
 
         if stock.get("MACD_V型反转", False):
             tech_score += 8
@@ -2837,6 +2896,9 @@ def screen_technical_setups(final_pool):
         if stock.get("周线MACD_V型反转", False):
             tech_score += 8
             tech_reasons.append("周线MACD柱线V型反转(+8)")
+        if stock.get("月线趋势共振", False):
+            tech_score += 8
+            tech_reasons.append("月线趋势确认(+8)")
 
         stock["技术评分"] = min(tech_score, 40)
 
@@ -2967,6 +3029,8 @@ def generate_ai_report(pool_data, macro_news_text, macro_data_text, us_sector_te
             "估值结论": d.get("估值结论", "数据不足"),
             "技术信号": d.get("技术信号", []),
             "周线共振": "🟢是" if d.get("周线共振") else "🔴否",
+            "月线共振": "🟢是" if d.get("月线趋势共振") else "🔴否",
+            "三周期共振": "🔥是" if d.get("周期共振") else "否",
             "MACD金叉": "✅是" if d.get("MACD金叉") else "否",
             "KDJ_J": d.get("KDJ_J", "N/A"), "量比": d.get("量比", "N/A"),
             "看涨形态": d.get("看涨形态", []),
@@ -3063,7 +3127,7 @@ def generate_ai_report(pool_data, macro_news_text, macro_data_text, us_sector_te
     【核心工作流程】（基于回测验证，严格执行）：
     第一步（新闻定方向）：从宏观新闻中提炼出今日1-2条最强产业链主线。必须优先使用[🔥今日最新]和[📰今日]标签的新闻作为主线依据，[📄昨日]新闻仅作为辅助验证，[📑前日]新闻不得作为主线依据。
     第二步（板块锁定）：只在你提炼出的主线板块中寻找标的。严禁跳出主线去买"技术面好但没新闻"的票。
-    第三步（技术选个股）：在主线板块内，**必须优先选择【周期共振】为 True 的标的**（即代码已自动标记满足：日线MACD↑ + 周线MACD↑ + 看涨吞没/启明星/刺穿线/锤子线）。
+    第三步（技术选个股）：在主线板块内，**必须优先选择【日周月三周期共振】为 True 的标的**（代码自动标记：日线MACD↑ + 周线MACD↑ + 月线趋势确认）。日线看涨形态作为短线入场确认，不再作为月线共振的必选条件。若无三周期共振，再选择日周共振或技术评分≥20的标的，并明确写明共振层级。
     第四步（评分确认）：如果存在周期共振标的，直接将其排入Top1-5，除非该标的有重大负面新闻。若无共振标的，再退而求其次选择技术评分≥20的票，但须在报告中明确警示"无共振信号"。
     第五步（新闻权重校验）：对每只入选Top1-5的标的，检查其个股新闻的时效标签。如果主要利好来自[📑前日]或[📄昨日]且个股已大涨，必须降级至观察池或排除。
 
