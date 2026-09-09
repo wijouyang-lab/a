@@ -911,9 +911,9 @@ def get_top_300_pool():
 # 2. 【新版】重要人物讲话 + 关键经济数据 + 宏观状态机
 # ==========================================
 # 数据职责：
-# - 雪球：A股实时行情/主力活跃榜/K线/个股动态/估值（第一股票数据源）
-# - 东方财富/新浪/Yahoo：雪球行情失败时的备用行情源
-# - Tushare：仅保留资金流/行业元数据等非价格字段
+# - 雪球：A股实时行情/主力活跃榜/个股动态/估值
+# - 东方财富/新浪/Yahoo：实时/新闻/历史行情备用
+# - Tushare：A股主日线K线 + 资金流/行业元数据 + 宏观结构化数据
 # - 中国宏观：国家统计局/人民银行官方网页
 # - 美国宏观：BLS + BEA，FRED作为PCE兜底
 # - 重要人物：新闻RSS + Federal Reserve官方讲话页
@@ -2494,167 +2494,51 @@ def enrich_pool_with_news(pool_data: list) -> list:
 # ==========================================
 # 6. 定向计算技术指标
 # ==========================================
-def _xq_history_one(code, count=260):
-    """雪球主日线。返回标准字段；失败后仅交给 Eastmoney/Sina/Yahoo 兜底。"""
+def _tushare_history_one(code, start_date, end_date):
+    """Tushare主日线：按股票获取真实A股日K，避免雪球K线限频/空响应。"""
     try:
-        df = xq.get_kline(code, count=count, period="day")
-        if df is not None and not df.empty:
-            return code, df, None
-        return code, pd.DataFrame(), "雪球返回空K线"
+        df = pro.daily(ts_code=code, start_date=start_date, end_date=end_date,
+                       fields='ts_code,trade_date,open,high,low,close,pre_close,change,pct_chg,vol,amount')
+        if df is None or df.empty:
+            return code, pd.DataFrame(), "Tushare返回空K线"
+        df = df.copy()
+        for col in ['open','high','low','close','pre_close','change','pct_chg','vol','amount']:
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors='coerce')
+        df['ts_code'] = df['ts_code'].astype(str).str.strip().str.upper()
+        df['trade_date'] = df['trade_date'].astype(str).str.replace('-', '', regex=False)
+        df = df.dropna(subset=['trade_date','open','high','low','close'])
+        df = df.drop_duplicates(subset=['ts_code','trade_date']).sort_values('trade_date')
+        if len(df) < 30:
+            return code, df, f"Tushare仅返回{len(df)}根K线"
+        return code, df, None
     except Exception as e:
-        return code, pd.DataFrame(), str(e)[:140]
+        return code, pd.DataFrame(), str(e)[:160]
 
 
-def _xq_history_multi(codes, count=260, max_workers=5):
-    """雪球日线批量抓取。控制并发以降低 403/限频风险。"""
+def _tushare_history_multi(codes, start_date, end_date, max_workers=5):
+    """Tushare批量日线。控制并发，失败单股再交给非Tushare历史源兜底。"""
     if not codes:
         return pd.DataFrame(), []
-    print(f"   ☁️ 启动雪球主日线：{len(codes)}只")
+    print(f"   📊 启动Tushare主日线：{len(codes)}只，区间={start_date}~{end_date}")
     frames, failed = [], []
     with ThreadPoolExecutor(max_workers=max_workers) as ex:
-        futures = {ex.submit(_xq_history_one, c, count): c for c in codes}
+        futures = {ex.submit(_tushare_history_one, c, start_date, end_date): c for c in codes}
         for i, fut in enumerate(as_completed(futures), 1):
-            code, df, err = fut.result()
+            code = futures[fut]
+            try:
+                code, df, err = fut.result()
+            except Exception as e:
+                df, err = pd.DataFrame(), str(e)[:160]
             if df is not None and not df.empty:
                 frames.append(df)
             else:
                 failed.append(code)
-                print(f"   ⚠️ 雪球K线失败 {code}: {err}")
+                print(f"   ⚠️ Tushare K线失败 {code}: {err}")
             if i % 50 == 0 or i == len(futures):
-                print(f"   ☁️ 雪球K线进度 {i}/{len(futures)}")
+                print(f"   📊 Tushare K线进度 {i}/{len(futures)}")
     out = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
     return out, failed
-
-
-def _eastmoney_fetch_daily(code, start_date, end_date):
-    """Eastmoney历史日K备用源。"""
-    bare=str(code).split('.')[0]
-    suffix=str(code).upper().split('.')[-1] if '.' in str(code) else 'SZ'
-    market='1' if suffix=='SH' else '0'
-    url=("https://push2his.eastmoney.com/api/qt/stock/kline/get"
-         f"?secid={market}.{bare}&klt=101&fqt=0&beg={start_date}&end={end_date}"
-         "&fields1=f1,f2,f3,f4,f5,f6&fields2=f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61"
-         "&ut=fa5fd1943c7b386f172d6893dbfba10b")
-    req=urllib.request.Request(url,headers={'User-Agent':'Mozilla/5.0','Referer':'https://quote.eastmoney.com/'})
-    with urllib.request.urlopen(req,timeout=12) as resp:
-        obj=json.loads(resp.read().decode('utf-8',errors='ignore'))
-    rows=[]
-    for line in (((obj or {}).get('data') or {}).get('klines') or []):
-        parts=str(line).split(',')
-        if len(parts)<7: continue
-        try:
-            dt,op,cl,hi,lo,vol,amount=parts[:7]
-            rows.append({'ts_code':code,'trade_date':dt.replace('-',''),'open':float(op),'close':float(cl),'high':float(hi),'low':float(lo),'pre_close':None,'change':None,'pct_chg':None,'vol':float(vol),'amount':float(amount)})
-        except (TypeError,ValueError):
-            continue
-    return pd.DataFrame(rows)
-
-
-def _sina_fetch_daily(code, limit=320):
-    """新浪历史日K第二备用源。"""
-    ticker=str(code).strip().upper(); bare=ticker.split('.')[0]; suffix=ticker.split('.')[-1] if '.' in ticker else 'SZ'
-    symbol=('sh' if suffix=='SH' else 'sz')+bare
-    url=('https://money.finance.sina.com.cn/quotes_service/api/json_v2.php/'
-         f'CN_MarketData.getKLineData?symbol={symbol}&scale=240&ma=no&datalen={int(limit)}')
-    req=urllib.request.Request(url,headers={'User-Agent':'Mozilla/5.0'})
-    with urllib.request.urlopen(req,timeout=12) as resp:
-        obj=json.loads(resp.read().decode('gbk',errors='ignore'))
-    rows=[]
-    for item in obj or []:
-        try:
-            dt=str(item.get('day',''))
-            rows.append({'ts_code':ticker,'trade_date':dt.replace('-',''),'open':float(item['open']),'close':float(item['close']),'high':float(item['high']),'low':float(item['low']),'pre_close':None,'change':None,'pct_chg':None,'vol':float(item.get('volume',0)),'amount':float(item.get('amount',0))})
-        except (TypeError,ValueError,KeyError):
-            continue
-    return pd.DataFrame(rows)
-
-
-def _fetch_yahoo_daily(code, start_date, end_date):
-    """Yahoo Finance 最终历史日K备用源。"""
-    ticker = str(code).strip().upper()
-    symbol = _to_yahoo_symbol(ticker)
-    df = _yahoo_chart_to_df(symbol, interval="1d", period_days=420)
-    if df.empty:
-        return pd.DataFrame()
-
-    lo = pd.to_datetime(start_date, format="%Y%m%d", errors="coerce")
-    hi = pd.to_datetime(end_date, format="%Y%m%d", errors="coerce")
-    local_dates = pd.to_datetime(df["datetime"], errors="coerce").dt.tz_localize(None).dt.normalize()
-    mask = local_dates.between(lo.normalize(), hi.normalize())
-    df = df.loc[mask].copy()
-    if df.empty:
-        return pd.DataFrame()
-
-    df["trade_date"] = local_dates.loc[df.index].dt.strftime("%Y%m%d")
-    df = df.sort_values("trade_date")
-    return pd.DataFrame({
-        "ts_code": ticker,
-        "trade_date": df["trade_date"].values,
-        "open": df["open"].astype(float).values,
-        "close": df["close"].astype(float).values,
-        "high": df["high"].astype(float).values,
-        "low": df["low"].astype(float).values,
-        "pre_close": None,
-        "change": None,
-        "pct_chg": None,
-        "vol": df["volume"].fillna(0).astype(float).values,
-        "amount": np.nan,
-    })
-
-
-def _fetch_one_fallback(code,start_date,end_date):
-    east_err='未执行'
-    sina_err='未执行'
-    try:
-        df=_eastmoney_fetch_daily(code,start_date,end_date)
-        if df is not None and len(df)>=30:
-            return code,df,'Eastmoney'
-        east_err=f"Eastmoney返回{len(df) if df is not None else 0}行"
-    except Exception as e:
-        east_err=str(e)[:120]
-
-    try:
-        df=_sina_fetch_daily(code,320)
-        if df is not None and not df.empty:
-            dates=pd.to_datetime(df['trade_date'],format='%Y%m%d',errors='coerce')
-            lo=pd.to_datetime(start_date,format='%Y%m%d',errors='coerce')
-            hi=pd.to_datetime(end_date,format='%Y%m%d',errors='coerce')
-            df=df[dates.between(lo,hi)].copy()
-        if df is not None and len(df)>=30:
-            return code,df,'Sina'
-        sina_err=f"Sina返回{len(df) if df is not None else 0}行"
-    except Exception as e:
-        sina_err=str(e)[:120]
-
-    try:
-        df=_fetch_yahoo_daily(code,start_date,end_date)
-        if df is not None and len(df)>=30:
-            return code,df,'Yahoo'
-        return code,df if df is not None else pd.DataFrame(),f'Eastmoney={east_err}; Sina={sina_err}; Yahoo不足30行'
-    except Exception as e:
-        return code,pd.DataFrame(),f'Eastmoney={east_err}; Sina={sina_err}; Yahoo={str(e)[:120]}'
-
-
-def _fallback_daily_multi_source(codes,start_date,end_date,max_workers=8):
-    if not codes: return pd.DataFrame()
-    print(f"   🔁 启动多源K线备用：{len(codes)}只（Eastmoney→新浪→Yahoo）")
-    frames=[]; em=si=yh=fail=0
-    with ThreadPoolExecutor(max_workers=max_workers) as ex:
-        futures={ex.submit(_fetch_one_fallback,c,start_date,end_date):c for c in codes}
-        for fut in as_completed(futures):
-            c=futures[fut]
-            try: code,df,src=fut.result()
-            except Exception as e:
-                fail+=1; print(f"   ⚠️ 备用K线 {c} 异常: {str(e)[:120]}"); continue
-            if df is not None and not df.empty:
-                frames.append(df)
-                em += (src=='Eastmoney')
-                si += (src=='Sina')
-                yh += (src=='Yahoo')
-            else:
-                fail+=1; print(f"   ⚠️ 备用K线 {c} 最终失败: {src}")
-    print(f"   ✅ 备用K线完成：Eastmoney {em}只；新浪 {si}只；Yahoo {yh}只；失败 {fail}只")
-    return pd.concat(frames,ignore_index=True) if frames else pd.DataFrame()
 
 
 def _daily_to_weekly(df_daily):
@@ -2674,17 +2558,14 @@ def _daily_to_weekly(df_daily):
 
 
 def calc_tech_indicators(full_pool, codes, trade_date):
-    print("⚙️ [阶段3] 正在拉取日线K线并由真实日线计算周线/技术指标...")
+    print("⚙️ [阶段3] 正在使用Tushare主日线并由真实日线计算周线/技术指标...")
     start_hist=(get_bj_time()-datetime.timedelta(days=220)).strftime('%Y%m%d')
-    # 雪球主K线；失败只进入东方财富→新浪→Yahoo，不再使用 Tushare。
-    df_hist_xq, xq_failed_codes = _xq_history_multi(codes, count=260, max_workers=5)
-    if not df_hist_xq.empty:
-        df_hist_xq['ts_code'] = df_hist_xq['ts_code'].astype(str).str.strip()
-        df_hist_xq['trade_date'] = df_hist_xq['trade_date'].astype(str).str.replace('-','',regex=False)
-    df_hist = df_hist_xq.copy() if not df_hist_xq.empty else pd.DataFrame()
-    if xq_failed_codes:
-        print(f"   🔁 雪球K线失败 {len(xq_failed_codes)}只，进入东方财富→新浪→Yahoo备用")
-        df_fallback=_fallback_daily_multi_source(xq_failed_codes,start_hist,trade_date,max_workers=8)
+    # Tushare主K线；只有Tushare失败/历史不足的股票才进入非Tushare备用源。
+    df_hist_ts, ts_failed_codes = _tushare_history_multi(codes, start_hist, trade_date, max_workers=5)
+    df_hist = df_hist_ts.copy() if not df_hist_ts.empty else pd.DataFrame()
+    if ts_failed_codes:
+        print(f"   🔁 Tushare K线失败 {len(ts_failed_codes)}只，进入东方财富→新浪→Yahoo备用")
+        df_fallback=_fallback_daily_multi_source(ts_failed_codes,start_hist,trade_date,max_workers=8)
         if not df_fallback.empty:
             df_hist=pd.concat([df_hist,df_fallback],ignore_index=True) if not df_hist.empty else df_fallback
     if not df_hist.empty:
