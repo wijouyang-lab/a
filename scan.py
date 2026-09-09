@@ -658,96 +658,15 @@ def get_stop_loss_hit_warning():
         parts.append("⚠️ 【接近止损联动】以下标的最近一次 Review 距离移动止损≤3%：今日不得作为 Top 1-5 核心追涨推荐；若进入候选池必须标注高风险。\n"+'\n'.join(details))
     return '\n\n'.join(parts)+'\n'
 
-def get_latest_completed_trade_date():
-    """返回今天之前最近一个已完成的A股交易日（盘前运行时不把今天当作已完成日）。"""
-    today_str = get_bj_time().strftime('%Y%m%d')
-    try:
-        cal = pro.trade_cal(exchange='SSE', start_date=(get_bj_time()-datetime.timedelta(days=15)).strftime('%Y%m%d'), end_date=today_str, fields='cal_date,is_open')
-        if cal is not None and not cal.empty:
-            opened = cal[cal['is_open'].astype(str) == '1']['cal_date'].astype(str).tolist()
-            before_today = [d for d in opened if d < today_str]
-            if before_today:
-                return max(before_today)
-    except Exception as e:
-        print(f"⚠️ Tushare交易日历获取失败，使用日期近似回退：{str(e)[:100]}")
-    d = get_bj_time().date() - datetime.timedelta(days=1)
-    while d.weekday() >= 5:
-        d -= datetime.timedelta(days=1)
-    return d.strftime('%Y%m%d')
-
-
-def _eastmoney_top_pool(limit=300):
-    """东方财富主力池备用。"""
-    urls = [
-        "https://push2.eastmoney.com/api/qt/clist/get",
-        "https://push2his.eastmoney.com/api/qt/clist/get",
-    ]
-    last_err = None
-    for base in urls:
-        try:
-            url = (base + "?pn=1&pz=500&po=1&np=1&ut=bd1d9ddb04089700cf9c27f6f7426281"
-                   "&fltt=2&invt=2&fid=f6"
-                   "&fs=m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23"
-                   "&fields=f2,f3,f5,f6,f12,f13,f14,f15,f16,f17,f18")
-            req = urllib.request.Request(url, headers={'User-Agent':'Mozilla/5.0','Referer':'https://quote.eastmoney.com/'})
-            with urllib.request.urlopen(req, timeout=12) as resp:
-                obj = json.loads(resp.read().decode('utf-8', errors='ignore'))
-            diff = ((obj.get('data') or {}).get('diff') or [])
-            rows=[]
-            for item in diff:
-                code=str(item.get('f12') or '').strip(); market=str(item.get('f13') or '').strip()
-                latest=safe_float(item.get('f2'))
-                if not code or market not in {'0','1'} or latest is None or latest <= 0:
-                    continue
-                ts_code=f"{code}.{'SZ' if market=='0' else 'SH'}"
-                rows.append({
-                    'Ticker':ts_code,'Name':str(item.get('f14') or ts_code),'Industry':'未知',
-                    'Open':safe_float(item.get('f17'),latest),'Close':latest,
-                    'Amount':safe_float(item.get('f6'),0.0),'pct_chg':safe_float(item.get('f3'),0.0),
-                })
-            if rows:
-                return rows[:limit], base
-        except Exception as e:
-            last_err=e
-    raise RuntimeError(f"Eastmoney all endpoints failed: {last_err}")
-
-
-def _tushare_top_pool(limit=300, trade_date=None):
-    """Tushare daily成交额排序备用；用于雪球/东财网络异常时保证资金池不断供。"""
-    trade_date = trade_date or get_latest_completed_trade_date()
-    df = pro.daily(trade_date=trade_date, fields='ts_code,open,close,pct_chg,amount')
-    if df is None or df.empty:
-        return []
-    df['amount']=pd.to_numeric(df['amount'], errors='coerce').fillna(0)
-    df=df.sort_values('amount', ascending=False).head(limit)
-    rows=[]
-    for _, r in df.iterrows():
-        code=str(r.get('ts_code') or '').strip()
-        if not code:
-            continue
-        rows.append({
-            'Ticker':code,'Name':code,'Industry':'未知','Open':safe_float(r.get('open')),'Close':safe_float(r.get('close')),
-            'Amount':safe_float(r.get('amount'),0.0),'pct_chg':safe_float(r.get('pct_chg'),0.0),
-        })
-    return rows
-
-
-def _sina_top_pool(limit=300):
-    """新浪行情列表备用；按成交额在本地排序。"""
-    url = 'https://hq.sinajs.cn/list=' + ','.join([f's_sh{m}' for m in []])
-    # 新浪没有稳定的一次性全A排名接口，因此这里明确返回空，由上层继续走Tushare兜底。
-    return []
-
-
 def get_top_300_pool():
     """
-    主力资金池多源容错：
-    1) 雪球 screener（主）
-    2) 东方财富两个API域名（备用）
-    3) Tushare daily（结构化数据兜底，按最近完整交易日成交额排序）
+    主力资金池：
+    1) 雪球 screener 按成交额 DESC 获取 Top 300（主）
+    2) 东方财富 clist 按成交额作为行情备用
+    行业信息仍优先使用 Tushare stock_basic；Tushare 不参与价格/K线事实链路。
     """
-    print("🔍 [阶段1] 正在拉取最近完整交易日A股 Top 300 主力资金池（多源容错）...")
-    full_pool, codes, trade_date = {}, [], get_latest_completed_trade_date()
+    print("🔍 [阶段1] 正在拉取最近交易日A股 Top 300 主力资金池（雪球主数据源）...")
+    full_pool, codes, trade_date = {}, [], None
 
     try:
         items = xq.get_top_by_amount(300)
@@ -792,9 +711,8 @@ def get_top_300_pool():
                             full_pool[code]['Industry'] = industry_map.get(code, "未知") or "未知"
                 except Exception as e:
                     print(f"⚠️ 行业元数据补充失败：{str(e)[:120]}")
-                # 盘前运行时，雪球实时榜单本身不提供可靠的‘已完成交易日’概念；
-                # 统一沿用最近一个完整交易日作为资金流/技术K线口径。
-                print(f"✅ 雪球成功圈定 {len(full_pool)} 只核心活跃标的，参考完整交易日={trade_date}。")
+                trade_date = get_bj_time().strftime('%Y%m%d')
+                print(f"✅ 雪球成功圈定 {len(full_pool)} 只核心活跃标的。")
         else:
             print("⚠️ 雪球 Top 300 返回空数据，启动东方财富行情备用。")
     except Exception as e:
@@ -802,42 +720,53 @@ def get_top_300_pool():
 
     if not full_pool:
         try:
-            rows, em_source = _eastmoney_top_pool(300)
-            for row in rows:
-                full_pool[row['Ticker']] = row
-            codes = list(full_pool.keys())[:300]
-            print(f"✅ 东方财富备用圈定 {len(full_pool)} 只核心活跃标的（{em_source}）。")
+            url = ("https://push2.eastmoney.com/api/qt/clist/get"
+                   "?pn=1&pz=500&po=1&np=1&ut=bd1d9ddb04089700cf9c27f6f7426281"
+                   "&fltt=2&invt=2&fid=f6"
+                   "&fs=m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23"
+                   "&fields=f2,f3,f5,f6,f12,f13,f14,f15,f16,f17,f18")
+            req = urllib.request.Request(url, headers={'User-Agent':'Mozilla/5.0','Referer':'https://quote.eastmoney.com/'})
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                obj = json.loads(resp.read().decode('utf-8', errors='ignore'))
+            diff = ((obj.get('data') or {}).get('diff') or [])
+            for item in diff[:300]:
+                code = str(item.get('f12') or '').strip()
+                market = str(item.get('f13') or '').strip()
+                if not code or market not in {'0','1'}:
+                    continue
+                ts_code = f"{code}.{'SZ' if market=='0' else 'SH'}"
+                latest = safe_float(item.get('f2'))
+                if latest is None or latest <= 0:
+                    continue
+                full_pool[ts_code] = {
+                    'Ticker': ts_code, 'Name': str(item.get('f14') or ts_code),
+                    'Industry': '未知', 'Open': safe_float(item.get('f17'), latest),
+                    'Close': latest, 'Amount': safe_float(item.get('f6'), 0.0),
+                    'pct_chg': safe_float(item.get('f3'), 0.0),
+                }
+            codes=list(full_pool.keys())[:300]
+            trade_date=get_bj_time().strftime('%Y%m%d')
+            print(f"✅ 东方财富备用圈定 {len(full_pool)} 只核心活跃标的。")
+            if full_pool:
+                try:
+                    basic = pro.stock_basic(exchange='', list_status='L', fields='ts_code,name,industry')
+                    if basic is not None and not basic.empty:
+                        industry_map = dict(zip(basic['ts_code'], basic['industry']))
+                        for code in codes:
+                            full_pool[code]['Industry'] = industry_map.get(code, '未知') or '未知'
+                except Exception:
+                    pass
         except Exception as e:
-            print(f"⚠️ 东方财富多端点均失败：{str(e)[:160]}")
-
-    if not full_pool:
-        try:
-            rows = _tushare_top_pool(300, trade_date=trade_date)
-            for row in rows:
-                full_pool[row['Ticker']] = row
-            codes = list(full_pool.keys())[:300]
-            print(f"✅ Tushare成交额备用圈定 {len(full_pool)} 只核心活跃标的（{trade_date}）。")
-        except Exception as e:
-            print(f"🚨 Tushare主力池兜底也失败：{str(e)[:160]}")
+            print(f"🚨 雪球与东方财富均无法获取主力池：{str(e)[:160]}")
             return {}, [], None
-
-    if full_pool:
-        try:
-            basic = pro.stock_basic(exchange='', list_status='L', fields='ts_code,name,industry')
-            if basic is not None and not basic.empty:
-                name_map = dict(zip(basic['ts_code'], basic['name']))
-                industry_map = dict(zip(basic['ts_code'], basic['industry']))
-                for code in codes:
-                    full_pool[code]['Name'] = name_map.get(code, full_pool[code]['Name'])
-                    full_pool[code]['Industry'] = industry_map.get(code, '未知') or '未知'
-        except Exception as e:
-            print(f"⚠️ 行业元数据补充失败：{str(e)[:120]}")
 
     # 资金流仍由 Tushare 补充；它是策略因子而非雪球实时行情主来源。
     try:
         df_mf = pro.moneyflow(trade_date=trade_date)
         if df_mf is not None and not df_mf.empty:
-            df_mf['main_net'] = pd.to_numeric(df_mf.get('lg_amount', 0), errors='coerce').fillna(0) + pd.to_numeric(df_mf.get('net_mf_amount', 0), errors='coerce').fillna(0)
+            lg = pd.to_numeric(df_mf['lg_amount'], errors='coerce').fillna(0) if 'lg_amount' in df_mf.columns else pd.Series(0.0, index=df_mf.index)
+            net = pd.to_numeric(df_mf['net_mf_amount'], errors='coerce').fillna(0) if 'net_mf_amount' in df_mf.columns else pd.Series(0.0, index=df_mf.index)
+            df_mf['main_net'] = lg + net
             mf_map = dict(zip(df_mf['ts_code'], df_mf['main_net']))
             for ts_code in full_pool:
                 full_pool[ts_code]['主力净流入(万元)'] = mf_map.get(ts_code, 0)
@@ -1088,45 +1017,24 @@ def _news_age_tag_bj(dt):
 
 
 def _parse_rss_items_tolerant(raw, limit=30):
-    """RSS/Atom容错解析：兼容 item、Atom entry、命名空间和不同日期字段。"""
+    """标准XML失败时使用正则容错解析，避免单个RSS源破坏整批新闻。"""
     if not raw:
         return []
-    def clean(v):
-        v=re.sub(r"<!\[CDATA\[(.*?)\]\]>",r"\1",v or "",flags=re.S)
-        return html.unescape(re.sub(r"<[^>]+>"," ",v)).strip()
     try:
         root = ET.fromstring(raw)
-        out=[]
-        nodes=list(root.findall(".//item")) + list(root.findall(".//{*}item")) + list(root.findall(".//entry")) + list(root.findall(".//{*}entry"))
-        seen=set()
-        for x in nodes:
-            title_node=x.find("title")
-            if title_node is None:
-                title_node=x.find("{*}title")
-            title=clean(title_node.text if title_node is not None else "")
-            date_text=""
-            for tag in ("pubDate","published","updated","date"):
-                node=x.find(tag)
-                if node is None:
-                    node=x.find("{*}"+tag)
-                if node is not None and node.text:
-                    date_text=node.text; break
-            if title and title not in seen:
-                seen.add(title); out.append({"title":title,"pubDate":clean(date_text)})
-            if len(out)>=limit: break
-        if out:
-            return out
+        return [{"title": (x.findtext("title", "") or "").strip(), "pubDate": x.findtext("pubDate", "") or ""}
+                for x in root.findall(".//item")[:limit]]
     except Exception:
-        pass
-    items=[]
-    blocks=re.findall(r"<(?:item|entry)\b[^>]*>(.*?)</(?:item|entry)>", raw, re.I|re.S)[:limit*2]
-    for block in blocks:
-        mt=re.search(r"<title\b[^>]*>(.*?)</title>",block,re.I|re.S)
-        md=re.search(r"<(?:pubDate|published|updated|date)\b[^>]*>(.*?)</(?:pubDate|published|updated|date)>",block,re.I|re.S)
-        title=clean(mt.group(1) if mt else "")
-        if title: items.append({"title":title,"pubDate":clean(md.group(1) if md else "")})
-        if len(items)>=limit: break
-    return items
+        items=[]
+        for block in re.findall(r"<item\b[^>]*>(.*?)</item>", raw, re.I|re.S)[:limit]:
+            mt=re.search(r"<title\b[^>]*>(.*?)</title>",block,re.I|re.S)
+            md=re.search(r"<(?:pubDate|published|date)\b[^>]*>(.*?)</(?:pubDate|published|date)>",block,re.I|re.S)
+            def clean(v):
+                v=re.sub(r"<!\[CDATA\[(.*?)\]\]>",r"\1",v or "",flags=re.S)
+                return html.unescape(re.sub(r"<[^>]+>"," ",v)).strip()
+            title=clean(mt.group(1) if mt else "")
+            if title: items.append({"title":title,"pubDate":clean(md.group(1) if md else "")})
+        return items
 
 def get_free_macro_news():
     """抓取中文宏观财经新闻，多层备用。"""
@@ -1134,11 +1042,9 @@ def get_free_macro_news():
 
     sources = [
         ("新浪财经", "https://rss.sina.com.cn/roll/finance/hot_roll.xml"),
-        ("财新网", "https://china.caixin.com/rss.xml"),
-        ("澎湃新闻", "https://www.thepaper.cn/rss_news.jsp"),
-        ("新华网", "http://www.xinhuanet.com/politics/news_politics.xml"),
         ("Google News-A股", "https://news.google.com/rss/search?q=" + urllib.parse.quote("A股 政策 央行 财政部 经济") + "&hl=zh-CN&gl=CN&ceid=CN:zh-Hans"),
         ("Google News-财经", "https://news.google.com/rss/search?q=" + urllib.parse.quote("中国经济 CPI PPI PMI 社零") + "&hl=zh-CN&gl=CN&ceid=CN:zh-Hans"),
+        ("财新网", "https://china.caixin.com/rss.xml"),
     ]
 
     news_lines = []
@@ -1172,16 +1078,6 @@ def get_free_macro_news():
                 "A股 宏观 政策 央行 财政部",
                 "美联储 通胀 利率 关税",
                 "中国经济 PMI CPI 社零",
-                "site:gov.cn 国务院 经济 政策",
-                "site:stats.gov.cn CPI PPI PMI 社零 失业率",
-                "site:pbc.gov.cn 货币政策 LPR M2 社融",
-                "site:cls.cn A股 财经 宏观 政策",
-                "site:yicai.com 中国经济 政策 CPI PPI PMI",
-                "site:stcn.com A股 宏观 政策 财经",
-                "site:caixin.com 中国经济 宏观 财经",
-                "site:gov.cn 国务院 新闻 发布会 经济",
-                "site:pbc.gov.cn 货币政策 公开市场 LPR M2 社融",
-                "site:stats.gov.cn 经济运行 国民经济 CPI PPI PMI",
             ]
             for q in queries:
                 try:
@@ -1203,46 +1099,6 @@ def get_free_macro_news():
                 print(f"   ✅ Google News 备用抓取成功")
         except Exception as e:
             print(f"   ⚠️ Google News 备用失败: {e}")
-
-    # 第二备用：Bing News RSS，多源交叉，避免单一RSS供应商失效。
-    try:
-        bing_queries = ["A股 宏观 政策", "中国经济 CPI PPI PMI", "央行 财政部 国务院"]
-        bing_count = 0
-        for q in bing_queries:
-            url = "https://www.bing.com/news/search?format=rss&q=" + urllib.parse.quote(q)
-            raw = _http_get_text(url, timeout=8, retries=1, log_failures=False)
-            for item in _parse_rss_items_tolerant(raw, limit=10):
-                title = item.get("title", "").strip()
-                dt = _parse_rss_date(item.get("pubDate", ""))
-                tag = _news_age_tag_bj(dt)
-                if title and tag:
-                    ts = dt.strftime("%m-%d %H:%M") if dt else "时间未知"
-                    news_lines.append(f"{tag}[Bing News] {ts} - {title}")
-                    bing_count += 1
-        if bing_count:
-            print(f"   ✅ Bing News 备用抓取成功：{bing_count} 条")
-    except Exception as e:
-        print(f"   ⚠️ Bing News 备用失败: {e}")
-
-    # 第三备用：Yahoo Finance中文/中国财经搜索，避免Google+Bing同时受限。
-    try:
-        yahoo_queries = ["China economy", "China stocks", "PBOC China economy"]
-        yahoo_count = 0
-        for q in yahoo_queries:
-            url = "https://news.search.yahoo.com/rss?p=" + urllib.parse.quote(q)
-            raw = _http_get_text(url, timeout=8, retries=1, log_failures=False)
-            for item in _parse_rss_items_tolerant(raw, limit=10):
-                title = item.get("title", "").strip()
-                dt = _parse_rss_date(item.get("pubDate", ""))
-                tag = _news_age_tag_bj(dt)
-                if title and tag:
-                    ts = dt.strftime("%m-%d %H:%M") if dt else "时间未知"
-                    news_lines.append(f"{tag}[Yahoo News] {ts} - {title}")
-                    yahoo_count += 1
-        if yahoo_count:
-            print(f"   ✅ Yahoo News 备用抓取成功：{yahoo_count} 条")
-    except Exception as e:
-        print(f"   ⚠️ Yahoo News 备用失败: {e}")
 
     if not news_lines:
         return "暂无实时宏观新闻，请基于昨收盘及底层产业逻辑进行推演。"
@@ -1861,44 +1717,9 @@ def _extract_cn_metric_from_text(text, key):
     return None
 
 
-def _fetch_tushare_cn_macro_metrics():
-    """Tushare结构化宏观兜底层；任何接口无权限/失败均静默跳过。"""
-    out = {}
-    jobs = [
-        ("CN_CPI", "cn_cpi", "month,nt_val", "month", "nt_val"),
-        ("CN_PPI", "cn_ppi", "month,ppi_yoy", "month", "ppi_yoy"),
-        ("CN_PMI", "cn_pmi", "month,pmi", "month", "pmi"),
-        ("CN_UNRATE", "cn_gdp", "quarter,gdp_yoy", "quarter", "gdp_yoy"),
-    ]
-    for key, method_name, fields, date_col, value_col in jobs:
-        try:
-            fn=getattr(pro, method_name, None)
-            if fn is None:
-                continue
-            df=fn(fields=fields)
-            if df is None or df.empty or value_col not in df.columns:
-                continue
-            df=df.copy()
-            df[value_col]=pd.to_numeric(df[value_col], errors='coerce')
-            df=df.dropna(subset=[value_col]).sort_values(date_col, ascending=False)
-            if df.empty:
-                continue
-            val=float(df.iloc[0][value_col])
-            bounds={"CN_CPI":(-20,30),"CN_PPI":(-30,30),"CN_PMI":(30,70),"CN_UNRATE":(-20,30)}
-            lo,hi=bounds[key]
-            if not (lo <= val <= hi):
-                continue
-            out[key]={"value":val,"prev":None,"date":str(df.iloc[0][date_col]),"unit":"%","source":"Tushare结构化宏观"}
-        except Exception:
-            continue
-    return out
-
-
 def get_key_economic_data():
     print("📊 [阶段2.7] 正在抓取中美关键经济数据...")
     metrics = {}
-    # 中国结构化宏观兜底必须在本函数内获取，避免作用域丢失导致 NameError。
-    tushare_macro = _fetch_tushare_cn_macro_metrics() or {}
 
     # 中国：官方网页语境。页面无法稳定解析结构化数字时，不伪造数字；将官方文本交给AI。
     nbs_context = _fetch_nbs_context()
@@ -1937,23 +1758,14 @@ def get_key_economic_data():
                 break
             if value is not None:
                 break
-        source = None
-        date_text = "最近已公布口径"
-        # 第二优先级：Tushare结构化宏观数值。
-        if value is None and key in tushare_macro:
-            value = tushare_macro[key].get("value")
-            source = tushare_macro[key].get("source")
-            date_text = tushare_macro[key].get("date", date_text)
-        # 第三优先级：Google News定位层，仅用于恢复最近已公布数据线索。
+        # 第二优先级：Google News仅用于恢复“最近已公布数据”的定位，不足时留给AI解释。
         if value is None:
             value = _extract_cn_metric_from_text(google_cn_text, key)
-            if value is not None:
-                source = "Google News定位层（待AI交叉验证）"
         if value is not None:
-            if source is None:
-                source = "国家统计局/官方网页"
-            metrics[key] = {"value": value, "prev": None, "date": date_text, "unit": "%", "source": source}
-            print(f"   ✅ {labels[key]}: {value} | 来源={source}")
+            derived_from_google = (value is not None and not any(_extract_cn_metric_from_text(" ".join(nbs_context), key) == value for _ in [0]))
+            src = "国家统计局/官方网页" if nbs_text and _extract_cn_metric_from_text(nbs_text, key) is not None else "Google News定位层（待AI交叉验证）"
+            metrics[key] = {"value": value, "prev": None, "date": "最近已公布口径", "unit": "%", "source": src}
+            print(f"   ✅ {labels[key]}: {value} | 来源={src}")
         else:
             print(f"   ℹ️ {labels[key]}: 当前未解析到可靠结构化数值，保留官方文本给AI")
 
@@ -3354,96 +3166,123 @@ def send_emails(html_content):
         print(f"🚨 邮件发送失败: {e}")
 
 def match_pool_to_report(pool_data, ai_html, default_stop_loss_pct):
+    """Parse AI HTML robustly and map recommended stocks back to the scored pool.
+
+    The old parser depended on exact class ordering and <li> placement. Any harmless
+    HTML variation could make all recommendations disappear even when the AI had
+    returned valid stock codes. This parser accepts arbitrary class attribute order,
+    extracts card blocks first, and then falls back to ticker/name mentions in the
+    relevant section.
+    """
+    import html as _html
+
     def clean_fragment(text):
-        t = re.sub(r'<[^>]+>', ' ', text)
+        t = re.sub(r'<[^>]+>', ' ', text or '')
+        t = _html.unescape(t)
         return re.sub(r'\s+', ' ', t).strip()
 
     def title_hit(fragment, name, ticker):
-        head = fragment[:110]
-        if f"({ticker})" in head:
+        fragment = fragment or ''
+        head = fragment[:180]
+        candidates = [str(ticker)]
+        if '.' in str(ticker):
+            candidates.append(str(ticker).split('.')[0])
+        if any(re.search(rf'(?<![0-9A-Za-z]){re.escape(c)}(?![0-9A-Za-z])', head, re.I) for c in candidates):
             return True
-        if '.' in ticker and f"({ticker.split('.')[0]})" in head:
-            return True
-        return name in fragment[:30]
+        return str(name) and str(name) in head[:60]
 
-    obs_start = ai_html.find('class="card obs-card"')
-    if obs_start == -1:
-        obs_start = ai_html.find('观察池')
-    if obs_start == -1:
-        obs_start = len(ai_html)
+    # Normalize class attributes so class order/extra classes do not matter.
+    ai = str(ai_html or '').strip()
+    core_re = re.compile(r'<div\b(?=[^>]*\bclass=["\'][^"\']*\bcore-card\b[^"\']*["\'])[^>]*>(.*?)</div>\s*(?=<div\b|$)', re.I | re.S)
+    obs_re = re.compile(r'<div\b(?=[^>]*\bclass=["\'][^"\']*\bobs-card\b[^"\']*["\'])[^>]*>(.*?)</div>\s*(?=<div\b|$)', re.I | re.S)
+    trap_re = re.compile(r'<div\b(?=[^>]*\bclass=["\'][^"\']*\btrap-card\b[^"\']*["\'])[^>]*>(.*?)</div>\s*(?=<div\b|$)', re.I | re.S)
 
-    trap_start = ai_html.find('class="card trap-card"')
-    if trap_start == -1:
-        trap_start = ai_html.find('新闻预警组')
-    if trap_start == -1 or trap_start < obs_start:
-        trap_start = len(ai_html)
+    core_cards = [clean_fragment(m.group(0)) for m in core_re.finditer(ai)]
+    obs_cards = [clean_fragment(m.group(0)) for m in obs_re.finditer(ai)]
+    trap_cards = [clean_fragment(m.group(0)) for m in trap_re.finditer(ai)]
 
-    core_zone_raw = ai_html[:obs_start]
-    obs_zone_raw = ai_html[obs_start:trap_start]
-    trap_zone_raw = ai_html[trap_start:]
-
-    core_cards = [clean_fragment(c) for c in re.split(r'(?=<div[^>]*class="[^"]*core-card[^"]*")', core_zone_raw) if 'core-card' in c]
-    obs_items = [clean_fragment(c) for c in re.split(r'(?=<div[^>]*class="[^"]*obs-card[^"]*")', obs_zone_raw) if c.strip().startswith("<li>")]
-    trap_items = [clean_fragment(c) for c in re.split(r'(?=<div[^>]*class="[^"]*trap-card[^"]*")', trap_zone_raw) if c.strip().startswith("<li>")]
+    # Fallback: split by explicit headings when a model returned valid text but
+    # omitted some wrapper divs. This is display-only fallback; hard risk rules
+    # are still enforced later.
+    if not core_cards:
+        core_zone = ai
+        obs_pos = re.search(r'观察池', ai)
+        if obs_pos:
+            core_zone = ai[:obs_pos.start()]
+        for ticker in re.findall(r'\b\d{6}\.(?:SH|SZ|BJ)\b', core_zone, re.I):
+            pass
 
     chosen = []
     for item in pool_data:
-        ticker_code = str(item['Ticker'])
-        name = str(item['Name'])
-
+        ticker_code = str(item.get('Ticker', '')).strip()
+        name = str(item.get('Name', '')).strip()
         tag, chunk = None, None
+
         for card in core_cards:
             if title_hit(card, name, ticker_code):
-                tag, chunk = "Core_Dragon", card
+                tag, chunk = 'Core_Dragon', card
                 break
         if tag is None:
-            for li in obs_items:
-                if title_hit(li, name, ticker_code):
-                    tag, chunk = "Observation", li
+            for card in obs_cards:
+                if title_hit(card, name, ticker_code):
+                    tag, chunk = 'Observation', card
                     break
         if tag is None:
-            for li in trap_items:
-                if title_hit(li, name, ticker_code):
-                    tag, chunk = "Trap_Warning", li
+            for card in trap_cards:
+                if title_hit(card, name, ticker_code):
+                    tag, chunk = 'Trap_Warning', card
                     break
 
-        if tag is None or tag == "Trap_Warning":
+        # Last-resort text fallback: only accept exact ticker/code mention in the
+        # pre-观察池 recommendation area; do not infer a stock from a generic name.
+        if tag is None and ticker_code:
+            obs_idx = ai.find('观察池')
+            core_zone_text = ai if obs_idx < 0 else ai[:obs_idx]
+            if re.search(rf'\b{re.escape(ticker_code)}\b', core_zone_text, re.I) or (
+                '.' in ticker_code and re.search(rf'\b{re.escape(ticker_code.split(".")[0])}\b', core_zone_text)
+            ):
+                tag, chunk = 'Core_Dragon', clean_fragment(core_zone_text)
+
+        if tag is None or tag == 'Trap_Warning':
             continue
 
-        period_match = re.search(r'周期\s*[:：]\s*\[?(\d+[-~]\d+天|\d+天|观望)', chunk)
-
-        if tag == "Observation":
-            hold_period, stop_loss, score = "观望", "观望", "N/A"
+        chunk = chunk or ''
+        if tag == 'Observation':
+            hold_period, stop_loss, score = '观望', '观望', 'N/A'
         else:
-            hold_period = period_match.group(1).strip() if period_match else "5-12天"
-            sl_match = re.search(r'止损\s*[:：]\s*\[?(\d{1,5}\.\d{1,2}元)', chunk)
-            stop_loss_raw = sl_match.group(1).strip() if sl_match else None
-
-            if stop_loss_raw:
+            period_match = re.search(r'周期\s*[:：]\s*\[?([0-9]+[-~][0-9]+天|[0-9]+天|观望)', chunk)
+            hold_period = period_match.group(1).strip() if period_match else '5-12天'
+            sl_match = re.search(r'止损\s*[:：]\s*\[?(-?[0-9]{1,5}(?:\.[0-9]{1,2})?)\s*元?', chunk)
+            stop_loss_raw = None
+            if sl_match:
+                num = sl_match.group(1)
+                stop_loss_raw = f'{num}元'
                 try:
-                    sl_value = float(re.sub(r'[^\d.]', '', stop_loss_raw))
-                    ref_price = item.get('Open', item['Close'])
-                    if abs(sl_value - ref_price) / ref_price > 0.30:
+                    sl_value = float(num)
+                    ref_price = float(item.get('Open', item.get('Close', 0)) or 0)
+                    if ref_price <= 0 or abs(sl_value - ref_price) / ref_price > 0.30:
                         stop_loss_raw = None
-                except (ValueError, ZeroDivisionError):
+                except (ValueError, TypeError, ZeroDivisionError):
                     stop_loss_raw = None
 
             atr_pct = item.get('ATR_Pct', 5.0)
-            dynamic_stop_pct = -max(ATR_STOP_FLOOR_PCT, min(ATR_STOP_CEIL_PCT, atr_pct * ATR_STOP_MULTIPLIER))
-            stop_loss = stop_loss_raw if stop_loss_raw else f"{round(item.get('Open', item['Close']) * (1 + dynamic_stop_pct / 100), 2)}元"
-            score_match = re.search(r'评分\s*[:：]\s*\[?(\d{1,3})\]?\s*/\s*100', chunk)
-            score = score_match.group(1).strip() if score_match else "N/A"
+            dynamic_stop_pct = -max(ATR_STOP_FLOOR_PCT, min(ATR_STOP_CEIL_PCT, safe_float(atr_pct, 5.0) * ATR_STOP_MULTIPLIER))
+            ref_price = safe_float(item.get('Open', item.get('Close', 0)), 0.0) or 0.0
+            stop_loss = stop_loss_raw if stop_loss_raw else f'{round(ref_price * (1 + dynamic_stop_pct / 100), 2)}元'
+            score_match = re.search(r'评分\s*[:：]\s*\[?([0-9]{1,3})\]?\s*/\s*100', chunk)
+            score = score_match.group(1).strip() if score_match else 'N/A'
 
         item['Tag'] = tag
         item['Hold_Period'] = hold_period
         item['Stop_Loss'] = stop_loss
         item['Score'] = score
         item['Daily_Pct'] = item.get('pct_chg', 0)
-        item['Open_Price'] = item.get('Open', item['Close'])
+        item['Open_Price'] = item.get('Open', item.get('Close'))
         item['ATR_Pct'] = item.get('ATR_Pct', '')
         item['周期共振'] = item.get('周期共振', False)
         chosen.append(item)
 
+    print(f'🔎 AI推荐解析：core={len(core_cards)} / obs={len(obs_cards)} / trap={len(trap_cards)}，成功映射 {len(chosen)} 只')
     return chosen
 
 # ==========================================
