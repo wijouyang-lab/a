@@ -2494,52 +2494,81 @@ def enrich_pool_with_news(pool_data: list) -> list:
 # ==========================================
 # 6. 定向计算技术指标
 # ==========================================
-def _tushare_history_one(code, start_date, end_date):
-    """Tushare主日线：按股票获取真实A股日K，避免雪球K线限频/空响应。"""
-    try:
-        df = pro.daily(ts_code=code, start_date=start_date, end_date=end_date,
-                       fields='ts_code,trade_date,open,high,low,close,pre_close,change,pct_chg,vol,amount')
-        if df is None or df.empty:
-            return code, pd.DataFrame(), "Tushare返回空K线"
-        df = df.copy()
-        for col in ['open','high','low','close','pre_close','change','pct_chg','vol','amount']:
-            if col in df.columns:
-                df[col] = pd.to_numeric(df[col], errors='coerce')
-        df['ts_code'] = df['ts_code'].astype(str).str.strip().str.upper()
-        df['trade_date'] = df['trade_date'].astype(str).str.replace('-', '', regex=False)
-        df = df.dropna(subset=['trade_date','open','high','low','close'])
-        df = df.drop_duplicates(subset=['ts_code','trade_date']).sort_values('trade_date')
-        if len(df) < 30:
-            return code, df, f"Tushare仅返回{len(df)}根K线"
-        return code, df, None
-    except Exception as e:
-        return code, pd.DataFrame(), str(e)[:160]
-
-
-def _tushare_history_multi(codes, start_date, end_date, max_workers=5):
-    """Tushare批量日线。控制并发，失败单股再交给非Tushare历史源兜底。"""
+def _tushare_history_bulk_by_trade_date(codes, start_date, end_date, pause_seconds=0.25):
+    """Tushare主日线：按交易日批量拉取全市场daily，再筛选目标股票。
+    这样避免逐股票调用 daily 导致 300次/分钟 频率限制。"""
+    codes = [str(c).strip().upper() for c in codes if str(c).strip()]
     if not codes:
         return pd.DataFrame(), []
-    print(f"   📊 启动Tushare主日线：{len(codes)}只，区间={start_date}~{end_date}")
-    frames, failed = [], []
-    with ThreadPoolExecutor(max_workers=max_workers) as ex:
-        futures = {ex.submit(_tushare_history_one, c, start_date, end_date): c for c in codes}
-        for i, fut in enumerate(as_completed(futures), 1):
-            code = futures[fut]
-            try:
-                code, df, err = fut.result()
-            except Exception as e:
-                df, err = pd.DataFrame(), str(e)[:160]
-            if df is not None and not df.empty:
-                frames.append(df)
-            else:
-                failed.append(code)
-                print(f"   ⚠️ Tushare K线失败 {code}: {err}")
-            if i % 50 == 0 or i == len(futures):
-                print(f"   📊 Tushare K线进度 {i}/{len(futures)}")
-    out = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
-    return out, failed
+    target = set(codes)
+    print(f"   📊 启动Tushare批量日线：{len(codes)}只，区间={start_date}~{end_date}")
+    try:
+        cal = pro.trade_cal(exchange='SSE', start_date=start_date, end_date=end_date, is_open='1', fields='cal_date')
+        trade_dates = [] if cal is None or cal.empty else sorted(cal['cal_date'].astype(str).tolist())
+    except Exception as e:
+        print(f"   ⚠️ Tushare交易日历获取失败：{e}")
+        trade_dates = []
+    if not trade_dates:
+        # 最保守兜底：按日期区间逐日尝试；即使交易日历接口失败也不让函数直接崩溃。
+        d0 = datetime.datetime.strptime(start_date, '%Y%m%d').date()
+        d1 = datetime.datetime.strptime(end_date, '%Y%m%d').date()
+        trade_dates = []
+        d = d0
+        while d <= d1:
+            if d.weekday() < 5:
+                trade_dates.append(d.strftime('%Y%m%d'))
+            d += datetime.timedelta(days=1)
 
+    frames = []
+    failed_dates = []
+    total = len(trade_dates)
+    for i, td in enumerate(trade_dates, 1):
+        try:
+            df = pro.daily(trade_date=td,
+                           fields='ts_code,trade_date,open,high,low,close,pre_close,change,pct_chg,vol,amount')
+            if df is not None and not df.empty:
+                df = df.copy()
+                df['ts_code'] = df['ts_code'].astype(str).str.strip().str.upper()
+                df = df[df['ts_code'].isin(target)]
+                if not df.empty:
+                    frames.append(df)
+            else:
+                failed_dates.append(td)
+        except Exception as e:
+            failed_dates.append(td)
+            msg = str(e)[:120]
+            # 频率限制/临时错误，短暂退避后只重试当天一次
+            time.sleep(max(pause_seconds, 0.8))
+            try:
+                df = pro.daily(trade_date=td,
+                               fields='ts_code,trade_date,open,high,low,close,pre_close,change,pct_chg,vol,amount')
+                if df is not None and not df.empty:
+                    df = df.copy()
+                    df['ts_code'] = df['ts_code'].astype(str).str.strip().str.upper()
+                    df = df[df['ts_code'].isin(target)]
+                    if not df.empty:
+                        frames.append(df)
+                        failed_dates.pop()
+            except Exception:
+                print(f"   ⚠️ Tushare日线失败 {td}: {msg}")
+        if i % 20 == 0 or i == total:
+            print(f"   📊 Tushare日线进度 {i}/{total} 交易日")
+        time.sleep(pause_seconds)
+
+    if not frames:
+        return pd.DataFrame(), list(codes)
+    out = pd.concat(frames, ignore_index=True)
+    for col in ['open','high','low','close','pre_close','change','pct_chg','vol','amount']:
+        if col in out.columns:
+            out[col] = pd.to_numeric(out[col], errors='coerce')
+    out['trade_date'] = out['trade_date'].astype(str).str.replace('-', '', regex=False)
+    out = (out.dropna(subset=['ts_code','trade_date','open','high','low','close'])
+              .drop_duplicates(subset=['ts_code','trade_date'])
+              .sort_values(['ts_code','trade_date']))
+    counts = out.groupby('ts_code')['trade_date'].nunique().to_dict()
+    failed_codes = [c for c in codes if counts.get(c, 0) < 60]
+    print(f"   ✅ Tushare批量日线完成：{out['ts_code'].nunique()}/{len(codes)}只有效，{len(failed_codes)}只历史不足60根")
+    return out, failed_codes
 
 def _daily_to_weekly(df_daily):
     """由真实日线聚合周线。"""
@@ -2560,14 +2589,11 @@ def _daily_to_weekly(df_daily):
 def calc_tech_indicators(full_pool, codes, trade_date):
     print("⚙️ [阶段3] 正在使用Tushare主日线并由真实日线计算周线/技术指标...")
     start_hist=(get_bj_time()-datetime.timedelta(days=220)).strftime('%Y%m%d')
-    # Tushare主K线；只有Tushare失败/历史不足的股票才进入非Tushare备用源。
-    df_hist_ts, ts_failed_codes = _tushare_history_multi(codes, start_hist, trade_date, max_workers=5)
+    # Tushare主K线；历史不足只做提示，不再调用未定义/易触发限频的逐股备用K线。
+    df_hist_ts, ts_failed_codes = _tushare_history_bulk_by_trade_date(codes, start_hist, trade_date, pause_seconds=0.22)
     df_hist = df_hist_ts.copy() if not df_hist_ts.empty else pd.DataFrame()
     if ts_failed_codes:
-        print(f"   🔁 Tushare K线失败 {len(ts_failed_codes)}只，进入东方财富→新浪→Yahoo备用")
-        df_fallback=_fallback_daily_multi_source(ts_failed_codes,start_hist,trade_date,max_workers=8)
-        if not df_fallback.empty:
-            df_hist=pd.concat([df_hist,df_fallback],ignore_index=True) if not df_hist.empty else df_fallback
+        print(f"   ⚠️ Tushare主日线对 {len(ts_failed_codes)} 只股票历史不足60根；优先保留Tushare真实数据，不再调用未定义的备用函数。")
     if not df_hist.empty:
         for col in ['open','high','low','close','vol','amount']:
             df_hist[col]=pd.to_numeric(df_hist[col],errors='coerce')
@@ -2577,8 +2603,7 @@ def calc_tech_indicators(full_pool, codes, trade_date):
                  .drop_duplicates(subset=['ts_code','trade_date'],keep='last')
                  .sort_values(['ts_code','trade_date']))
 
-    # 不仅检查“请求失败”，还检查“批量请求成功但某些股票实际没有足够历史”。
-    # 这些股票继续进入备用源，避免 partial response 被误判为完整。
+    # 检查批量请求后是否存在历史不足的股票；不再二次调用备用K线，避免重复打接口和限频。
     fallback_needed=[]
     if not df_hist.empty:
         counts=df_hist.groupby('ts_code')['trade_date'].nunique().to_dict()
@@ -2586,13 +2611,8 @@ def calc_tech_indicators(full_pool, codes, trade_date):
     else:
         fallback_needed=list(codes)
     if fallback_needed:
-        already=set(df_hist['ts_code'].astype(str)) if not df_hist.empty else set()
-        # 只替换/补齐历史不足的股票，减少备用源压力。
-        print(f"   🔎 历史完整性检查：{len(fallback_needed)}只少于60根日K，启动定向备用补齐")
-        df_fallback2=_fallback_daily_multi_source(fallback_needed,start_hist,trade_date,max_workers=8)
-        if not df_fallback2.empty:
-            df_hist=pd.concat([df_hist,df_fallback2],ignore_index=True) if not df_hist.empty else df_fallback2
-            df_hist=df_hist.drop_duplicates(subset=['ts_code','trade_date'],keep='last').sort_values(['ts_code','trade_date'])
+        print(f"   🔎 历史完整性检查：{len(fallback_needed)}只少于60根日K，保持Tushare数据继续计算")
+        print(f"   ℹ️ 历史完整性检查：{len(fallback_needed)}只少于60根日K，保持Tushare结果继续计算。") if fallback_needed else None
 
     df_weekly=_daily_to_weekly(df_hist)
     daily_count=df_hist['ts_code'].nunique() if not df_hist.empty else 0
