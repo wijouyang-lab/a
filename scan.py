@@ -2921,36 +2921,76 @@ def screen_technical_setups(final_pool):
     return summary
 
 def load_evolved_rules() -> str:
+    """读取历史进化规则。
+
+    重要原则：历史绩效是风险参考，不得在没有当前市场确认的情况下形成永久/强制板块封禁。
+    只有带 current_confirmation/status=CONFIRMED 的板块硬限制才可作为当日约束；旧规则或
+    纯历史规则只进入“历史参考”，避免出现“历史29笔差 -> 今日永久熔断”的错误。
+    """
     rules_file = "evolved_rules.json"
     if not os.path.exists(rules_file):
         return ""
     try:
         with open(rules_file, "r", encoding="utf-8") as f:
             data = json.load(f)
-        patches      = data.get("prompt_patches", [])
         active_rules = data.get("active_rules", [])
-        if not patches:
+        if not active_rules:
             return ""
+
+        # 兼容旧版只保存 prompt_patches 的结构；优先直接使用 rule.prompt_patch。
         last_updated = data.get("last_updated", "未知")
-        recent = data.get("recent_win_rate")
-        if recent and recent.get("胜率") is not None:
+        recent = data.get("recent_win_rate") or {}
+        if recent.get("胜率") is not None:
             win_rate_display = f"{recent['胜率']}%（最近{recent.get('样本数','?')}笔，当前规则的真实表现）"
         else:
             win_rate_display = f"{data.get('overall_win_rate', '未知')}%（全部历史混合，仅供参考）"
+
+        historical_notes = []
+        active_blocks = []
+        for rule in active_rules:
+            patch = str(rule.get("prompt_patch", "")).strip()
+            rtype = str(rule.get("type", ""))
+            confirmation = rule.get("current_confirmation") or {}
+            status = str(confirmation.get("status", "")).upper()
+            hard_language = any(k in (patch + str(rule.get("description", "")))
+                                for k in ("完全禁止", "完全暂停", "熔断", "强制封禁", "一律剔除"))
+            is_sector_rule = rtype in {"SECTOR_AVOID", "SECTOR_ADJUST", "SECTOR_BOOST"}
+
+            if is_sector_rule and hard_language and status != "CONFIRMED":
+                # 旧历史硬封禁降级为参考，不直接约束今天。
+                historical_notes.append(
+                    f"历史参考（不自动执行）—{rule.get('description','未命名规则')}：{rule.get('evidence','暂无证据')}。"
+                    "只有当今日板块趋势/资金/价格行为再次确认时，才可升级为当日限制。"
+                )
+                continue
+
+            active_blocks.append((rule, patch))
+
+        if not active_blocks and not historical_notes:
+            return ""
+
         lines = [
             f"【📈 历史绩效驱动进化规则（上次更新: {last_updated} | 胜率: {win_rate_display}）】",
-            "以下规则由策略进化引擎基于真实交易数据自动生成，必须严格遵守：",
+            "重要执行原则：历史绩效只描述过去，不能单独证明今天板块仍处于同一状态。板块回避/降权必须由今日价格趋势、日周月共振、资金流和事件催化再次确认；未经确认的旧规则仅供AI风险参考。",
             ""
         ]
-        for i, (rule, patch) in enumerate(zip(active_rules, patches), 1):
+        for i, (rule, patch) in enumerate(active_blocks, 1):
             lines.append(f"规则{i}【{rule.get('type','')}】{rule.get('description','')}")
             if rule.get("evidence"):
-                lines.append(f"  数据依据: {rule['evidence']}")
-            lines.append(f"  执行要求: {patch}")
+                lines.append(f"  历史数据依据: {rule['evidence']}")
+            confirmation = rule.get("current_confirmation") or {}
+            if confirmation:
+                lines.append(f"  当前确认状态: {confirmation.get('status','UNCONFIRMED')} | 信号: {confirmation.get('signals', '未提供')}")
+            if patch:
+                lines.append(f"  执行要求: {patch}")
             lines.append("")
-        lines.append("（以上规则优先级高于一般选股偏好，但低于今日突发事件强制封禁）")
+        if historical_notes:
+            lines.append("【历史规则参考（不自动执行）】")
+            lines.extend([f"- {x}" for x in historical_notes])
+            lines.append("")
+        lines.append("（规则优先级：今日突发事件/实时风控 > 当前已确认进化规则 > 历史规则参考；任何历史规则不得绕过当日市场确认而形成永久黑名单。）")
         return "\n".join(lines)
-    except Exception as e:
+    except Exception:
         return ""
 
 def enrich_pool_with_public_valuation(pool_data, limit=50):

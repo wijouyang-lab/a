@@ -465,8 +465,9 @@ def evolve_strategy(metrics: dict):
 根据以上数据，用归纳法找出规律：
 - 优先看"按进化世代拆分胜率"：如果最近一代相比上一代胜率下降了，说明上一轮的规则
   可能是错的或者用力过猛，这一轮应该考虑撤销或调整方向，而不是继续在错的方向加码。
-- 哪些板块持续亏损应该明确回避？哪些持续盈利应该加权？
+- 哪些板块持续亏损应该明确回避？哪些持续盈利应该加权？但是，禁止仅凭历史胜率直接生成永久/硬性板块熔断；必须同时要求“今日市场确认”，例如板块日周月趋势、资金流、相对强弱或当前事件。
 - 评分区间和实际收益是否正相关？如果低分区间胜率反而高，说明评分体系有问题，请指出。
+- 对历史规则做“当前状态复核”：若历史规则形成已久或当前市场条件明显变化，应主动撤销、降级或缩短有效期，而不是机械延续。
 - 止损触发次数多 = 止损位太紧；到期清仓亏损多 = 持股周期太长或趋势判断有误。
 - 请推断每个发现背后的原因，而不只是描述现象。
 
@@ -484,7 +485,7 @@ def evolve_strategy(metrics: dict):
             "rule_id": "rule_{datetime.date.today().strftime('%Y%m%d')}_001",
             "type": "SECTOR_AVOID 或 SECTOR_BOOST 或 SCORE_ADJUST 或 HOLD_PERIOD_ADJUST 或 STOPLOSS_ADJUST 或 CONDITION_ADD",
             "description": "规则的中文说明",
-            "prompt_patch": "直接注入 scan.py AI prompt 的文字（具体、可执行，如：'由于历史数据显示半导体板块胜率长期低于40%，今日推荐时半导体板块标的评分上限降至70分，除非出现极强的宏观/政策催化'）",
+            "prompt_patch": "直接注入 scan.py AI prompt 的文字；历史板块规则默认只能作为风险参考，只有同时有今日市场确认才可升级为当日限制。",
             "evidence": "支撑这条规则的数据证据（如：半导体板块胜率38%，样本数12，平均亏损-4.2%）",
             "expires_after_trades": 20
         }},
@@ -546,6 +547,13 @@ def evolve_strategy(metrics: dict):
             for rule in entry.get("applied_rules", []):
                 trade_count_at_creation = entry.get("metrics", {}).get("total_closed", 0)
                 expires = rule.get("expires_after_trades", 20)
+                # 历史板块硬封禁若没有明确的“当前市场确认”，降级为历史参考，不写入 active_rules。
+                rtype = str(rule.get("type", ""))
+                txt = str(rule.get("prompt_patch", "")) + str(rule.get("description", ""))
+                confirmation = rule.get("current_confirmation") or {}
+                hard_language = any(k in txt for k in ("完全禁止", "完全暂停", "熔断", "强制封禁", "一律剔除"))
+                if rtype in {"SECTOR_AVOID", "SECTOR_ADJUST"} and hard_language and str(confirmation.get("status", "")).upper() != "CONFIRMED":
+                    continue
                 if total_closed_now - trade_count_at_creation < expires:
                     all_rules.append(rule)
 
