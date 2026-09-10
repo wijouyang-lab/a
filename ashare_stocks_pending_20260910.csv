@@ -1,5 +1,5 @@
 Ticker,Name,Industry,Tag,Amount,Daily_Pct,Hold_Period,Stop_Loss,Score,ATR_Pct,周期共振,Scan_Ref_Price
-600487.SH,亨通光电,未知,Observation,14492707429.0,5.56,观望,观望,N/A,6.49,False,0
-600522.SH,中天科技,未知,Observation,8996226302.0,4.95,观望,观望,N/A,5.58,False,0
-601869.SH,长飞光纤,未知,Core_Dragon,8886271897.0,6.04,3-5天,442.03元,81,6.59,False,0
-603186.SH,华正新材,未知,Core_Dragon,4658624546.0,10.0,2-3天,212.06元,76,7.41,True,0
+600487.SH,亨通光电,通信设备,Core_Dragon,14492707.429,5.5617,5-8天,59.95元,90,6.49,False,0
+600522.SH,中天科技,通信设备,Core_Dragon,8996226.302,4.9523,5-7天,30.70元,81,5.58,False,0
+601869.SH,长飞光纤,通信设备,Observation,8886271.897,6.0405,观望,观望,N/A,6.59,False,0
+603083.SH,剑桥科技,通信设备,Observation,6188605.063,-1.489,观望,观望,N/A,6.38,True,0
