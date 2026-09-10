@@ -1138,105 +1138,232 @@ def _news_age_tag_bj(dt):
     return None
 
 
+def _clean_news_fragment(value: str) -> str:
+    if not value:
+        return ""
+    value = re.sub(r"<!\[CDATA\[(.*?)\]\]>", r"\1", str(value), flags=re.S)
+    value = html.unescape(value)
+    value = re.sub(r"<script.*?</script>", " ", value, flags=re.S | re.I)
+    value = re.sub(r"<style.*?</style>", " ", value, flags=re.S | re.I)
+    value = re.sub(r"<[^>]+>", " ", value)
+    return re.sub(r"\s+", " ", value).strip()
+
+
 def _parse_rss_items_tolerant(raw, limit=30):
-    """标准XML失败时使用正则容错解析，避免单个RSS源破坏整批新闻。"""
+    """RSS/Atom 容错解析：除了标题，还保留摘要、链接、发布时间。"""
     if not raw:
         return []
     try:
         root = ET.fromstring(raw)
-        return [{"title": (x.findtext("title", "") or "").strip(), "pubDate": x.findtext("pubDate", "") or ""}
-                for x in root.findall(".//item")[:limit]]
+        items = []
+        nodes = root.findall(".//item")
+        if not nodes:
+            nodes = root.findall(".//{*}entry")
+        for x in nodes[:limit]:
+            title = _clean_news_fragment(x.findtext("title", "") or x.findtext("{*}title", ""))
+            pub = x.findtext("pubDate", "") or x.findtext("published", "") or x.findtext("updated", "") or x.findtext("{*}pubDate", "") or x.findtext("{*}published", "") or x.findtext("{*}updated", "")
+            desc = x.findtext("description", "") or x.findtext("summary", "") or x.findtext("content", "") or x.findtext("{*}description", "") or x.findtext("{*}summary", "") or x.findtext("{*}content", "")
+            link = x.findtext("link", "") or x.findtext("{*}link", "")
+            if not link:
+                for child in list(x):
+                    if str(child.tag).endswith("link"):
+                        link = child.attrib.get("href", "") or (child.text or "")
+                        if link:
+                            break
+            items.append({
+                "title": title,
+                "pubDate": _clean_news_fragment(pub or ""),
+                "description": _clean_news_fragment(desc or ""),
+                "link": (link or "").strip(),
+            })
+        return items
     except Exception:
         items=[]
-        for block in re.findall(r"<item\b[^>]*>(.*?)</item>", raw, re.I|re.S)[:limit]:
-            mt=re.search(r"<title\b[^>]*>(.*?)</title>",block,re.I|re.S)
-            md=re.search(r"<(?:pubDate|published|date)\b[^>]*>(.*?)</(?:pubDate|published|date)>",block,re.I|re.S)
-            def clean(v):
-                v=re.sub(r"<!\[CDATA\[(.*?)\]\]>",r"\1",v or "",flags=re.S)
-                return html.unescape(re.sub(r"<[^>]+>"," ",v)).strip()
-            title=clean(mt.group(1) if mt else "")
-            if title: items.append({"title":title,"pubDate":clean(md.group(1) if md else "")})
+        blocks = re.findall(r"<(?:item|entry)\b[^>]*>(.*?)</(?:item|entry)>", raw, re.I|re.S)[:limit]
+        for block in blocks:
+            def capture(tags):
+                for tag in tags:
+                    m=re.search(rf"<(?:[\w-]+:)?{tag}\b[^>]*>(.*?)</(?:[\w-]+:)?{tag}>", block, re.I|re.S)
+                    if m:
+                        return _clean_news_fragment(m.group(1))
+                return ""
+            title=capture(["title"])
+            pub=capture(["pubDate","published","updated","date"])
+            desc=capture(["description","summary","content"])
+            link=capture(["link"])
+            if not link:
+                m=re.search(r"<(?:[\w-]+:)?link\b[^>]*href=[\"']([^\"']+)",block,re.I)
+                link=m.group(1).strip() if m else ""
+            if title:
+                items.append({"title":title,"pubDate":pub,"description":desc,"link":link})
         return items
 
-def get_free_macro_news():
-    """抓取中文宏观财经新闻，多层备用。"""
-    print("📡 [阶段1] 正在抓取中文宏观财经快讯...")
 
+def _parse_meta_datetime(value: str):
+    if not value:
+        return None
+    value = _clean_news_fragment(value)
+    dt = _parse_rss_date(value)
+    if dt:
+        return dt
+    for fmt in ("%Y-%m-%dT%H:%M:%S%z", "%Y-%m-%dT%H:%M:%S.%f%z", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d"):
+        try:
+            dt = datetime.datetime.strptime(value[:35], fmt)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=BEIJING_TZ)
+            return dt.astimezone(BEIJING_TZ)
+        except Exception:
+            pass
+    return None
+
+
+def _extract_original_article_meta(url: str, timeout=4):
+    """解析原始文章页的发布时间/更新时间/摘要。用于防止聚合站把旧新闻标成今天。"""
+    if not url or not str(url).startswith(("http://", "https://")):
+        return {}
+    try:
+        raw = _http_get_text(url, timeout=timeout, retries=1, log_failures=False)
+        if not raw:
+            return {}
+        published = None
+        modified = None
+        summary = ""
+        patterns_pub = [
+            r'<meta[^>]+(?:property|name)=["\'](?:article:published_time|datePublished|pubdate|publishdate)["\'][^>]+content=["\']([^"\']+)',
+            r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+(?:property|name)=["\'](?:article:published_time|datePublished|pubdate|publishdate)["\']',
+            r'"datePublished"\s*:\s*"([^"]+)"',
+            r'"published_time"\s*:\s*"([^"]+)"',
+        ]
+        patterns_mod = [
+            r'<meta[^>]+(?:property|name)=["\'](?:article:modified_time|dateModified|lastmod)["\'][^>]+content=["\']([^"\']+)',
+            r'"dateModified"\s*:\s*"([^"]+)"',
+        ]
+        for pat in patterns_pub:
+            m=re.search(pat, raw, re.I|re.S)
+            if m:
+                published=_parse_meta_datetime(m.group(1))
+                if published:
+                    break
+        for pat in patterns_mod:
+            m=re.search(pat, raw, re.I|re.S)
+            if m:
+                modified=_parse_meta_datetime(m.group(1))
+                if modified:
+                    break
+        for pat in [r'<meta[^>]+(?:name|property)=["\'](?:description|og:description)["\'][^>]+content=["\']([^"\']+)', r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+(?:name|property)=["\'](?:description|og:description)["\']']:
+            m=re.search(pat, raw, re.I|re.S)
+            if m:
+                summary=_clean_news_fragment(m.group(1))
+                if summary:
+                    break
+        return {"published":published,"modified":modified,"summary":summary}
+    except Exception:
+        return {}
+
+
+def _extract_explicit_event_date(text: str, now=None):
+    """从标题/摘要中提取明显的历史事件日期，防止“旧事件被新文章重新包装”。"""
+    if not text:
+        return None
+    now = now or get_bj_time()
+    m = re.search(r"(20\d{2})[-/年](\d{1,2})[-/月](\d{1,2})日?", text)
+    if m:
+        try:
+            return datetime.datetime(int(m.group(1)), int(m.group(2)), int(m.group(3)), tzinfo=BEIJING_TZ)
+        except Exception:
+            pass
+    m = re.search(r"(?<!\d)(\d{1,2})月(\d{1,2})日", text)
+    if m:
+        try:
+            return datetime.datetime(now.year, int(m.group(1)), int(m.group(2)), tzinfo=BEIJING_TZ)
+        except Exception:
+            return None
+    return None
+
+
+def _format_news_entry(source, title, summary, published_dt, link="", extra_event_text=""):
+    now = get_bj_time()
+    tag = _news_age_tag_bj(published_dt)
+    if not title or not tag:
+        return None
+    event_dt = _extract_explicit_event_date(f"{title} {summary}", now)
+    history_flag = ""
+    if event_dt and (now - event_dt).total_seconds() > 7 * 86400:
+        history_flag = f"[⚠️历史事件:{event_dt.strftime('%Y-%m-%d')}]"
+    pub_text = published_dt.strftime('%Y-%m-%d %H:%M') if published_dt else '时间未知'
+    clean_summary = _clean_news_fragment(summary)[:320]
+    if not clean_summary:
+        clean_summary = "摘要缺失；AI必须用其他独立证据交叉验证，禁止仅凭标题认定为事实或催化。"
+    link_hint = ""
+    if link:
+        link_hint = f" | 原文:{str(link)[:180]}"
+    return (published_dt, f"{tag}{history_flag}[{source}] 发布时间:{pub_text} | 标题:{_clean_news_fragment(title)} | 摘要:{clean_summary}{link_hint}")
+
+def get_free_macro_news():
+    """抓取中文宏观财经新闻：保留标题+摘要，并校验原始文章发布时间/历史事件日期。"""
+    print("📡 [阶段1] 正在抓取中文宏观财经快讯...")
     sources = [
         ("新浪财经", "https://rss.sina.com.cn/roll/finance/hot_roll.xml"),
         ("Google News-A股", "https://news.google.com/rss/search?q=" + urllib.parse.quote("A股 政策 央行 财政部 经济") + "&hl=zh-CN&gl=CN&ceid=CN:zh-Hans"),
         ("Google News-财经", "https://news.google.com/rss/search?q=" + urllib.parse.quote("中国经济 CPI PPI PMI 社零") + "&hl=zh-CN&gl=CN&ceid=CN:zh-Hans"),
         ("财新网", "https://china.caixin.com/rss.xml"),
+        ("新华网", "https://www.news.cn/rss/news.xml"),
     ]
-
-    news_lines = []
-
-    for source_name, url in sources:
+    news_entries=[]
+    for source_name,url in sources:
         try:
-            raw = _http_get_text(url, timeout=8, retries=2)
+            raw=_http_get_text(url,timeout=8,retries=2)
             if not raw:
                 continue
-            parsed_items = _parse_rss_items_tolerant(raw, limit=20)
-            if not parsed_items:
+            parsed=_parse_rss_items_tolerant(raw,limit=20)
+            if not parsed:
                 print(f"   ⚠️ {source_name} 返回内容但未解析到RSS条目")
                 continue
-            for item in parsed_items:
-                title = item.get("title", "").strip()
-                date_text = item.get("pubDate", "")
-                dt = _parse_rss_date(date_text)
-                tag = _news_age_tag_bj(dt)
-                if not title or tag is None:
-                    continue
-                ts = dt.strftime("%m-%d %H:%M") if dt else "时间未知"
-                news_lines.append(f"{tag}[{source_name}] {ts} - {title}")
-            print(f"   ✅ {source_name} 抓取成功")
+            kept=0
+            for item in parsed:
+                title=item.get('title','').strip()
+                dt=_parse_rss_date(item.get('pubDate',''))
+                entry=_format_news_entry(source_name,title,item.get('description',''),dt,item.get('link',''))
+                if entry:
+                    news_entries.append(entry)
+                    kept+=1
+            print(f"   ✅ {source_name} 抓取成功（有效新闻 {kept} 条）")
         except Exception as e:
             print(f"   ⚠️ {source_name} 抓取失败: {str(e)[:100]}")
 
-    # 备用：Google News（中文财经）
-    if True:
+    queries=[
+        "A股 宏观 政策 央行 财政部",
+        "中国经济 CPI PPI PMI 社零",
+        "产业政策 科技 通信 半导体 光通信",
+    ]
+    for q in queries:
         try:
-            queries = [
-                "A股 宏观 政策 央行 财政部",
-                "美联储 通胀 利率 关税",
-                "中国经济 PMI CPI 社零",
-            ]
-            for q in queries:
-                try:
-                    encoded = urllib.parse.quote(q)
-                    url = f"https://news.google.com/rss/search?q={encoded}&hl=zh-CN&gl=CN&ceid=CN:zh-Hans"
-                    raw = _http_get_text(url, timeout=8, retries=1)
-                    if not raw:
-                        continue
-                    for item in _parse_rss_items_tolerant(raw, limit=10):
-                        title = item.get("title", "").strip()
-                        dt = _parse_rss_date(item.get("pubDate", ""))
-                        tag = _news_age_tag_bj(dt)
-                        if title and tag:
-                            ts = dt.strftime("%m-%d %H:%M") if dt else "时间未知"
-                            news_lines.append(f"{tag}[Google News] {ts} - {title}")
-                except Exception:
-                    pass
-            if news_lines:
-                print(f"   ✅ Google News 备用抓取成功")
-        except Exception as e:
-            print(f"   ⚠️ Google News 备用失败: {e}")
+            url=f"https://news.google.com/rss/search?q={urllib.parse.quote(q)}&hl=zh-CN&gl=CN&ceid=CN:zh-Hans"
+            raw=_http_get_text(url,timeout=8,retries=1,log_failures=False)
+            for item in _parse_rss_items_tolerant(raw,limit=10):
+                title=item.get('title','').strip()
+                dt=_parse_rss_date(item.get('pubDate',''))
+                # Google News 聚合时间可能不是原始文章时间；对外链做一次轻量原始页校验。
+                meta=_extract_original_article_meta(item.get('link',''))
+                effective_dt=meta.get('published') or dt
+                summary=item.get('description','') or meta.get('summary','')
+                entry=_format_news_entry('Google News',title,summary,effective_dt,item.get('link',''))
+                if entry:
+                    news_entries.append(entry)
+        except Exception:
+            pass
 
-    if not news_lines:
-        return "暂无实时宏观新闻，请基于昨收盘及底层产业逻辑进行推演。"
+    if not news_entries:
+        return "暂无实时宏观新闻，请基于最近已完成交易日、当前政策与价格数据进行推演。"
 
-    # 去重
-    dedup = []
-    seen = set()
-    for line in news_lines:
-        key = re.sub(r"[^\u4e00-\u9fa5a-z0-9]+", "", line.lower())[-100:]
-        if key not in seen:
-            seen.add(key)
-            dedup.append(line)
-
-    print(f"✅ 中文宏观新闻矩阵完成，共 {len(dedup)} 条")
-    return "\n".join(dedup[:50])
-
+    dedup=[]; seen=set()
+    for dt,line in sorted(news_entries,key=lambda x: x[0] or datetime.datetime.min.replace(tzinfo=BEIJING_TZ),reverse=True):
+        key=re.sub(r"[^\u4e00-\u9fa5a-z0-9]+","",line.lower())
+        if key in seen:
+            continue
+        seen.add(key); dedup.append(line)
+    print(f"✅ 中文宏观新闻矩阵完成，共 {len(dedup)} 条（含摘要/原始日期校验）")
+    return "\n".join(dedup[:60])
 
 def get_key_person_events():
     print("🎙️ [阶段2.4] 正在抓取重要人物讲话与政策预期变化...")
@@ -2306,136 +2433,105 @@ def parse_sector_embargo(us_sector_text):
 # 5. 个股新闻抓取
 # ==========================================
 def get_stock_news(ticker_code: str, ticker_name: str, max_items: int = 5) -> list[str]:
-    news_entries = []
-    code = ticker_code.split('.')[0]
+    """多源个股新闻：标题+摘要+发布时间+事件日期，严格排除>72h/明显历史事件。"""
+    news_entries=[]
+    code=ticker_code.split('.')[0]
 
-    # 雪球新闻/动态第一来源：按股票代码+名称搜索；失败后再走原有公告/新闻源。
+    def add_entry(source,title,summary,dt):
+        entry=_format_news_entry(source,title,summary,dt)
+        if entry:
+            news_entries.append(entry)
+
+    # 1) 雪球动态
     try:
-        q_text = f"{code} {ticker_name}".strip()
-        statuses = xq.search_statuses(q_text, count=max_items * 3)
+        q_text=f"{code} {ticker_name}".strip()
+        statuses=xq.search_statuses(q_text,count=max_items*4)
         for st in statuses:
-            title = str(
-                st.get('title') or st.get('description') or st.get('text') or st.get('content') or ''
-            ).strip()
-            created = st.get('created_at') or st.get('createdAt') or st.get('timestamp')
-            dt = None
+            title=str(st.get('title') or st.get('description') or st.get('text') or st.get('content') or '').strip()
+            summary=str(st.get('description') or st.get('summary') or st.get('content') or st.get('text') or '').strip()
+            created=st.get('created_at') or st.get('createdAt') or st.get('timestamp')
+            dt=None
             try:
                 if created is not None:
-                    num = float(created)
-                    if num > 10**12:
-                        num /= 1000
-                    dt = datetime.datetime.fromtimestamp(num, tz=BEIJING_TZ)
-            except Exception:
-                dt = None
-            tag = _get_stock_news_time_tag(dt)
-            if title and tag:
-                stamp = dt.strftime('%m-%d %H:%M') if dt else '时间未知'
-                news_entries.append((dt, f"{tag}[雪球] [{stamp}] {re.sub(r'<[^>]+>', ' ', title)}"))
+                    num=float(created)
+                    if num>10**12: num/=1000
+                    dt=datetime.datetime.fromtimestamp(num,tz=BEIJING_TZ)
+            except Exception: pass
+            add_entry('雪球',title,summary,dt)
     except Exception as e:
         print(f"⚠️ 雪球个股动态失败 [{ticker_code}]: {str(e)[:100]}")
 
-    _HEADERS = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
-                'Referer': 'https://www.eastmoney.com/'}
+    _HEADERS={'User-Agent':'Mozilla/5.0 (Windows NT 10.0; Win64; x64)','Referer':'https://www.eastmoney.com/'}
 
+    # 2) 东财公告
     try:
-        url = (f"https://np-anotice-stock.eastmoney.com/api/security/ann"
-               f"?sr=-1&page=1&size={max_items}&s=&c={code}&t=1,2,9,22,40")
-        req = urllib.request.Request(url, headers=_HEADERS)
-        with urllib.request.urlopen(req, timeout=7) as resp:
-            data = json.loads(resp.read().decode('utf-8'))
-        ann_list = data.get('data', {}).get('list', [])
-        for item in ann_list[:max_items]:
-            title = str(item.get('title', '')).strip()
-            date  = str(item.get('notice_date', ''))[:10]
-            try:
-                notice_dt = datetime.datetime.strptime(date, "%Y-%m-%d").replace(tzinfo=BEIJING_TZ)
-                if (get_bj_time() - notice_dt).days > 3:
-                    continue
-                tag = _get_stock_news_time_tag(notice_dt)
-                if tag is None:
-                    continue
-            except Exception:
-                tag = "[📑前日]"
-            if title:
-                news_entries.append((notice_dt, f"{tag}[东财公告][{date}] {title}"))
-    except Exception:
-        pass
+        url=(f"https://np-anotice-stock.eastmoney.com/api/security/ann?sr=-1&page=1&size={max_items}"
+             f"&s=&c={code}&t=1,2,9,22,40")
+        req=urllib.request.Request(url,headers=_HEADERS)
+        with urllib.request.urlopen(req,timeout=7) as resp:
+            data=json.loads(resp.read().decode('utf-8'))
+        for item in data.get('data',{}).get('list',[])[:max_items]:
+            title=str(item.get('title','')).strip()
+            date=str(item.get('notice_date',''))[:10]
+            try: dt=datetime.datetime.strptime(date,'%Y-%m-%d').replace(tzinfo=BEIJING_TZ)
+            except Exception: dt=None
+            add_entry('东财公告',title,'公司公告/监管披露；AI必须判断公告是否改变当前基本面或交易逻辑。',dt)
+    except Exception: pass
 
-    # Yahoo Finance 新闻（A股用后缀）
+    # 3) Yahoo Finance
     try:
-        if ticker_code.upper().endswith('.SH'):
-            yahoo_ticker = code + '.SS'
-        else:
-            yahoo_ticker = code + '.SZ'
-        cutoff_ts = time.time() - 3 * 86400
-        raw = yf.Ticker(yahoo_ticker).news or []
+        yahoo_ticker=code+'.SS' if ticker_code.upper().endswith('.SH') else code+'.SZ'
+        raw=yf.Ticker(yahoo_ticker).news or []
+        cutoff=time.time()-72*3600
         for item in raw:
-            pub_ts = item.get('providerPublishTime', 0)
-            if pub_ts < cutoff_ts:
-                continue
-            title     = str(item.get('title', '')).strip()
-            publisher = str(item.get('publisher', 'Yahoo'))
-            pub_dt    = datetime.datetime.fromtimestamp(pub_ts, tz=BEIJING_TZ)
-            tag       = _get_stock_news_time_tag(pub_dt)
-            if tag is None:
-                continue
-            date_str  = pub_dt.strftime('%m-%d %H:%M')
-            if title:
-                news_entries.append((pub_dt, f"{tag}[Yahoo/{publisher}][{date_str}] {title}"))
-    except Exception:
-        pass
+            pub_ts=item.get('providerPublishTime',0)
+            if not pub_ts or pub_ts<cutoff: continue
+            title=str(item.get('title','')).strip()
+            summary=str(item.get('summary') or item.get('description') or item.get('content') or '').strip()
+            publisher=str(item.get('publisher','Yahoo'))
+            dt=datetime.datetime.fromtimestamp(pub_ts,tz=BEIJING_TZ)
+            add_entry(f'Yahoo/{publisher}',title,summary,dt)
+    except Exception: pass
 
-    # 新浪财经新闻
+    # 4) 新浪财经
     try:
-        sina_url = (f"https://feed.mix.sina.com.cn/api/roll/get"
-                    f"?pageid=153&lid=2512&k={code}&num={max_items}&page=1")
-        req = urllib.request.Request(sina_url, headers=_HEADERS)
-        with urllib.request.urlopen(req, timeout=6) as resp:
-            sina_content = resp.read().decode('utf-8')
-        sina_data = json.loads(sina_content)
-        _JUNK_KEYWORDS = ('盘口', '亚盘', '竞彩', '让球', '胜负彩', '比分',
-                          '欧冠', '英超', '西甲', '中超', 'NBA', 'CBA', '足彩', '首发阵容', '让分')
-        for item in sina_data.get('result', {}).get('data', []):
-            title = str(item.get('title', '')).strip()
-            ctime = str(item.get('ctime', ''))[:10]
+        sina_url=f"https://feed.mix.sina.com.cn/api/roll/get?pageid=153&lid=2512&k={code}&num={max_items}&page=1"
+        req=urllib.request.Request(sina_url,headers=_HEADERS)
+        with urllib.request.urlopen(req,timeout=6) as resp:
+            sina_data=json.loads(resp.read().decode('utf-8'))
+        junk=('盘口','亚盘','竞彩','让球','胜负彩','比分','欧冠','英超','西甲','中超','NBA','CBA','足彩','首发阵容','让分')
+        for item in sina_data.get('result',{}).get('data',[]):
+            title=str(item.get('title','')).strip()
+            summary=str(item.get('intro') or item.get('description') or '').strip()
+            ctime=str(item.get('ctime',''))[:10]
             try:
-                if ctime.isdigit() and len(ctime) == 10:
-                    ctime_dt = datetime.datetime.fromtimestamp(int(ctime), tz=BEIJING_TZ)
-                else:
-                    ctime_dt = datetime.datetime.strptime(ctime, "%Y-%m-%d").replace(tzinfo=BEIJING_TZ)
-                if (get_bj_time() - ctime_dt).days > 3:
-                    continue
-                tag = _get_stock_news_time_tag(ctime_dt)
-                if tag is None:
-                    continue
-            except Exception:
-                tag = "[📑前日]"
-            media = str(item.get('media_name', '新浪财经'))
-            is_relevant = bool(title) and (code in title or ticker_name[:2] in title)
-            is_junk = any(kw in title for kw in _JUNK_KEYWORDS)
-            if is_relevant and not is_junk:
-                news_entries.append((ctime_dt, f"{tag}[新浪/{media}][{ctime}] {title}"))
-    except Exception:
-        pass
+                dt=datetime.datetime.fromtimestamp(int(ctime),tz=BEIJING_TZ) if ctime.isdigit() and len(ctime)==10 else datetime.datetime.strptime(ctime,'%Y-%m-%d').replace(tzinfo=BEIJING_TZ)
+            except Exception: dt=None
+            if (code in title or ticker_name[:2] in title) and not any(k in title for k in junk):
+                add_entry(f"新浪/{item.get('media_name','新浪财经')}",title,summary,dt)
+    except Exception: pass
 
-    if not news_entries:
-        try:
-            q = urllib.parse.quote(f"{ticker_name} {code} A股")
-            raw = _http_get_text(
-                f"https://news.google.com/rss/search?q={q}&hl=zh-CN&gl=CN&ceid=CN:zh-Hans",
-                timeout=8, retries=1
-            )
-            for item in _parse_rss_items_tolerant(raw, limit=max_items * 2):
-                title = item.get("title", "").strip()
-                dt = _parse_rss_date(item.get("pubDate", ""))
-                tag = _news_age_tag_bj(dt)
-                if title and tag:
-                    stamp = dt.strftime("%m-%d %H:%M") if dt else "时间未知"
-                    news_entries.append((dt, f"{tag}[Google News] {stamp} - {title}"))
-        except Exception:
-            pass
-    news_entries.sort(key=lambda x: x[0] if x[0] is not None else datetime.datetime.min.replace(tzinfo=BEIJING_TZ), reverse=True)
-    return [entry[1] for entry in news_entries[:max_items]]
+    # 5) Google News：作为最终发现层，并做原始文章日期校验
+    try:
+        q=urllib.parse.quote(f"{ticker_name} {code} A股")
+        raw=_http_get_text(f"https://news.google.com/rss/search?q={q}&hl=zh-CN&gl=CN&ceid=CN:zh-Hans",timeout=8,retries=1,log_failures=False)
+        for item in _parse_rss_items_tolerant(raw,limit=max_items*3):
+            title=item.get('title','').strip()
+            feed_dt=_parse_rss_date(item.get('pubDate',''))
+            meta=_extract_original_article_meta(item.get('link',''))
+            dt=meta.get('published') or feed_dt
+            summary=item.get('description','') or meta.get('summary','')
+            add_entry('Google News',title,summary,dt)
+    except Exception: pass
+
+    # 去重 + 严格时效：_format_news_entry 已经丢弃72h以上与明确历史事件；再按发布时间排序。
+    out=[]; seen=set()
+    for _,line in sorted(news_entries,key=lambda x:x[0] or datetime.datetime.min.replace(tzinfo=BEIJING_TZ),reverse=True):
+        key=re.sub(r"[^\u4e00-\u9fa5a-z0-9]+","",line.lower())
+        if key in seen: continue
+        seen.add(key); out.append(line)
+        if len(out)>=max_items: break
+    return out
 
 def _get_stock_news_time_tag(dt_obj):
     if dt_obj is None:
@@ -2455,40 +2551,39 @@ def _get_stock_news_time_tag(dt_obj):
         return None
 
 def enrich_pool_with_news(pool_data: list) -> list:
-    print("📰 [阶段4] 正在逐只抓取个股新闻...")
+    """给Top候选统一补充结构化新闻；避免只有前30只才有摘要。"""
+    targets = pool_data[:100]
+    print(f"📰 [阶段4] 正在逐只抓取个股新闻：{len(targets)} 只候选")
     enriched = 0
-    for idx, item in enumerate(pool_data[:100]):
+
+    def worker(item):
         ticker_code = item.get('Ticker', '')
         ticker_name = item.get('Name', '')
+        try:
+            time.sleep(random.uniform(0.08, 0.22))
+            return ticker_code, get_stock_news(ticker_code, ticker_name, max_items=5)
+        except Exception:
+            return ticker_code, []
 
-        if idx < 30:
-            news = get_stock_news(ticker_code, ticker_name, max_items=5)
-            time.sleep(random.uniform(0.25, 0.55))
-        else:
-            code = ticker_code.split('.')[0]
-            news = []
+    with ThreadPoolExecutor(max_workers=min(8, max(2, len(targets)))) as executor:
+        futures = [executor.submit(worker, item) for item in targets]
+        for i, future in enumerate(as_completed(futures), 1):
             try:
-                url = (f"https://np-anotice-stock.eastmoney.com/api/security/ann"
-                       f"?sr=-1&page=1&size=3&s=&c={code}&t=1,2,9,22,40")
-                req = urllib.request.Request(
-                    url,
-                    headers={'User-Agent': 'Mozilla/5.0', 'Referer': 'https://www.eastmoney.com/'})
-                with urllib.request.urlopen(req, timeout=5) as resp:
-                    data = json.loads(resp.read().decode('utf-8'))
-                for ann in data.get('data', {}).get('list', [])[:3]:
-                    title = str(ann.get('title', '')).strip()
-                    date  = str(ann.get('notice_date', ''))[:10]
-                    if title:
-                        news.append(f"[东财公告][{date}] {title}")
+                ticker, news = future.result()
             except Exception:
-                pass
-            time.sleep(random.uniform(0.08, 0.18))
+                ticker, news = "", []
+            for item in targets:
+                if item.get('Ticker') == ticker:
+                    item['个股新闻'] = news
+                    if news:
+                        enriched += 1
+                    break
+            if i % 20 == 0 or i == len(targets):
+                print(f"   📰 个股新闻进度 {i}/{len(targets)}")
 
-        item['个股新闻'] = news
-        if news:
-            enriched += 1
-
-    print(f"✅ 个股新闻抓取完毕：{enriched}/100 只标的有新闻")
+    for item in pool_data:
+        item.setdefault('个股新闻', [])
+    print(f"✅ 个股新闻抓取完毕：{enriched}/{len(targets)} 只标的有结构化新闻")
     return pool_data
 
 # ==========================================
@@ -3148,6 +3243,15 @@ def generate_ai_report(pool_data, macro_news_text, macro_data_text, us_sector_te
     【今日A股交易额 Top 100（含技术评分+个股新闻）】：
     {json.dumps(compact_pool, ensure_ascii=False)}
 
+    【📰 新闻事实层：先核验，再推演】
+    1. 新闻输入现在包含：来源、发布时间、标题、摘要；部分新闻还包含“原始文章发布时间”和“历史事件日期”标记。
+    2. [⚠️历史事件:YYYY-MM-DD] 表示新闻讨论的事件本身明显早于当前交易日7天以上；除非摘要明确说明今天出现了新的进展/公告/价格影响，否则不得把该事件当作“今日催化”。
+    3. 聚合站/Google News 的刷新时间不能自动等于原始事件发生时间。优先使用原始文章发布时间、公告日期和明确事件日期。
+    4. 标题只是线索，不是事实证明。主线结论必须同时结合至少两类独立证据：个股/行业新闻 + 资金/价格/技术；只有一条标题时，必须降低消息可信度。
+    5. 对同一新闻的不同媒体转载不得算作多个独立证据；相同事件只算一次。
+    6. 对“上市、定价、签约、发布会”等一次性事件，必须判断事件是否已经发生、是否已经被市场消化，以及今天是否出现新的增量信息。
+    7. 报告可以写出“事实→当前影响→验证方式→结论”，但不要输出内部思维链。
+
     【新闻时效权重规则——必须严格遵守】：
     每条宏观新闻和个股新闻已自动打上时效标签，你必须根据标签调整消息面评分权重：
     - 宏观新闻：
@@ -3169,7 +3273,7 @@ def generate_ai_report(pool_data, macro_news_text, macro_data_text, us_sector_te
     第二步（板块锁定）：只在你提炼出的主线板块中寻找标的。严禁跳出主线去买"技术面好但没新闻"的票。
     第三步（技术选个股）：在主线板块内，**必须优先选择【日周月三周期共振】为 True 的标的**（代码自动标记：日线MACD↑ + 周线MACD↑ + 月线趋势确认）。日线看涨形态作为短线入场确认，不再作为月线共振的必选条件。若无三周期共振，再选择日周共振或技术评分≥20的标的，并明确写明共振层级。
     第四步（评分确认）：如果存在周期共振标的，直接将其排入Top1-5，除非该标的有重大负面新闻。若无共振标的，再退而求其次选择技术评分≥20的票，但须在报告中明确警示"无共振信号"。
-    第五步（新闻权重校验）：对每只入选Top1-5的标的，检查其个股新闻的时效标签。如果主要利好来自[📑前日]或[📄昨日]且个股已大涨，必须降级至观察池或排除。
+    第五步（新闻事实与增量校验）：对每只入选Top1-5的标的，必须说明“今天究竟新增了什么信息”。如果主要依据来自[⚠️历史事件:YYYY-MM-DD]，而没有新的公告、价格变化或独立增量证据，视为过期信息，不得作为主线催化；如果新闻只是旧事件的转载/回顾，也不得因为聚合时间较新而重新赋予高权重。
 
     第六步（重要人物讲话校验——新增硬规则）：
     1. 重要人物讲话不是普通新闻，必须判断其是否改变“通胀→利率→美元→商品→行业”的预期链。
