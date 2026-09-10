@@ -658,157 +658,15 @@ def get_stop_loss_hit_warning():
         parts.append("⚠️ 【接近止损联动】以下标的最近一次 Review 距离移动止损≤3%：今日不得作为 Top 1-5 核心追涨推荐；若进入候选池必须标注高风险。\n"+'\n'.join(details))
     return '\n\n'.join(parts)+'\n'
 
-def _get_latest_completed_ashare_trade_date():
-    """返回最近一个已经完成的A股交易日(YYYYMMDD)。
-
-    盘前运行时绝不能把当天作为已完成交易日；优先使用Tushare交易日历，
-    失败时退回最近一个工作日。
-    """
-    today = get_bj_time().date()
-    try:
-        end = today.strftime('%Y%m%d')
-        start = (today - datetime.timedelta(days=15)).strftime('%Y%m%d')
-        cal = pro.trade_cal(exchange='SSE', start_date=start, end_date=end, is_open='1',
-                            fields='cal_date,is_open')
-        if cal is not None and not cal.empty:
-            dates = sorted(pd.to_datetime(cal['cal_date'].astype(str)).dt.date.tolist())
-            completed = [d for d in dates if d < today]
-            if completed:
-                return completed[-1].strftime('%Y%m%d')
-    except Exception as e:
-        print(f"⚠️ Tushare交易日历获取失败，使用工作日兜底：{str(e)[:120]}")
-    d = today - datetime.timedelta(days=1)
-    while d.weekday() >= 5:
-        d -= datetime.timedelta(days=1)
-    return d.strftime('%Y%m%d')
-
-
-def _build_pool_from_tushare_daily(trade_date):
-    """Tushare daily作为核心资金池最终备用：按最近完整交易日成交额排序Top 300。"""
-    try:
-        df = pro.daily(trade_date=trade_date,
-                       fields='ts_code,trade_date,open,high,low,close,pre_close,change,pct_chg,vol,amount')
-        if df is None or df.empty:
-            return {}, []
-        work = df.copy()
-        work['ts_code'] = work['ts_code'].astype(str).str.upper().str.strip()
-        work = work[work['ts_code'].str.endswith(('.SH', '.SZ', '.BJ'))]
-        work['amount'] = pd.to_numeric(work.get('amount'), errors='coerce').fillna(0.0)
-        work['close'] = pd.to_numeric(work.get('close'), errors='coerce')
-        work['open'] = pd.to_numeric(work.get('open'), errors='coerce')
-        work['high'] = pd.to_numeric(work.get('high'), errors='coerce')
-        work['low'] = pd.to_numeric(work.get('low'), errors='coerce')
-        work['pct_chg'] = pd.to_numeric(work.get('pct_chg'), errors='coerce').fillna(0.0)
-        work = work[(work['close'] > 0) & (work['amount'] > 0)]
-        work = work.sort_values('amount', ascending=False).head(300)
-        if work.empty:
-            return {}, []
-
-        names = {}
-        industries = {}
-        try:
-            basic = pro.stock_basic(exchange='', list_status='L', fields='ts_code,name,industry')
-            if basic is not None and not basic.empty:
-                names = dict(zip(basic['ts_code'].astype(str).str.upper(), basic['name']))
-                industries = dict(zip(basic['ts_code'].astype(str).str.upper(), basic['industry']))
-        except Exception as e:
-            print(f"⚠️ Tushare行业元数据补充失败：{str(e)[:120]}")
-
-        pool = {}
-        for _, row in work.iterrows():
-            code = str(row['ts_code']).strip().upper()
-            pool[code] = {
-                'Ticker': code,
-                'Name': str(names.get(code, code)),
-                'Industry': industries.get(code, '未知') or '未知',
-                'Open': safe_float(row.get('open')),
-                'Close': safe_float(row.get('close')),
-                'Amount': safe_float(row.get('amount'), 0.0) or 0.0,
-                'pct_chg': safe_float(row.get('pct_chg'), 0.0) or 0.0,
-            }
-        return pool, list(pool.keys())
-    except Exception as e:
-        print(f"⚠️ Tushare daily Top300备用失败：{str(e)[:160]}")
-        return {}, []
-
-
-def _build_pool_from_sina_snapshot(trade_date=None):
-    """最后一层公共行情备用。
-
-    股票代码优先来自Tushare stock_basic，再用新浪批量快照取得实时/最近价和成交量，
-    用 price*volume 估算成交额，仅用于防止所有主力池接口同时不可用。
-    """
-    try:
-        basic = pro.stock_basic(exchange='', list_status='L', fields='ts_code,name,industry')
-        if basic is None or basic.empty:
-            return {}, []
-        basic = basic.copy()
-        basic['ts_code'] = basic['ts_code'].astype(str).str.upper().str.strip()
-        basic = basic[basic['ts_code'].str.endswith(('.SH', '.SZ'))]
-        if basic.empty:
-            return {}, []
-
-        all_codes = basic['ts_code'].tolist()
-        name_map = dict(zip(basic['ts_code'], basic['name']))
-        industry_map = dict(zip(basic['ts_code'], basic['industry']))
-        pool = {}
-        # 新浪一次请求过多时容易失败，按100只分批。
-        for i in range(0, len(all_codes), 100):
-            batch = all_codes[i:i+100]
-            sina_symbols = ','.join(('sh' if c.endswith('.SH') else 'sz') + c[:6] for c in batch)
-            url = 'https://hq.sinajs.cn/list=' + sina_symbols
-            req = urllib.request.Request(url, headers={'User-Agent':'Mozilla/5.0','Referer':'https://finance.sina.com.cn/'})
-            with urllib.request.urlopen(req, timeout=12) as resp:
-                text = resp.read().decode('gbk', errors='ignore')
-            for seg in text.split(';'):
-                seg = seg.strip()
-                if '="' not in seg:
-                    continue
-                left, right = seg.split('="', 1)
-                m = re.search(r'list=(sh|sz)(\d{6})', left)
-                if not m:
-                    continue
-                market, code6 = m.group(1).upper(), m.group(2)
-                ts_code = f'{code6}.{"SH" if market == "SH" else "SZ"}'
-                vals = right.rstrip('"').split(',')
-                if len(vals) < 10:
-                    continue
-                try:
-                    name = vals[0] or name_map.get(ts_code, ts_code)
-                    open_p = safe_float(vals[1])
-                    prev_close = safe_float(vals[2])
-                    current = safe_float(vals[3])
-                    high = safe_float(vals[4])
-                    low = safe_float(vals[5])
-                    volume = safe_float(vals[8], 0.0) or 0.0
-                    if current is None or current <= 0:
-                        current = prev_close
-                    if current is None or current <= 0:
-                        continue
-                    est_amount = current * volume
-                    pct = ((current / prev_close) - 1) * 100 if prev_close and prev_close > 0 else 0.0
-                    pool[ts_code] = {
-                        'Ticker': ts_code, 'Name': name, 'Industry': industry_map.get(ts_code, '未知') or '未知',
-                        'Open': open_p if open_p and open_p > 0 else current,
-                        'Close': current, 'Amount': est_amount, 'pct_chg': pct,
-                    }
-                except Exception:
-                    continue
-            time.sleep(0.05)
-        if not pool:
-            return {}, []
-        top = sorted(pool.values(), key=lambda x: x.get('Amount', 0.0), reverse=True)[:300]
-        final_pool = {x['Ticker']: x for x in top}
-        return final_pool, list(final_pool.keys())
-    except Exception as e:
-        print(f"⚠️ 新浪批量行情备用失败：{str(e)[:160]}")
-        return {}, []
-
-
 def get_top_300_pool():
-    """主力资金池多源容错：雪球→东方财富→Tushare daily→新浪快照。"""
-    print("🔍 [阶段1] 正在拉取最近完整交易日A股 Top 300 主力资金池（多源容错）...")
-    full_pool, codes, trade_date = {}, [], _get_latest_completed_ashare_trade_date()
+    """
+    主力资金池：
+    1) 雪球 screener 按成交额 DESC 获取 Top 300（主）
+    2) 东方财富 clist 按成交额作为行情备用
+    行业信息仍优先使用 Tushare stock_basic；Tushare 不参与价格/K线事实链路。
+    """
+    print("🔍 [阶段1] 正在拉取最近交易日A股 Top 300 主力资金池（雪球主数据源）...")
+    full_pool, codes, trade_date = {}, [], None
 
     try:
         items = xq.get_top_by_amount(300)
@@ -818,17 +676,31 @@ def get_top_300_pool():
                 sym = str(q.get("symbol") or q.get("code") or "").upper().strip()
                 if not sym:
                     continue
-                ts_code = f"{sym[2:]}.{sym[:2]}" if len(sym) >= 8 and sym[:2] in ("SH","SZ","BJ") else sym
+                ts_code = (
+                    f"{sym[2:]}.{sym[:2]}"
+                    if len(sym) >= 8 and sym[:2] in ("SH","SZ","BJ") else sym
+                )
                 name = q.get("name") or ts_code
                 close = safe_float(q.get("current"))
                 if close is None or close <= 0:
                     continue
-                open_p = safe_float(q.get("open")) or close
-                amount = safe_float(q.get("amount"), 0.0) or 0.0
-                pct = safe_float(q.get("percent"), 0.0) or 0.0
-                full_pool[ts_code] = {'Ticker':ts_code,'Name':str(name),'Industry':'未知','Open':open_p,'Close':close,'Amount':amount,'pct_chg':pct}
+                open_p = safe_float(q.get("open"))
+                if open_p is None:
+                    open_p = close
+                amount = safe_float(q.get("amount"), 0.0)
+                pct = safe_float(q.get("percent"), 0.0)
+                full_pool[ts_code] = {
+                    "Ticker": ts_code,
+                    "Name": str(name),
+                    "Industry": "未知",
+                    "Open": open_p,
+                    "Close": close,
+                    "Amount": amount if amount is not None else 0.0,
+                    "pct_chg": pct if pct is not None else 0.0,
+                }
             if full_pool:
                 codes = list(full_pool.keys())[:300]
+                # 雪球没有稳定提供统一行业字段，因此只补充名称/行业元数据，不覆盖雪球价格。
                 try:
                     basic = pro.stock_basic(exchange='', list_status='L', fields='ts_code,name,industry')
                     if basic is not None and not basic.empty:
@@ -839,7 +711,8 @@ def get_top_300_pool():
                             full_pool[code]['Industry'] = industry_map.get(code, "未知") or "未知"
                 except Exception as e:
                     print(f"⚠️ 行业元数据补充失败：{str(e)[:120]}")
-                print(f"✅ 雪球成功圈定 {len(full_pool)} 只核心活跃标的，交易日={trade_date}。")
+                trade_date = get_bj_time().strftime('%Y%m%d')
+                print(f"✅ 雪球成功圈定 {len(full_pool)} 只核心活跃标的。")
         else:
             print("⚠️ 雪球 Top 300 返回空数据，启动东方财富行情备用。")
     except Exception as e:
@@ -857,32 +730,37 @@ def get_top_300_pool():
                 obj = json.loads(resp.read().decode('utf-8', errors='ignore'))
             diff = ((obj.get('data') or {}).get('diff') or [])
             for item in diff[:300]:
-                code = str(item.get('f12') or '').strip(); market = str(item.get('f13') or '').strip()
-                if not code or market not in {'0','1'}: continue
+                code = str(item.get('f12') or '').strip()
+                market = str(item.get('f13') or '').strip()
+                if not code or market not in {'0','1'}:
+                    continue
                 ts_code = f"{code}.{'SZ' if market=='0' else 'SH'}"
                 latest = safe_float(item.get('f2'))
-                if latest is None or latest <= 0: continue
-                full_pool[ts_code] = {'Ticker':ts_code,'Name':str(item.get('f14') or ts_code),'Industry':'未知','Open':safe_float(item.get('f17'),latest),'Close':latest,'Amount':safe_float(item.get('f6'),0.0) or 0.0,'pct_chg':safe_float(item.get('f3'),0.0) or 0.0}
+                if latest is None or latest <= 0:
+                    continue
+                full_pool[ts_code] = {
+                    'Ticker': ts_code, 'Name': str(item.get('f14') or ts_code),
+                    'Industry': '未知', 'Open': safe_float(item.get('f17'), latest),
+                    'Close': latest, 'Amount': safe_float(item.get('f6'), 0.0),
+                    'pct_chg': safe_float(item.get('f3'), 0.0),
+                }
             codes=list(full_pool.keys())[:300]
-            print(f"✅ 东方财富备用圈定 {len(full_pool)} 只核心活跃标的，交易日={trade_date}。")
+            trade_date=get_bj_time().strftime('%Y%m%d')
+            print(f"✅ 东方财富备用圈定 {len(full_pool)} 只核心活跃标的。")
+            if full_pool:
+                try:
+                    basic = pro.stock_basic(exchange='', list_status='L', fields='ts_code,name,industry')
+                    if basic is not None and not basic.empty:
+                        industry_map = dict(zip(basic['ts_code'], basic['industry']))
+                        for code in codes:
+                            full_pool[code]['Industry'] = industry_map.get(code, '未知') or '未知'
+                except Exception:
+                    pass
         except Exception as e:
-            print(f"⚠️ 东方财富 Top 300 获取失败：{str(e)[:160]}，启动 Tushare daily 备用。")
+            print(f"🚨 雪球与东方财富均无法获取主力池：{str(e)[:160]}")
+            return {}, [], None
 
-    if not full_pool:
-        full_pool, codes = _build_pool_from_tushare_daily(trade_date)
-        if full_pool:
-            print(f"✅ Tushare daily 备用圈定 {len(full_pool)} 只核心活跃标的，交易日={trade_date}。")
-
-    if not full_pool:
-        full_pool, codes = _build_pool_from_sina_snapshot(trade_date)
-        if full_pool:
-            print(f"✅ 新浪批量行情最终备用圈定 {len(full_pool)} 只核心活跃标的，交易日={trade_date}。")
-
-    if not full_pool:
-        print("🚨 雪球、东方财富、Tushare daily、新浪均无法获取核心资金池；禁止使用空池继续选股。")
-        return {}, [], None
-
-    # Tushare 资金流补充：字段缺失时显式使用同长度Series，避免 int.fillna 错误。
+    # 资金流仍由 Tushare 补充；它是策略因子而非雪球实时行情主来源。
     try:
         df_mf = pro.moneyflow(trade_date=trade_date)
         if df_mf is not None and not df_mf.empty:
@@ -891,29 +769,29 @@ def get_top_300_pool():
             df_mf['main_net'] = lg + net
             mf_map = dict(zip(df_mf['ts_code'], df_mf['main_net']))
             for ts_code in full_pool:
-                full_pool[ts_code]['主力净流入(万元)'] = safe_float(mf_map.get(ts_code), 0.0) or 0.0
+                full_pool[ts_code]['主力净流入(万元)'] = mf_map.get(ts_code, 0)
             sector_flow = {}
             for ts_code, data in full_pool.items():
                 sector = data.get('Industry', '其他')
-                sector_flow[sector] = sector_flow.get(sector, 0) + (data.get('主力净流入(万元)') or 0)
+                sector_flow[sector] = sector_flow.get(sector, 0) + data.get('主力净流入(万元)', 0)
             top5_sectors = sorted(sector_flow.items(), key=lambda x: x[1], reverse=True)[:5]
             hot_sectors = {s[0] for s in top5_sectors if s[1] > 0}
             for ts_code in full_pool:
                 full_pool[ts_code]['热点板块'] = full_pool[ts_code].get('Industry', '其他') in hot_sectors
             print(f"✅ 板块资金流向计算完成，热点板块: {list(hot_sectors)}")
     except Exception as e:
-        print(f"⚠️ 板块资金流向获取失败：{str(e)[:160]}")
+        print(f"⚠️ 板块资金流向获取失败: {e}")
 
-    return full_pool, list(full_pool.keys())[:300], trade_date
+    return full_pool, codes[:300], trade_date
 
 
 # ==========================================
 # 2. 【新版】重要人物讲话 + 关键经济数据 + 宏观状态机
 # ==========================================
 # 数据职责：
-# - 雪球：A股实时行情/主力活跃榜/个股动态/估值
-# - 东方财富/新浪/Yahoo：实时/新闻/历史行情备用
-# - Tushare：A股主日线K线 + 资金流/行业元数据 + 宏观结构化数据
+# - 雪球：A股实时行情/主力活跃榜/K线/个股动态/估值（第一股票数据源）
+# - 东方财富/新浪/Yahoo：雪球行情失败时的备用行情源
+# - Tushare：仅保留资金流/行业元数据等非价格字段
 # - 中国宏观：国家统计局/人民银行官方网页
 # - 美国宏观：BLS + BEA，FRED作为PCE兜底
 # - 重要人物：新闻RSS + Federal Reserve官方讲话页
@@ -2494,81 +2372,168 @@ def enrich_pool_with_news(pool_data: list) -> list:
 # ==========================================
 # 6. 定向计算技术指标
 # ==========================================
-def _tushare_history_bulk_by_trade_date(codes, start_date, end_date, pause_seconds=0.25):
-    """Tushare主日线：按交易日批量拉取全市场daily，再筛选目标股票。
-    这样避免逐股票调用 daily 导致 300次/分钟 频率限制。"""
-    codes = [str(c).strip().upper() for c in codes if str(c).strip()]
+def _xq_history_one(code, count=260):
+    """雪球主日线。返回标准字段；失败后仅交给 Eastmoney/Sina/Yahoo 兜底。"""
+    try:
+        df = xq.get_kline(code, count=count, period="day")
+        if df is not None and not df.empty:
+            return code, df, None
+        return code, pd.DataFrame(), "雪球返回空K线"
+    except Exception as e:
+        return code, pd.DataFrame(), str(e)[:140]
+
+
+def _xq_history_multi(codes, count=260, max_workers=5):
+    """雪球日线批量抓取。控制并发以降低 403/限频风险。"""
     if not codes:
         return pd.DataFrame(), []
-    target = set(codes)
-    print(f"   📊 启动Tushare批量日线：{len(codes)}只，区间={start_date}~{end_date}")
-    try:
-        cal = pro.trade_cal(exchange='SSE', start_date=start_date, end_date=end_date, is_open='1', fields='cal_date')
-        trade_dates = [] if cal is None or cal.empty else sorted(cal['cal_date'].astype(str).tolist())
-    except Exception as e:
-        print(f"   ⚠️ Tushare交易日历获取失败：{e}")
-        trade_dates = []
-    if not trade_dates:
-        # 最保守兜底：按日期区间逐日尝试；即使交易日历接口失败也不让函数直接崩溃。
-        d0 = datetime.datetime.strptime(start_date, '%Y%m%d').date()
-        d1 = datetime.datetime.strptime(end_date, '%Y%m%d').date()
-        trade_dates = []
-        d = d0
-        while d <= d1:
-            if d.weekday() < 5:
-                trade_dates.append(d.strftime('%Y%m%d'))
-            d += datetime.timedelta(days=1)
-
-    frames = []
-    failed_dates = []
-    total = len(trade_dates)
-    for i, td in enumerate(trade_dates, 1):
-        try:
-            df = pro.daily(trade_date=td,
-                           fields='ts_code,trade_date,open,high,low,close,pre_close,change,pct_chg,vol,amount')
+    print(f"   ☁️ 启动雪球主日线：{len(codes)}只")
+    frames, failed = [], []
+    with ThreadPoolExecutor(max_workers=max_workers) as ex:
+        futures = {ex.submit(_xq_history_one, c, count): c for c in codes}
+        for i, fut in enumerate(as_completed(futures), 1):
+            code, df, err = fut.result()
             if df is not None and not df.empty:
-                df = df.copy()
-                df['ts_code'] = df['ts_code'].astype(str).str.strip().str.upper()
-                df = df[df['ts_code'].isin(target)]
-                if not df.empty:
-                    frames.append(df)
+                frames.append(df)
             else:
-                failed_dates.append(td)
-        except Exception as e:
-            failed_dates.append(td)
-            msg = str(e)[:120]
-            # 频率限制/临时错误，短暂退避后只重试当天一次
-            time.sleep(max(pause_seconds, 0.8))
-            try:
-                df = pro.daily(trade_date=td,
-                               fields='ts_code,trade_date,open,high,low,close,pre_close,change,pct_chg,vol,amount')
-                if df is not None and not df.empty:
-                    df = df.copy()
-                    df['ts_code'] = df['ts_code'].astype(str).str.strip().str.upper()
-                    df = df[df['ts_code'].isin(target)]
-                    if not df.empty:
-                        frames.append(df)
-                        failed_dates.pop()
-            except Exception:
-                print(f"   ⚠️ Tushare日线失败 {td}: {msg}")
-        if i % 20 == 0 or i == total:
-            print(f"   📊 Tushare日线进度 {i}/{total} 交易日")
-        time.sleep(pause_seconds)
+                failed.append(code)
+                print(f"   ⚠️ 雪球K线失败 {code}: {err}")
+            if i % 50 == 0 or i == len(futures):
+                print(f"   ☁️ 雪球K线进度 {i}/{len(futures)}")
+    out = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+    return out, failed
 
-    if not frames:
-        return pd.DataFrame(), list(codes)
-    out = pd.concat(frames, ignore_index=True)
-    for col in ['open','high','low','close','pre_close','change','pct_chg','vol','amount']:
-        if col in out.columns:
-            out[col] = pd.to_numeric(out[col], errors='coerce')
-    out['trade_date'] = out['trade_date'].astype(str).str.replace('-', '', regex=False)
-    out = (out.dropna(subset=['ts_code','trade_date','open','high','low','close'])
-              .drop_duplicates(subset=['ts_code','trade_date'])
-              .sort_values(['ts_code','trade_date']))
-    counts = out.groupby('ts_code')['trade_date'].nunique().to_dict()
-    failed_codes = [c for c in codes if counts.get(c, 0) < 60]
-    print(f"   ✅ Tushare批量日线完成：{out['ts_code'].nunique()}/{len(codes)}只有效，{len(failed_codes)}只历史不足60根")
-    return out, failed_codes
+
+def _eastmoney_fetch_daily(code, start_date, end_date):
+    """Eastmoney历史日K备用源。"""
+    bare=str(code).split('.')[0]
+    suffix=str(code).upper().split('.')[-1] if '.' in str(code) else 'SZ'
+    market='1' if suffix=='SH' else '0'
+    url=("https://push2his.eastmoney.com/api/qt/stock/kline/get"
+         f"?secid={market}.{bare}&klt=101&fqt=0&beg={start_date}&end={end_date}"
+         "&fields1=f1,f2,f3,f4,f5,f6&fields2=f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61"
+         "&ut=fa5fd1943c7b386f172d6893dbfba10b")
+    req=urllib.request.Request(url,headers={'User-Agent':'Mozilla/5.0','Referer':'https://quote.eastmoney.com/'})
+    with urllib.request.urlopen(req,timeout=12) as resp:
+        obj=json.loads(resp.read().decode('utf-8',errors='ignore'))
+    rows=[]
+    for line in (((obj or {}).get('data') or {}).get('klines') or []):
+        parts=str(line).split(',')
+        if len(parts)<7: continue
+        try:
+            dt,op,cl,hi,lo,vol,amount=parts[:7]
+            rows.append({'ts_code':code,'trade_date':dt.replace('-',''),'open':float(op),'close':float(cl),'high':float(hi),'low':float(lo),'pre_close':None,'change':None,'pct_chg':None,'vol':float(vol),'amount':float(amount)})
+        except (TypeError,ValueError):
+            continue
+    return pd.DataFrame(rows)
+
+
+def _sina_fetch_daily(code, limit=320):
+    """新浪历史日K第二备用源。"""
+    ticker=str(code).strip().upper(); bare=ticker.split('.')[0]; suffix=ticker.split('.')[-1] if '.' in ticker else 'SZ'
+    symbol=('sh' if suffix=='SH' else 'sz')+bare
+    url=('https://money.finance.sina.com.cn/quotes_service/api/json_v2.php/'
+         f'CN_MarketData.getKLineData?symbol={symbol}&scale=240&ma=no&datalen={int(limit)}')
+    req=urllib.request.Request(url,headers={'User-Agent':'Mozilla/5.0'})
+    with urllib.request.urlopen(req,timeout=12) as resp:
+        obj=json.loads(resp.read().decode('gbk',errors='ignore'))
+    rows=[]
+    for item in obj or []:
+        try:
+            dt=str(item.get('day',''))
+            rows.append({'ts_code':ticker,'trade_date':dt.replace('-',''),'open':float(item['open']),'close':float(item['close']),'high':float(item['high']),'low':float(item['low']),'pre_close':None,'change':None,'pct_chg':None,'vol':float(item.get('volume',0)),'amount':float(item.get('amount',0))})
+        except (TypeError,ValueError,KeyError):
+            continue
+    return pd.DataFrame(rows)
+
+
+def _fetch_yahoo_daily(code, start_date, end_date):
+    """Yahoo Finance 最终历史日K备用源。"""
+    ticker = str(code).strip().upper()
+    symbol = _to_yahoo_symbol(ticker)
+    df = _yahoo_chart_to_df(symbol, interval="1d", period_days=420)
+    if df.empty:
+        return pd.DataFrame()
+
+    lo = pd.to_datetime(start_date, format="%Y%m%d", errors="coerce")
+    hi = pd.to_datetime(end_date, format="%Y%m%d", errors="coerce")
+    local_dates = pd.to_datetime(df["datetime"], errors="coerce").dt.tz_localize(None).dt.normalize()
+    mask = local_dates.between(lo.normalize(), hi.normalize())
+    df = df.loc[mask].copy()
+    if df.empty:
+        return pd.DataFrame()
+
+    df["trade_date"] = local_dates.loc[df.index].dt.strftime("%Y%m%d")
+    df = df.sort_values("trade_date")
+    return pd.DataFrame({
+        "ts_code": ticker,
+        "trade_date": df["trade_date"].values,
+        "open": df["open"].astype(float).values,
+        "close": df["close"].astype(float).values,
+        "high": df["high"].astype(float).values,
+        "low": df["low"].astype(float).values,
+        "pre_close": None,
+        "change": None,
+        "pct_chg": None,
+        "vol": df["volume"].fillna(0).astype(float).values,
+        "amount": np.nan,
+    })
+
+
+def _fetch_one_fallback(code,start_date,end_date):
+    east_err='未执行'
+    sina_err='未执行'
+    try:
+        df=_eastmoney_fetch_daily(code,start_date,end_date)
+        if df is not None and len(df)>=30:
+            return code,df,'Eastmoney'
+        east_err=f"Eastmoney返回{len(df) if df is not None else 0}行"
+    except Exception as e:
+        east_err=str(e)[:120]
+
+    try:
+        df=_sina_fetch_daily(code,320)
+        if df is not None and not df.empty:
+            dates=pd.to_datetime(df['trade_date'],format='%Y%m%d',errors='coerce')
+            lo=pd.to_datetime(start_date,format='%Y%m%d',errors='coerce')
+            hi=pd.to_datetime(end_date,format='%Y%m%d',errors='coerce')
+            df=df[dates.between(lo,hi)].copy()
+        if df is not None and len(df)>=30:
+            return code,df,'Sina'
+        sina_err=f"Sina返回{len(df) if df is not None else 0}行"
+    except Exception as e:
+        sina_err=str(e)[:120]
+
+    try:
+        df=_fetch_yahoo_daily(code,start_date,end_date)
+        if df is not None and len(df)>=30:
+            return code,df,'Yahoo'
+        return code,df if df is not None else pd.DataFrame(),f'Eastmoney={east_err}; Sina={sina_err}; Yahoo不足30行'
+    except Exception as e:
+        return code,pd.DataFrame(),f'Eastmoney={east_err}; Sina={sina_err}; Yahoo={str(e)[:120]}'
+
+
+def _fallback_daily_multi_source(codes,start_date,end_date,max_workers=8):
+    if not codes: return pd.DataFrame()
+    print(f"   🔁 启动多源K线备用：{len(codes)}只（Eastmoney→新浪→Yahoo）")
+    frames=[]; em=si=yh=fail=0
+    with ThreadPoolExecutor(max_workers=max_workers) as ex:
+        futures={ex.submit(_fetch_one_fallback,c,start_date,end_date):c for c in codes}
+        for fut in as_completed(futures):
+            c=futures[fut]
+            try: code,df,src=fut.result()
+            except Exception as e:
+                fail+=1; print(f"   ⚠️ 备用K线 {c} 异常: {str(e)[:120]}"); continue
+            if df is not None and not df.empty:
+                frames.append(df)
+                em += (src=='Eastmoney')
+                si += (src=='Sina')
+                yh += (src=='Yahoo')
+            else:
+                fail+=1; print(f"   ⚠️ 备用K线 {c} 最终失败: {src}")
+    print(f"   ✅ 备用K线完成：Eastmoney {em}只；新浪 {si}只；Yahoo {yh}只；失败 {fail}只")
+    return pd.concat(frames,ignore_index=True) if frames else pd.DataFrame()
+
 
 def _daily_to_weekly(df_daily):
     """由真实日线聚合周线。"""
@@ -2586,40 +2551,20 @@ def _daily_to_weekly(df_daily):
     return pd.concat(rows,ignore_index=True) if rows else pd.DataFrame()
 
 
-def _daily_to_monthly(df_daily):
-    """由真实日线聚合月线，用于月级趋势/动量共振。"""
-    if df_daily is None or df_daily.empty:
-        return pd.DataFrame()
-    rows=[]
-    for code,g in df_daily.groupby('ts_code'):
-        g=g.copy().sort_values('trade_date')
-        dt=pd.to_datetime(g['trade_date'].astype(str), format='%Y%m%d', errors='coerce')
-        g=g.assign(_dt=dt).dropna(subset=['_dt'])
-        if g.empty:
-            continue
-        m=g.set_index('_dt').resample('ME').agg({
-            'open':'first','high':'max','low':'min','close':'last','vol':'sum','amount':'sum'
-        }).dropna(subset=['open','close'])
-        if m.empty:
-            continue
-        m=m.reset_index()
-        m['ts_code']=code
-        m['trade_date']=m['_dt'].dt.strftime('%Y%m%d')
-        m['pre_close']=m['close'].shift(1)
-        m['pct_chg']=(m['close']/m['pre_close']-1)*100
-        m['change']=m['close']-m['pre_close']
-        rows.append(m[['ts_code','trade_date','open','high','low','close','pre_close','change','pct_chg','vol','amount']])
-    return pd.concat(rows, ignore_index=True) if rows else pd.DataFrame()
-
-
 def calc_tech_indicators(full_pool, codes, trade_date):
-    print("⚙️ [阶段3] 正在使用Tushare主日线并由真实日线计算周线/技术指标...")
-    start_hist=(get_bj_time()-datetime.timedelta(days=420)).strftime('%Y%m%d')
-    # Tushare主K线；历史不足只做提示，不再调用未定义/易触发限频的逐股备用K线。
-    df_hist_ts, ts_failed_codes = _tushare_history_bulk_by_trade_date(codes, start_hist, trade_date, pause_seconds=0.22)
-    df_hist = df_hist_ts.copy() if not df_hist_ts.empty else pd.DataFrame()
-    if ts_failed_codes:
-        print(f"   ⚠️ Tushare主日线对 {len(ts_failed_codes)} 只股票历史不足60根；优先保留Tushare真实数据，不再调用未定义的备用函数。")
+    print("⚙️ [阶段3] 正在拉取日线K线并由真实日线计算周线/技术指标...")
+    start_hist=(get_bj_time()-datetime.timedelta(days=220)).strftime('%Y%m%d')
+    # 雪球主K线；失败只进入东方财富→新浪→Yahoo，不再使用 Tushare。
+    df_hist_xq, xq_failed_codes = _xq_history_multi(codes, count=260, max_workers=5)
+    if not df_hist_xq.empty:
+        df_hist_xq['ts_code'] = df_hist_xq['ts_code'].astype(str).str.strip()
+        df_hist_xq['trade_date'] = df_hist_xq['trade_date'].astype(str).str.replace('-','',regex=False)
+    df_hist = df_hist_xq.copy() if not df_hist_xq.empty else pd.DataFrame()
+    if xq_failed_codes:
+        print(f"   🔁 雪球K线失败 {len(xq_failed_codes)}只，进入东方财富→新浪→Yahoo备用")
+        df_fallback=_fallback_daily_multi_source(xq_failed_codes,start_hist,trade_date,max_workers=8)
+        if not df_fallback.empty:
+            df_hist=pd.concat([df_hist,df_fallback],ignore_index=True) if not df_hist.empty else df_fallback
     if not df_hist.empty:
         for col in ['open','high','low','close','vol','amount']:
             df_hist[col]=pd.to_numeric(df_hist[col],errors='coerce')
@@ -2629,7 +2574,8 @@ def calc_tech_indicators(full_pool, codes, trade_date):
                  .drop_duplicates(subset=['ts_code','trade_date'],keep='last')
                  .sort_values(['ts_code','trade_date']))
 
-    # 检查批量请求后是否存在历史不足的股票；不再二次调用备用K线，避免重复打接口和限频。
+    # 不仅检查“请求失败”，还检查“批量请求成功但某些股票实际没有足够历史”。
+    # 这些股票继续进入备用源，避免 partial response 被误判为完整。
     fallback_needed=[]
     if not df_hist.empty:
         counts=df_hist.groupby('ts_code')['trade_date'].nunique().to_dict()
@@ -2637,23 +2583,25 @@ def calc_tech_indicators(full_pool, codes, trade_date):
     else:
         fallback_needed=list(codes)
     if fallback_needed:
-        print(f"   🔎 历史完整性检查：{len(fallback_needed)}只少于60根日K，保持Tushare数据继续计算")
-        print(f"   ℹ️ 历史完整性检查：{len(fallback_needed)}只少于60根日K，保持Tushare结果继续计算。") if fallback_needed else None
+        already=set(df_hist['ts_code'].astype(str)) if not df_hist.empty else set()
+        # 只替换/补齐历史不足的股票，减少备用源压力。
+        print(f"   🔎 历史完整性检查：{len(fallback_needed)}只少于60根日K，启动定向备用补齐")
+        df_fallback2=_fallback_daily_multi_source(fallback_needed,start_hist,trade_date,max_workers=8)
+        if not df_fallback2.empty:
+            df_hist=pd.concat([df_hist,df_fallback2],ignore_index=True) if not df_hist.empty else df_fallback2
+            df_hist=df_hist.drop_duplicates(subset=['ts_code','trade_date'],keep='last').sort_values(['ts_code','trade_date'])
 
     df_weekly=_daily_to_weekly(df_hist)
-    df_monthly=_daily_to_monthly(df_hist)
     daily_count=df_hist['ts_code'].nunique() if not df_hist.empty else 0
     weekly_count=df_weekly['ts_code'].nunique() if not df_weekly.empty else 0
-    monthly_count=df_monthly['ts_code'].nunique() if not df_monthly.empty else 0
-    print(f"   📈 K线数据状态：日线 {daily_count}/{len(codes)}；周线 {weekly_count}/{len(codes)}；月线 {monthly_count}/{len(codes)}（周/月线均由真实日线聚合）")
+    print(f"   📈 K线数据状态：日线 {daily_count}/{len(codes)}；周线 {weekly_count}/{len(codes)}（周线由真实日线聚合）")
 
     FALLBACK = [
         ("乖离率(%)", 0.0), ("RSI", 50.0), ("MACD趋势", "N/A"),
         ("MACD_HIST_LAST", 0.0), ("MACD_HIST_PREV", 0.0),
         ("MACD金叉", False), ("MACD绿柱缩短", False),
-        ("MACD_V型反转", False), ("周线MACD_V型反转", False), ("月线MACD上升", False),
-        ("月线MA5>MA10", False), ("月线趋势共振", False),
-        ("周线共振", False), ("三周期共振", False),
+        ("MACD_V型反转", False), ("周线MACD_V型反转", False),
+        ("周线共振", False),
         ("KDJ_J", 50.0), ("KDJ_J回升", False), ("KDJ_J超卖", False),
         ("量能放大", False), ("量比", 1.0), ("看涨形态", []),
         ("ATR", 0.0), ("ATR_Pct", 5.0),
@@ -2663,9 +2611,6 @@ def calc_tech_indicators(full_pool, codes, trade_date):
         weekly_bullish = False
         weekly_macd_rising = False
         weekly_macd_v_reverse = False
-        monthly_macd_rising = False
-        monthly_ma_bullish = False
-        monthly_trend_resonance = False
         if not df_weekly.empty and code in df_weekly['ts_code'].values:
             wk = df_weekly[df_weekly['ts_code'] == code].sort_values('trade_date')
             if len(wk) >= 12:
@@ -2681,25 +2626,9 @@ def calc_tech_indicators(full_pool, codes, trade_date):
                 w_hist_prev2 = float(w_hist.iloc[-3]) if len(w_hist) >= 3 else w_hist_prev
                 weekly_macd_v_reverse = (len(w_hist) >= 3) and (w_hist_prev2 > w_hist_prev) and (w_hist_prev < w_hist_last)
                 weekly_bullish = bool(wma5 > wma10 and weekly_macd_rising)
-        if not df_monthly.empty and code in df_monthly['ts_code'].values:
-            mn = df_monthly[df_monthly['ts_code'] == code].sort_values('trade_date')
-            if len(mn) >= 12:
-                mc = mn['close'].values.astype(float)
-                m5 = pd.Series(mc).rolling(5).mean()
-                m10 = pd.Series(mc).rolling(10).mean()
-                mexp1 = pd.Series(mc).ewm(span=12, adjust=False).mean()
-                mexp2 = pd.Series(mc).ewm(span=26, adjust=False).mean()
-                mhist = (mexp1 - mexp2 - (mexp1 - mexp2).ewm(span=9, adjust=False).mean()) * 2
-                monthly_macd_rising = bool(float(mhist.iloc[-1]) > float(mhist.iloc[-2]))
-                monthly_ma_bullish = bool(float(m5.iloc[-1]) > float(m10.iloc[-1]) and float(mc[-1]) >= float(m5.iloc[-1]))
-                monthly_trend_resonance = bool(monthly_macd_rising and monthly_ma_bullish)
         full_pool[code]["周线共振"] = weekly_bullish
         full_pool[code]["周线MACD上升"] = weekly_macd_rising
         full_pool[code]["周线MACD_V型反转"] = weekly_macd_v_reverse
-        full_pool[code]["月线MACD上升"] = monthly_macd_rising
-        full_pool[code]["月线MA5>MA10"] = monthly_ma_bullish
-        full_pool[code]["月线趋势共振"] = monthly_trend_resonance
-
         if df_hist.empty or code not in df_hist['ts_code'].values:
             for fld, dflt in FALLBACK:
                 full_pool[code].setdefault(fld, dflt)
@@ -2805,31 +2734,24 @@ def calc_tech_indicators(full_pool, codes, trade_date):
 # 7. AI 事件推演选股（含联动警告）
 # ==========================================
 def check_period_resonance(stock):
-    """三周期共振：日线动量 + 周线趋势 + 月线趋势同向；日线需有看涨形态确认。
-    若仅满足日+周，则返回弱共振，便于评分层次化而非一刀切。
-    """
     daily_rising = stock.get("日线MACD上升", False)
     weekly_rising = stock.get("周线MACD上升", False)
-    monthly_rising = stock.get("月线MACD上升", False)
-    monthly_trend = stock.get("月线趋势共振", False)
+    if not daily_rising or not weekly_rising:
+        return False, []
     patterns = stock.get("看涨形态", [])
     valid_patterns = ["看涨吞没", "启明星", "刺穿线", "锤子线"]
     matched = [p for p in patterns if p in valid_patterns]
-    daily_weekly = bool(daily_rising and weekly_rising)
-    three_period = bool(daily_weekly and monthly_rising and monthly_trend)
-    # 日+周+日线看涨形态：作为次一级技术共振，不等同三周期共振。
-    two_period = bool(daily_weekly and matched)
-    return three_period, matched, two_period
-
+    if not matched:
+        return False, []
+    return True, matched
 
 def screen_technical_setups(final_pool):
     sector_groups = {}
     for stock in final_pool[:100]:
         tech_score   = 0
         tech_reasons = []
-        is_resonance, resonance_patterns, two_period_resonance = check_period_resonance(stock)
+        is_resonance, resonance_patterns = check_period_resonance(stock)
         stock["周期共振"] = is_resonance
-        stock["日周共振"] = two_period_resonance
         stock["共振形态"] = resonance_patterns
 
         h_last = stock.get("MACD_HIST_LAST", 0)
@@ -2878,17 +2800,13 @@ def screen_technical_setups(final_pool):
             base = min(max(pm.get(p, 2) for p in patterns) + (2 if len(patterns) > 1 else 0), 5)
             tech_score += base; tech_reasons.append(f"{'&'.join(patterns)}(+{base})")
 
-        three_period = stock.get("周期共振", False)
-        two_period = stock.get("日周共振", False)
-        if three_period:
-            tech_score = min(int(tech_score * 1.40), 40)
-            tech_reasons.append("🔥日周月三周期共振×1.40")
-        elif two_period:
-            tech_score = min(int(tech_score * 1.20), 40)
-            tech_reasons.append("✅日周共振×1.20")
+        weekly = stock.get("周线共振", False)
+        if weekly:
+            tech_score = min(int(tech_score * 1.25), 40)
+            tech_reasons.append("✅周日共振×1.25")
         elif tech_score > 0:
-            tech_score = int(tech_score * 0.55)
-            tech_reasons.append("⚠️未形成日周共振×0.55")
+            tech_score = int(tech_score * 0.6)
+            tech_reasons.append("⚠️仅日线×0.6")
 
         if stock.get("MACD_V型反转", False):
             tech_score += 8
@@ -2896,9 +2814,6 @@ def screen_technical_setups(final_pool):
         if stock.get("周线MACD_V型反转", False):
             tech_score += 8
             tech_reasons.append("周线MACD柱线V型反转(+8)")
-        if stock.get("月线趋势共振", False):
-            tech_score += 8
-            tech_reasons.append("月线趋势确认(+8)")
 
         stock["技术评分"] = min(tech_score, 40)
 
@@ -3029,8 +2944,6 @@ def generate_ai_report(pool_data, macro_news_text, macro_data_text, us_sector_te
             "估值结论": d.get("估值结论", "数据不足"),
             "技术信号": d.get("技术信号", []),
             "周线共振": "🟢是" if d.get("周线共振") else "🔴否",
-            "月线共振": "🟢是" if d.get("月线趋势共振") else "🔴否",
-            "三周期共振": "🔥是" if d.get("周期共振") else "否",
             "MACD金叉": "✅是" if d.get("MACD金叉") else "否",
             "KDJ_J": d.get("KDJ_J", "N/A"), "量比": d.get("量比", "N/A"),
             "看涨形态": d.get("看涨形态", []),
@@ -3127,7 +3040,7 @@ def generate_ai_report(pool_data, macro_news_text, macro_data_text, us_sector_te
     【核心工作流程】（基于回测验证，严格执行）：
     第一步（新闻定方向）：从宏观新闻中提炼出今日1-2条最强产业链主线。必须优先使用[🔥今日最新]和[📰今日]标签的新闻作为主线依据，[📄昨日]新闻仅作为辅助验证，[📑前日]新闻不得作为主线依据。
     第二步（板块锁定）：只在你提炼出的主线板块中寻找标的。严禁跳出主线去买"技术面好但没新闻"的票。
-    第三步（技术选个股）：在主线板块内，**必须优先选择【日周月三周期共振】为 True 的标的**（代码自动标记：日线MACD↑ + 周线MACD↑ + 月线趋势确认）。日线看涨形态作为短线入场确认，不再作为月线共振的必选条件。若无三周期共振，再选择日周共振或技术评分≥20的标的，并明确写明共振层级。
+    第三步（技术选个股）：在主线板块内，**必须优先选择【周期共振】为 True 的标的**（即代码已自动标记满足：日线MACD↑ + 周线MACD↑ + 看涨吞没/启明星/刺穿线/锤子线）。
     第四步（评分确认）：如果存在周期共振标的，直接将其排入Top1-5，除非该标的有重大负面新闻。若无共振标的，再退而求其次选择技术评分≥20的票，但须在报告中明确警示"无共振信号"。
     第五步（新闻权重校验）：对每只入选Top1-5的标的，检查其个股新闻的时效标签。如果主要利好来自[📑前日]或[📄昨日]且个股已大涨，必须降级至观察池或排除。
 
